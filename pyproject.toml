@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "claude-session-db"
+version = "0.1.0"
+description = "Parse and analyze Claude Code session data in SQLite"
+requires-python = ">=3.10"
+dependencies = ["click>=8.0"]
+
+[project.optional-dependencies]
+vd = ["visidata>=3.0"]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[project.scripts]
+csd = "claude_session_db.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["claude_session_db"]

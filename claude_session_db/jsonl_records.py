@@ -291,6 +291,8 @@ class Usage:
     cache_creation: Optional[CacheCreation] = None
     service_tier: str = "standard"
     inference_geo: str = "not_available"
+    speed: Optional[str] = None
+    raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Usage":
@@ -303,7 +305,17 @@ class Usage:
             cache_creation=CacheCreation.from_dict(cache_data) if cache_data else None,
             service_tier=data.get("service_tier", "standard"),
             inference_geo=data.get("inference_geo", "not_available"),
+            speed=data.get("speed"),
+            raw=data,
         )
+
+    @property
+    def ephemeral_5m_tokens(self) -> int:
+        return self.cache_creation.ephemeral_5m_input_tokens if self.cache_creation else 0
+
+    @property
+    def ephemeral_1h_tokens(self) -> int:
+        return self.cache_creation.ephemeral_1h_input_tokens if self.cache_creation else 0
 
     @property
     def total_input_tokens(self) -> int:
@@ -364,6 +376,24 @@ class AssistantMessage:
     request_id: Optional[str] = None
     is_api_error_message: bool = False
     error: Optional[str] = None
+
+    # Context / threading (added 2026-06 re-audit)
+    entrypoint: Optional[str] = None
+    agent_id: Optional[str] = None
+
+    # Attribution system (NEW — which agent/skill/mcp/plugin produced this message)
+    attribution_agent: Optional[str] = None
+    attribution_skill: Optional[str] = None
+    attribution_mcp_server: Optional[str] = None
+    attribution_mcp_tool: Optional[str] = None
+    attribution_plugin: Optional[str] = None
+
+    # Variable-shape / escape-hatch payloads
+    stop_details: Optional[Any] = None
+    diagnostics: Optional[Any] = None
+    forked_from: Optional[dict] = None
+    api_error_status: Optional[int] = None
+    raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def thinking_blocks(self) -> list[ThinkingBlock]:
@@ -439,6 +469,18 @@ class AssistantMessage:
             request_id=data.get("requestId"),
             is_api_error_message=data.get("isApiErrorMessage", False),
             error=data.get("error"),
+            entrypoint=data.get("entrypoint"),
+            agent_id=data.get("agentId"),
+            attribution_agent=data.get("attributionAgent"),
+            attribution_skill=data.get("attributionSkill"),
+            attribution_mcp_server=data.get("attributionMcpServer"),
+            attribution_mcp_tool=data.get("attributionMcpTool"),
+            attribution_plugin=data.get("attributionPlugin"),
+            stop_details=message.get("stop_details"),
+            diagnostics=message.get("diagnostics"),
+            forked_from=data.get("forkedFrom"),
+            api_error_status=data.get("apiErrorStatus"),
+            raw=data,
         )
 
     def to_dict(self) -> dict:
@@ -513,6 +555,14 @@ class UserMessage:
     is_compact_summary: bool = False
     is_visible_in_transcript_only: bool = False
     source_tool_use_id: Optional[str] = None
+
+    # Context / threading (added 2026-06 re-audit)
+    entrypoint: Optional[str] = None
+    prompt_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    origin: Optional[Any] = None
+    forked_from: Optional[dict] = None
+    raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def is_direct_prompt(self) -> bool:
@@ -620,6 +670,12 @@ class UserMessage:
             is_compact_summary=data.get("isCompactSummary", False),
             is_visible_in_transcript_only=data.get("isVisibleInTranscriptOnly", False),
             source_tool_use_id=data.get("sourceToolUseID"),
+            entrypoint=data.get("entrypoint"),
+            prompt_id=data.get("promptId"),
+            agent_id=data.get("agentId"),
+            origin=data.get("origin"),
+            forked_from=data.get("forkedFrom"),
+            raw=data,
         )
 
     def to_dict(self) -> dict:
@@ -809,6 +865,11 @@ class SystemSubtype(Enum):
     LOCAL_COMMAND = "local_command"
     API_ERROR = "api_error"
     STOP_HOOK_SUMMARY = "stop_hook_summary"
+    # Added 2026-06 re-audit
+    AWAY_SUMMARY = "away_summary"
+    BRIDGE_STATUS = "bridge_status"
+    SCHEDULED_TASK_FIRE = "scheduled_task_fire"
+    INFORMATIONAL = "informational"
 
 
 @dataclass
@@ -913,9 +974,13 @@ class SystemMessage:
 
     # Subtype-specific fields
     duration_ms: Optional[int] = None  # turn_duration
+    message_count: Optional[int] = None  # turn_duration (NEW)
+    url: Optional[str] = None  # bridge_status (NEW)
     compact_metadata: Optional[CompactMetadata] = None  # compact_boundary
     microcompact_metadata: Optional[dict] = None  # microcompact_boundary (raw)
     logical_parent_uuid: Optional[str] = None  # compact_boundary
+    entrypoint: Optional[str] = None
+    raw: dict = field(default_factory=dict, repr=False)
 
     # API error fields
     error_info: Optional[ApiErrorInfo] = None
@@ -1001,6 +1066,10 @@ class SystemMessage:
             level=data.get("level"),
             content=data.get("content"),
             duration_ms=data.get("durationMs"),
+            message_count=data.get("messageCount"),
+            url=data.get("url"),
+            entrypoint=data.get("entrypoint"),
+            raw=data,
             compact_metadata=compact_meta,
             microcompact_metadata=data.get("microcompactMetadata"),
             logical_parent_uuid=data.get("logicalParentUuid"),
@@ -1498,6 +1567,146 @@ class ProgressEvent:
         }
 
 
+# =============================================================================
+# Attachment records (NEW 2026-06) — injected context attachments
+# =============================================================================
+
+
+@dataclass
+class AttachmentRecord:
+    """An `attachment` record: a context attachment injected into the thread.
+
+    Conversation-flow record (has uuid/parentUuid/timestamp). The `attachment`
+    payload is variable-shape (e.g. `deferred_tools_delta`) — stored as JSONB.
+    """
+
+    uuid: str
+    session_id: str
+    parent_uuid: Optional[str]
+    timestamp: Optional[datetime]
+    attachment_type: Optional[str]
+    attachment: Any
+    cwd: str = ""
+    git_branch: str = ""
+    version: str = ""
+    is_sidechain: bool = False
+    entrypoint: Optional[str] = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttachmentRecord":
+        ts = data.get("timestamp")
+        attachment = data.get("attachment")
+        att_type = attachment.get("type") if isinstance(attachment, dict) else None
+        return cls(
+            uuid=data.get("uuid", ""),
+            session_id=data.get("sessionId", ""),
+            parent_uuid=data.get("parentUuid"),
+            timestamp=datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None,
+            attachment_type=att_type,
+            attachment=attachment,
+            cwd=data.get("cwd", ""),
+            git_branch=data.get("gitBranch", ""),
+            version=data.get("version", ""),
+            is_sidechain=data.get("isSidechain", False),
+            entrypoint=data.get("entrypoint"),
+            raw=data,
+        )
+
+
+# =============================================================================
+# Session-scoped metadata records (NEW 2026-06) — sessionId-keyed, latest-wins
+# =============================================================================
+
+
+@dataclass
+class SessionMetaRecord:
+    """A lightweight session-scoped metadata record.
+
+    Covers ai-title, custom-title, last-prompt, permission-mode, mode,
+    bridge-session, agent-name. These are not part of the conversation thread;
+    they set attributes on the session (latest-wins). `kind` is the record type,
+    `value` is the primary scalar, and `raw` keeps the full payload.
+    """
+
+    kind: str  # record `type`
+    session_id: str
+    value: Optional[str]  # primary scalar (title text, mode, etc.)
+    raw: dict = field(default_factory=dict, repr=False)
+
+    # Field that holds the primary scalar per record type
+    _VALUE_FIELDS = {
+        "ai-title": "aiTitle",
+        "custom-title": "customTitle",
+        "last-prompt": "lastPrompt",
+        "permission-mode": "permissionMode",
+        "mode": "mode",
+        "bridge-session": "bridgeSessionId",
+        "agent-name": "agentName",
+    }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SessionMetaRecord":
+        kind = data.get("type", "")
+        value_field = cls._VALUE_FIELDS.get(kind)
+        value = data.get(value_field) if value_field else None
+        return cls(
+            kind=kind,
+            session_id=data.get("sessionId", ""),
+            value=value,
+            raw=data,
+        )
+
+
+@dataclass
+class PrLinkRecord:
+    """A `pr-link` record: a PR opened during the session."""
+
+    session_id: str
+    pr_number: Optional[int]
+    pr_url: Optional[str]
+    pr_repository: Optional[str]
+    timestamp: Optional[datetime]
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "PrLinkRecord":
+        ts = data.get("timestamp")
+        return cls(
+            session_id=data.get("sessionId", ""),
+            pr_number=data.get("prNumber"),
+            pr_url=data.get("prUrl"),
+            pr_repository=data.get("prRepository"),
+            timestamp=datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None,
+            raw=data,
+        )
+
+
+@dataclass
+class AgentLifecycleRecord:
+    """A `started` or `result` agent-lifecycle record.
+
+    `started`: {key, agentId}. `result`: {key, agentId, result}. The `result`
+    payload is arbitrary JSON (stored as JSONB).
+    """
+
+    kind: str  # "started" or "result"
+    key: str
+    agent_id: Optional[str]
+    result: Any = None
+    raw: dict = field(default_factory=dict, repr=False)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AgentLifecycleRecord":
+        return cls(
+            kind=data.get("type", ""),
+            key=data.get("key", ""),
+            agent_id=data.get("agentId"),
+            result=data.get("result"),
+            raw=data,
+        )
+
+
 class JSONLParser:
     """Parser for JSONL session transcript files."""
 
@@ -1539,6 +1748,17 @@ class JSONLParser:
             "summary": [],
             "queue_operation": [],
             "file_history": [],
+            "attachment": [],
+            "session_meta": [],   # ai-title, custom-title, last-prompt, mode, etc.
+            "pr_link": [],
+            "agent_lifecycle": [],  # started, result
+            "unknown": [],        # record types we don't model (kept as raw line nums)
+        }
+
+        # Record types folded into session_meta via SessionMetaRecord
+        _META_TYPES = {
+            "ai-title", "custom-title", "last-prompt",
+            "permission-mode", "mode", "bridge-session", "agent-name",
         }
 
         with open(file_path) as f:
@@ -1564,6 +1784,16 @@ class JSONLParser:
                         records["queue_operation"].append(QueueOperationMessage.from_dict(data))
                     elif record_type == "file-history-snapshot":
                         records["file_history"].append(FileHistorySnapshot.from_dict(data))
+                    elif record_type == "attachment":
+                        records["attachment"].append(AttachmentRecord.from_dict(data))
+                    elif record_type in _META_TYPES:
+                        records["session_meta"].append(SessionMetaRecord.from_dict(data))
+                    elif record_type == "pr-link":
+                        records["pr_link"].append(PrLinkRecord.from_dict(data))
+                    elif record_type in ("started", "result"):
+                        records["agent_lifecycle"].append(AgentLifecycleRecord.from_dict(data))
+                    else:
+                        records["unknown"].append((line_num, record_type))
 
                 except json.JSONDecodeError as e:
                     print(f"Warning: Invalid JSON at {file_path}:{line_num}: {e}")

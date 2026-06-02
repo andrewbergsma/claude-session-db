@@ -234,15 +234,20 @@ CREATE TABLE IF NOT EXISTS tool_results (
     tldr         TEXT,                   -- nullable derived summary (archive plane: null)
     char_count   INTEGER,
     is_error     BOOLEAN DEFAULT false,
+    error_class  TEXT,                   -- derived error taxonomy (null unless is_error); see transcript_analyzer.classify_error
     block_count  INTEGER DEFAULT 1,
     tool_use_result JSONB,               -- client-side structured enrichment
     from_overflow_file BOOLEAN DEFAULT false,
     source_file  TEXT NOT NULL,
     source_line  INTEGER
 );
+-- Migration (idempotent): add error_class to a pre-existing tool_results table
+-- before any index references it.
+ALTER TABLE tool_results ADD COLUMN IF NOT EXISTS error_class TEXT;
 CREATE INDEX IF NOT EXISTS idx_tr_message ON tool_results(message_uuid);
 CREATE INDEX IF NOT EXISTS idx_tr_tool_use ON tool_results(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_tr_error ON tool_results(is_error);
+CREATE INDEX IF NOT EXISTS idx_tr_error_class ON tool_results(error_class) WHERE error_class IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tr_source_file ON tool_results(source_file);
 
 CREATE TABLE IF NOT EXISTS attachments (
@@ -412,9 +417,15 @@ WHERE block_type = 'tool_use'
 GROUP BY tool_name, tool_type, mcp_server
 ORDER BY use_count DESC;
 
--- Errors
+-- Errors: every is_error tool_result, classified (error_class) + tool + preview.
+-- parallel_cancelled is cascade noise (sibling calls killed when one is rejected),
+-- flagged is_noise so mining queries can exclude it without re-deriving the taxonomy.
+-- DROP first: column list changed shape, which CREATE OR REPLACE cannot do.
+DROP VIEW IF EXISTS v_error_summary CASCADE;
 CREATE OR REPLACE VIEW v_error_summary AS
 SELECT tr.session_id, cb.tool_name,
+       coalesce(tr.error_class, 'unknown') AS error_class,
+       (tr.error_class = 'parallel_cancelled') AS is_noise,
        left(tr.content_text, 200) AS error_preview,
        m.ts
 FROM tool_results tr
@@ -422,6 +433,49 @@ JOIN messages m ON tr.message_uuid = m.uuid
 LEFT JOIN content_blocks cb ON tr.tool_use_id = cb.tool_use_id
 WHERE tr.is_error
 ORDER BY m.ts DESC;
+
+-- Error taxonomy rollup: which failure modes recur, on which tools, how widely.
+CREATE OR REPLACE VIEW v_error_by_class AS
+SELECT coalesce(tr.error_class, 'unknown') AS error_class,
+       cb.tool_name,
+       count(*) AS hits,
+       count(DISTINCT tr.session_id) AS sessions,
+       max(m.ts) AS last_seen
+FROM tool_results tr
+JOIN messages m ON tr.message_uuid = m.uuid
+LEFT JOIN content_blocks cb ON tr.tool_use_id = cb.tool_use_id
+WHERE tr.is_error
+GROUP BY 1, 2
+ORDER BY hits DESC;
+
+-- Error recovery narrative: each real error paired with the agent's next assistant
+-- turn (what it said/did to recover) — the "what broke -> how fixed" signal a
+-- session summary needs. Excludes parallel_cancelled cascade noise.
+CREATE OR REPLACE VIEW v_error_recovery AS
+SELECT e.session_id, e.ts AS error_ts, e.tool_name, e.error_class,
+       left(e.error_preview, 160) AS error_preview,
+       a.next_ts AS recovery_ts,
+       left(a.recovery_text, 240) AS recovery_narration
+FROM (
+    SELECT tr.session_id, m.ts, cb.tool_name,
+           coalesce(tr.error_class, 'unknown') AS error_class,
+           tr.content_text AS error_preview
+    FROM tool_results tr
+    JOIN messages m ON tr.message_uuid = m.uuid
+    LEFT JOIN content_blocks cb ON tr.tool_use_id = cb.tool_use_id
+    WHERE tr.is_error AND tr.error_class IS DISTINCT FROM 'parallel_cancelled'
+) e
+LEFT JOIN LATERAL (
+    SELECT m2.ts AS next_ts,
+           string_agg(cb2.content, ' ' ORDER BY cb2.block_index) AS recovery_text
+    FROM messages m2
+    JOIN content_blocks cb2 ON cb2.message_uuid = m2.uuid AND cb2.block_type = 'text'
+    WHERE m2.session_id = e.session_id AND m2.role = 'assistant' AND m2.ts > e.ts
+    GROUP BY m2.ts
+    ORDER BY m2.ts
+    LIMIT 1
+) a ON true
+ORDER BY e.ts DESC;
 
 -- Daily token spend
 CREATE OR REPLACE VIEW v_daily_usage AS
@@ -643,7 +697,7 @@ class SessionArchive:
 
     def insert_tool_results(self, rows: list[dict]) -> None:
         cols = ["message_uuid", "session_id", "tool_use_id", "content_text", "tldr",
-                "char_count", "is_error", "block_count", "tool_use_result",
+                "char_count", "is_error", "error_class", "block_count", "tool_use_result",
                 "from_overflow_file", "source_file", "source_line"]
         self._batch_insert("tool_results", cols, rows, {"tool_use_result"})
 

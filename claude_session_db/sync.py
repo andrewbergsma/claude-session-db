@@ -29,6 +29,7 @@ from .jsonl_records import (
 )
 from .postgres import SessionArchive, resolve_dsn
 from .subagent import load_external_tool_results
+from .transcript_analyzer import classify_error
 
 
 def decode_project_path(encoded: str) -> str:
@@ -210,11 +211,21 @@ class SessionSync:
         pr_rows: list[dict] = []
         agent_rows: list[dict] = []
 
+        # tool_use_id -> tool_name, so error results can be classified with the
+        # correct tool (classify_error needs the name to suppress the phantom_tool
+        # false-positive on Bash output).
+        tool_name_by_id: dict[str, str] = {}
+        for msg in records.get("assistant", []):
+            for blk in msg.content_blocks:
+                if isinstance(blk, ToolUseBlock):
+                    tool_name_by_id[blk.id] = blk.name
+
         for msg in records.get("user", []):
             msg_rows.append(self._user_row(msg, owning_session_id, source_file))
             for blk in msg.tool_result_blocks:
                 tr_rows.append(self._tool_result_row(msg, blk, owning_session_id,
-                                                     source_file, overflow, stats))
+                                                     source_file, overflow, stats,
+                                                     tool_name_by_id))
 
         for msg in records.get("assistant", []):
             msg_rows.append(self._assistant_row(msg, owning_session_id, source_file))
@@ -394,7 +405,8 @@ class SessionSync:
         return row
 
     def _tool_result_row(self, msg: UserMessage, blk, owning_session_id: str,
-                        source_file: str, overflow: dict[str, str], stats: SyncStats) -> dict:
+                        source_file: str, overflow: dict[str, str], stats: SyncStats,
+                        tool_name_by_id: dict[str, str]) -> dict:
         content = blk.content_text
         from_overflow = False
         # Prefer the verbatim overflow file when present (the largest results)
@@ -403,6 +415,11 @@ class SessionSync:
             content = full
             from_overflow = True
             stats.overflow_results += 1
+        is_error = bool(blk.is_error)
+        error_class = (
+            classify_error(tool_name_by_id.get(blk.tool_use_id, ""), content)
+            if is_error else None
+        )
         return {
             "message_uuid": msg.uuid,
             "session_id": msg.session_id or owning_session_id,
@@ -410,7 +427,8 @@ class SessionSync:
             "content_text": content,
             "tldr": None,
             "char_count": len(content),
-            "is_error": bool(blk.is_error),
+            "is_error": is_error,
+            "error_class": error_class,
             "block_count": len(blk.content_blocks),
             "tool_use_result": msg.tool_use_result,
             "from_overflow_file": from_overflow,

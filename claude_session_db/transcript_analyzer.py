@@ -71,17 +71,31 @@ class SessionStats:
 ERROR_PATTERNS = [
     (re.compile(r"session not found", re.I), "mcp_session_timeout"),
     (re.compile(r"token expired|re-authorization", re.I), "auth_expired"),
-    (re.compile(r"inputvalidationerror", re.I), "schema_violation"),
+    # Spaced form ("Input validation error") is what kmcp actually emits; the old
+    # no-space regex missed every live case.
+    (re.compile(r"input ?validation ?error", re.I), "schema_violation"),
     (re.compile(r"cancelled: parallel tool call", re.I), "parallel_cancelled"),
     (re.compile(r"blocked:", re.I), "hook_blocked"),
+    # Read refusing an oversized file ("exceeds maximum allowed tokens/size") —
+    # high-frequency and cleanly recoverable via offset/limit.
+    (re.compile(r"exceeds maximum allowed (tokens|size)", re.I), "read_too_large"),
     (re.compile(r"timed out|the operation timed out", re.I), "timeout"),
     (re.compile(r"no such tool available", re.I), "phantom_tool"),
     (re.compile(r"file has not been read yet", re.I), "edit_without_read"),
     (re.compile(r"file has been modified since read", re.I), "edit_stale_read"),
     (re.compile(r"file does not exist|no such file", re.I), "file_not_found"),
+    # Shell command-not-found (exit 127) — distinct from a phantom MCP tool.
+    (re.compile(r"command not found|exit code 127", re.I), "command_not_found"),
+    # MCP/entry lookup miss (kmcp "No entry found", JSON "Not found") — distinct
+    # from a filesystem file_not_found.
+    (re.compile(r"no entry found|\"not found\"", re.I), "not_found"),
+    (re.compile(r"already exists", re.I), "entry_exists"),
     (re.compile(r"user doesn.t want to proceed|was rejected", re.I), "user_rejected"),
     (re.compile(r"permission denied", re.I), "permission_denied"),
     (re.compile(r"connection refused|connection reset", re.I), "connection_error"),
+    # Generic non-zero Bash exit — LAST, so a more specific signal in the body
+    # (file_not_found, command_not_found, etc.) always wins first.
+    (re.compile(r"\bexit code [1-9]", re.I), "bash_nonzero_exit"),
 ]
 
 

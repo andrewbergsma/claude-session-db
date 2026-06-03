@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 3  # Gen3: Postgres archive
+SCHEMA_VERSION = 4  # Gen3 archive + token-cost pricing tables & cost views
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -357,6 +357,47 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_at_agent ON agent_tasks(agent_id);
 CREATE INDEX IF NOT EXISTS idx_at_source_file ON agent_tasks(source_file);
+
+-- ---------------------------------------------------------------------------
+-- Pricing reference data (the only NON-session-fact tables: list prices, not
+-- transcript data). Token quantities live in `messages`; these supply the $/tok
+-- rates so the cost views can turn tokens into dollars. Seeded idempotently with
+-- ON CONFLICT DO NOTHING so re-running initialize() never clobbers manual rate
+-- edits — update a rate by editing the row, not the seed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS model_pricing (
+    model_pattern       TEXT PRIMARY KEY,   -- longest LIKE-prefix match wins vs messages.model
+    input_per_mtok      NUMERIC NOT NULL,   -- USD per 1M base (uncached) input tokens
+    output_per_mtok     NUMERIC NOT NULL,   -- USD per 1M output tokens
+    cache_write_5m_mult NUMERIC NOT NULL DEFAULT 1.25,  -- 5m cache write = 1.25x base input
+    cache_write_1h_mult NUMERIC NOT NULL DEFAULT 2.0,   -- 1h cache write = 2.0x base input
+    cache_read_mult     NUMERIC NOT NULL DEFAULT 0.10,  -- cache read = 0.1x base input (any TTL)
+    effective_from      DATE,
+    notes               TEXT
+);
+
+CREATE TABLE IF NOT EXISTS service_tier_pricing (
+    service_tier TEXT PRIMARY KEY,          -- matches messages.service_tier
+    multiplier   NUMERIC NOT NULL DEFAULT 1.0,  -- scales the whole row's cost
+    notes        TEXT
+);
+
+-- Seed: Anthropic list prices (USD/MTok). VERIFY against current pricing; the
+-- view applies flat per-model rates and does NOT model the >200K-input
+-- long-context premium (e.g. Sonnet 1M) — refine here if that matters.
+INSERT INTO model_pricing (model_pattern, input_per_mtok, output_per_mtok, effective_from, notes) VALUES
+    ('claude-opus-4',     15, 75, '2025-01-01', 'Opus 4.x list price'),
+    ('claude-sonnet-4',    3, 15, '2025-01-01', 'Sonnet 4.x base (<=200K input)'),
+    ('claude-haiku-4',     1,  5, '2025-01-01', 'Haiku 4.5 list price'),
+    ('claude-3-5-haiku', 0.80, 4, '2024-11-01', 'Haiku 3.5 list price'),
+    ('claude-3-opus',     15, 75, '2024-02-01', 'Opus 3 list price')
+ON CONFLICT (model_pattern) DO NOTHING;
+
+INSERT INTO service_tier_pricing (service_tier, multiplier, notes) VALUES
+    ('standard', 1.0, 'default interactive tier'),
+    ('priority', 1.0, 'same per-token list price; committed throughput billed separately'),
+    ('batch',    0.5, 'Batch API = 50% of standard')
+ON CONFLICT (service_tier) DO NOTHING;
 """
 
 
@@ -509,6 +550,98 @@ FROM projects p
 LEFT JOIN sessions s ON p.project_id = s.project_id
 GROUP BY p.project_id, p.project_name, p.decoded_path
 ORDER BY last_activity DESC NULLS LAST;
+
+-- ---------------------------------------------------------------------------
+-- Token cost (the caching lens). Anthropic bills the prompt as three disjoint
+-- buckets — base input (1x), cache writes (1.25x for 5m / 2.0x for 1h), cache
+-- reads (0.1x) — plus output. v_message_cost is the reusable per-message base
+-- that joins each assistant message to its model + tier rates; the rollups just
+-- sum it. Rates per 1M tokens, so every term is divided by 1e6.
+--   * unpriced rows (no model_pricing match, e.g. non-Anthropic models) yield
+--     NULL cost terms (sum() skips them) and are counted via `unpriced` so the
+--     rollups never silently undercount.
+--   * writes recorded only as a lump cache_creation (legacy rows lacking the
+--     ephemeral 5m/1h split) are priced at the 5m rate (the API default TTL).
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_message_cost AS
+WITH base AS (
+    SELECT
+        m.uuid, m.session_id, m.ts, m.model, m.service_tier,
+        coalesce(m.input_tokens, 0)        AS input_tokens,
+        coalesce(m.output_tokens, 0)       AS output_tokens,
+        coalesce(m.cache_read_tokens, 0)   AS cache_read_tokens,
+        coalesce(m.ephemeral_5m_tokens, 0) AS write_5m_tokens,
+        coalesce(m.ephemeral_1h_tokens, 0) AS write_1h_tokens,
+        greatest(coalesce(m.cache_creation_tokens, 0)
+                 - coalesce(m.ephemeral_5m_tokens, 0)
+                 - coalesce(m.ephemeral_1h_tokens, 0), 0) AS write_untiered_tokens,
+        pr.input_per_mtok, pr.output_per_mtok,
+        pr.cache_write_5m_mult, pr.cache_write_1h_mult, pr.cache_read_mult,
+        coalesce(st.multiplier, 1.0) AS tier_mult
+    FROM messages m
+    LEFT JOIN LATERAL (
+        SELECT mp.input_per_mtok, mp.output_per_mtok,
+               mp.cache_write_5m_mult, mp.cache_write_1h_mult, mp.cache_read_mult
+        FROM model_pricing mp
+        WHERE m.model LIKE mp.model_pattern || '%'
+        ORDER BY length(mp.model_pattern) DESC   -- most specific pattern wins
+        LIMIT 1
+    ) pr ON true
+    LEFT JOIN service_tier_pricing st ON st.service_tier = m.service_tier
+    WHERE m.role = 'assistant' AND m.model IS NOT NULL
+)
+SELECT
+    uuid, session_id, ts, model, service_tier,
+    input_tokens, output_tokens, cache_read_tokens,
+    write_5m_tokens, write_1h_tokens, write_untiered_tokens,
+    (input_per_mtok IS NULL) AS unpriced,
+    round(tier_mult * input_per_mtok  * input_tokens / 1e6, 6) AS input_cost,
+    round(tier_mult * input_per_mtok  * cache_write_5m_mult
+          * (write_5m_tokens + write_untiered_tokens) / 1e6, 6) AS cache_write_5m_cost,
+    round(tier_mult * input_per_mtok  * cache_write_1h_mult * write_1h_tokens / 1e6, 6) AS cache_write_1h_cost,
+    round(tier_mult * input_per_mtok  * cache_read_mult * cache_read_tokens / 1e6, 6) AS cache_read_cost,
+    round(tier_mult * output_per_mtok * output_tokens / 1e6, 6) AS output_cost,
+    round(tier_mult * (
+          input_per_mtok  * input_tokens
+        + input_per_mtok  * cache_write_5m_mult * (write_5m_tokens + write_untiered_tokens)
+        + input_per_mtok  * cache_write_1h_mult * write_1h_tokens
+        + input_per_mtok  * cache_read_mult * cache_read_tokens
+        + output_per_mtok * output_tokens
+    ) / 1e6, 6) AS total_cost
+FROM base;
+
+-- Cost by model, split by caching lens (the headline view).
+CREATE OR REPLACE VIEW v_token_cost_by_model AS
+SELECT model,
+       count(*) AS messages,
+       count(*) FILTER (WHERE unpriced) AS unpriced_messages,
+       sum(input_tokens) AS input_tokens,
+       sum(write_5m_tokens + write_untiered_tokens) AS cache_write_5m_tokens,
+       sum(write_1h_tokens) AS cache_write_1h_tokens,
+       sum(cache_read_tokens) AS cache_read_tokens,
+       sum(output_tokens) AS output_tokens,
+       round(sum(input_cost), 4)           AS input_cost,
+       round(sum(cache_write_5m_cost), 4)  AS cache_write_5m_cost,
+       round(sum(cache_write_1h_cost), 4)  AS cache_write_1h_cost,
+       round(sum(cache_read_cost), 4)      AS cache_read_cost,
+       round(sum(output_cost), 4)          AS output_cost,
+       round(sum(total_cost), 4)           AS total_cost
+FROM v_message_cost
+GROUP BY model
+ORDER BY total_cost DESC NULLS LAST;
+
+-- Daily spend (caching lens), USD.
+CREATE OR REPLACE VIEW v_token_cost_daily AS
+SELECT date_trunc('day', ts)::date AS day,
+       count(DISTINCT session_id) AS sessions,
+       round(sum(input_cost), 4)                              AS input_cost,
+       round(sum(cache_write_5m_cost + cache_write_1h_cost), 4) AS cache_write_cost,
+       round(sum(cache_read_cost), 4)                         AS cache_read_cost,
+       round(sum(output_cost), 4)                             AS output_cost,
+       round(sum(total_cost), 4)                              AS total_cost
+FROM v_message_cost
+GROUP BY 1
+ORDER BY day DESC;
 """
 
 # Tables cleared per source_file before re-inserting that file's rows

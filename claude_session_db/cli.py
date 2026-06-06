@@ -49,6 +49,72 @@ def ingest(ctx: click.Context, rebuild: bool, force: bool, quiet: bool) -> None:
     click.echo(stats)
 
 
+# Idle threshold (minutes) above which a session is treated as quiesced ("done").
+# Validated 2026-06-06: at 10m only 1.03% of genuine intra-session pauses exceed
+# it. See claudecode:task/claude-session-db/validate/quiescence-threshold.
+QUIESCE_MIN_DEFAULT = 10
+
+_SWEEP_HEAD_SQL = """
+    WITH latest AS (
+        SELECT DISTINCT ON (tr.session_id)
+               tr.session_id, tr.tldr, tr.is_error
+        FROM tool_results tr
+        JOIN messages m ON m.uuid = tr.message_uuid
+        WHERE NOT m.is_sidechain
+        ORDER BY tr.session_id, m.ts DESC NULLS LAST
+    )
+    SELECT o.project_name,
+           to_char(o.modified_at, 'HH24:MI') AS at,
+           round(extract(epoch FROM (now() - o.modified_at)) / 60)::int AS idle_min,
+           o.message_count AS msgs,
+           left(coalesce(latest.tldr, o.first_prompt, ''), 80) AS doing,
+           coalesce(latest.is_error, false) AS is_error
+    FROM v_session_overview o
+    LEFT JOIN latest ON latest.session_id = o.session_id
+    WHERE NOT o.is_subagent
+      AND o.modified_at > now() - make_interval(mins => %s)
+    ORDER BY o.modified_at DESC
+"""
+
+
+@main.command()
+@click.option("--window", type=int, default=120,
+              help="Minutes: show sessions modified within this window (default 120).")
+@click.option("--idle", type=int, default=QUIESCE_MIN_DEFAULT,
+              help=f"Minutes idle after which a session is 'quiesced' (default {QUIESCE_MIN_DEFAULT}).")
+@click.option("--no-ingest", is_flag=True, help="Skip ingest; observe only.")
+@click.option("-q", "--quiet", is_flag=True, help="Suppress per-file ingest progress.")
+@click.pass_context
+def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bool) -> None:
+    """Ingest fresh sessions, then print a live status head of active sessions.
+
+    Phases 1-3 of the live-session sweep: incremental ingest (which now also
+    derives the tldr/error_class siblings at write time), then a read-only
+    observability head — one line per recently-active session, labelled live vs
+    quiesced and carrying the tldr of its latest tool activity. The phase-4
+    roll-up (LLM summaries) is intentionally NOT wired here.
+    """
+    dsn = ctx.obj["dsn"]
+    if not no_ingest:
+        sync = SessionSync(dsn=dsn, verbose=not quiet)
+        stats = sync.sync_all()
+        if not quiet:
+            click.echo(stats)
+    with SessionArchive(dsn) as a:
+        rows = a.query(_SWEEP_HEAD_SQL, (window,))
+    if not rows:
+        click.echo(f"No sessions active in the last {window} min.")
+        return
+    click.echo(f"\nActive sessions (last {window} min · idle>{idle}m = quiesced):")
+    for r in rows:
+        idle_min = int(r["idle_min"] or 0)
+        state = "·done" if idle_min >= idle else "live "
+        err = " [ERR]" if r["is_error"] else ""
+        click.echo(f"  {state} {r['at']} {idle_min:>4}m  "
+                   f"{str(r['project_name'] or ''):<18.18} {r['msgs'] or 0:>4}msg  "
+                   f"{r['doing']}{err}")
+
+
 @main.command()
 @click.pass_context
 def stats(ctx: click.Context) -> None:

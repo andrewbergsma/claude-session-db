@@ -29,6 +29,7 @@ from .jsonl_records import (
 )
 from .postgres import SessionArchive, resolve_dsn
 from .subagent import load_external_tool_results
+from .tool_tldr import tldr_result
 from .transcript_analyzer import classify_error
 
 
@@ -420,12 +421,15 @@ class SessionSync:
             classify_error(tool_name_by_id.get(blk.tool_use_id, ""), content)
             if is_error else None
         )
+        # Phase-2 derive-at-ingest: the free heuristic tldr (zero model calls).
+        # The hybrid Haiku route for structured/multi-line-error bodies is a
+        # later layer; see claudecode:design/session-archive-and-recompact.
         return {
             "message_uuid": msg.uuid,
             "session_id": msg.session_id or owning_session_id,
             "tool_use_id": blk.tool_use_id,
             "content_text": content,
-            "tldr": None,
+            "tldr": tldr_result(content, is_error=is_error, error_class=error_class),
             "char_count": len(content),
             "is_error": is_error,
             "error_class": error_class,

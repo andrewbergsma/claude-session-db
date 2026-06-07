@@ -116,14 +116,18 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
 
 
 @main.command()
+@click.option("--exact", is_flag=True,
+              help="Exact count(*) per table (full scans, slower); default uses fast catalog estimates.")
 @click.pass_context
-def stats(ctx: click.Context) -> None:
+def stats(ctx: click.Context, exact: bool) -> None:
     """Show table row counts and database size."""
     with SessionArchive(ctx.obj["dsn"]) as a:
-        s = a.statistics()
+        s = a.statistics(exact=exact)
     width = max(len(k) for k in s)
     for k, v in s.items():
         click.echo(f"  {k:<{width}}  {v:>14,}" if isinstance(v, int) else f"  {k:<{width}}  {v:>14}")
+    if not exact:
+        click.echo("  (row counts are catalog estimates; pass --exact for precise counts)")
 
 
 @main.command()

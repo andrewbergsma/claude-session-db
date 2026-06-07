@@ -33,6 +33,11 @@ SCHEMA_VERSION = 4  # Gen3 archive + token-cost pricing tables & cost views
 
 DEFAULT_DB_NAME = "claude_sessions"
 
+# Cap analytic reads (query/recent/sweep/stats) so a pathological query fails fast
+# with a clear error instead of hanging indefinitely. Applied per-transaction via
+# set_config(..., is_local=true), so it never touches the long-running ingest path.
+ANALYTIC_TIMEOUT_MS = 15_000
+
 
 def resolve_dsn(explicit: Optional[str] = None) -> str:
     """Resolve the connection DSN for the claude_sessions archive.
@@ -926,68 +931,71 @@ class SessionArchive:
     # -- aggregates ---------------------------------------------------------
 
     def recompute_session_aggregates(self) -> None:
-        """Recompute per-session token/tool/error aggregates from messages."""
+        """Recompute per-session token/tool/error aggregates from messages.
+
+        All aggregates are gathered in CTEs and applied in a SINGLE UPDATE so each
+        session row is rewritten once per sync, not five times. The earlier
+        five-pass version rewrote every row repeatedly, bloating the sessions heap
+        (~35x) until a VACUUM FULL. Driven off the messages CTE (a session is
+        always defined by its messages); siblings LEFT JOIN in, so a session whose
+        source rows have gone away is authoritatively reset to 0 rather than left
+        stale.
+        """
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
                 """
-                UPDATE sessions s SET
-                    total_input_tokens = a.input_tokens,
-                    total_output_tokens = a.output_tokens,
-                    total_cache_read_tokens = a.cache_read_tokens,
-                    total_cache_creation_tokens = a.cache_creation_tokens,
-                    tool_use_count = a.tool_use_count,
-                    user_prompt_count = a.user_prompt_count
-                FROM (
+                WITH msg AS (
                     SELECT session_id,
                         coalesce(sum(input_tokens),0) AS input_tokens,
                         coalesce(sum(output_tokens),0) AS output_tokens,
                         coalesce(sum(cache_read_tokens),0) AS cache_read_tokens,
                         coalesce(sum(cache_creation_tokens),0) AS cache_creation_tokens,
                         count(*) FILTER (WHERE role='user' AND message_type='prompt' AND NOT is_meta) AS user_prompt_count,
-                        0 AS tool_use_count
+                        count(*) AS message_count
                     FROM messages GROUP BY session_id
-                ) a
-                WHERE s.session_id = a.session_id
-                """
-            )
-            # tool_use_count from content_blocks
-            cur.execute(
-                """
-                UPDATE sessions s SET tool_use_count = c.cnt
-                FROM (SELECT session_id, count(*) AS cnt FROM content_blocks
-                      WHERE block_type='tool_use' GROUP BY session_id) c
-                WHERE s.session_id = c.session_id
-                """
-            )
-            # error_count from tool_results
-            cur.execute(
-                """
-                UPDATE sessions s SET error_count = e.cnt
-                FROM (SELECT session_id, count(*) AS cnt FROM tool_results
-                      WHERE is_error GROUP BY session_id) e
-                WHERE s.session_id = e.session_id
-                """
-            )
-            # compact_count + duration from system_events
-            cur.execute(
-                """
-                UPDATE sessions s SET
-                    compact_count = e.compacts,
-                    duration_seconds = e.duration_s
-                FROM (SELECT session_id,
+                ),
+                tu AS (
+                    SELECT session_id, count(*) AS cnt FROM content_blocks
+                    WHERE block_type='tool_use' GROUP BY session_id
+                ),
+                err AS (
+                    SELECT session_id, count(*) AS cnt FROM tool_results
+                    WHERE is_error GROUP BY session_id
+                ),
+                sysev AS (
+                    SELECT session_id,
                         count(*) FILTER (WHERE subtype='compact_boundary') AS compacts,
                         coalesce(sum(duration_ms) FILTER (WHERE subtype='turn_duration'),0)/1000.0 AS duration_s
-                      FROM system_events GROUP BY session_id) e
-                WHERE s.session_id = e.session_id
-                """
-            )
-            # message_count
-            cur.execute(
-                """
-                UPDATE sessions s SET message_count = m.cnt
-                FROM (SELECT session_id, count(*) AS cnt FROM messages GROUP BY session_id) m
-                WHERE s.session_id = m.session_id
+                    FROM system_events GROUP BY session_id
+                ),
+                agg AS (
+                    SELECT msg.session_id,
+                        msg.input_tokens, msg.output_tokens,
+                        msg.cache_read_tokens, msg.cache_creation_tokens,
+                        msg.user_prompt_count, msg.message_count,
+                        coalesce(tu.cnt, 0) AS tool_use_count,
+                        coalesce(err.cnt, 0) AS error_count,
+                        coalesce(sysev.compacts, 0) AS compact_count,
+                        sysev.duration_s AS duration_seconds  -- NULL when no turn_duration events (unknown != 0)
+                    FROM msg
+                    LEFT JOIN tu ON tu.session_id = msg.session_id
+                    LEFT JOIN err ON err.session_id = msg.session_id
+                    LEFT JOIN sysev ON sysev.session_id = msg.session_id
+                )
+                UPDATE sessions s SET
+                    total_input_tokens = agg.input_tokens,
+                    total_output_tokens = agg.output_tokens,
+                    total_cache_read_tokens = agg.cache_read_tokens,
+                    total_cache_creation_tokens = agg.cache_creation_tokens,
+                    user_prompt_count = agg.user_prompt_count,
+                    message_count = agg.message_count,
+                    tool_use_count = agg.tool_use_count,
+                    error_count = agg.error_count,
+                    compact_count = agg.compact_count,
+                    duration_seconds = agg.duration_seconds
+                FROM agg
+                WHERE s.session_id = agg.session_id
                 """
             )
         conn.commit()
@@ -997,6 +1005,9 @@ class SessionArchive:
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         conn = self.connect()
         with conn.cursor() as cur:
+            # Bound this read so a pathological query errors fast instead of hanging.
+            cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                        (str(ANALYTIC_TIMEOUT_MS),))
             cur.execute(sql, params)
             if cur.description is None:
                 conn.commit()
@@ -1005,16 +1016,41 @@ class SessionArchive:
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         return rows
 
-    def statistics(self) -> dict:
+    def statistics(self, exact: bool = False) -> dict:
+        """Per-table row counts + database size.
+
+        Default uses pg_class.reltuples catalog estimates (O(1), kept current by
+        autovacuum/ANALYZE — within ~0.5% here) instead of exact count(*), which
+        full-scans every table and degrades badly as messages/content_blocks/
+        tool_results grow into the millions. Pass exact=True for precise counts.
+        """
         tables = ["projects", "sessions", "messages", "content_blocks", "tool_results",
                   "attachments", "system_events", "file_history", "file_backups",
                   "queue_operations", "pr_links", "agent_tasks", "sync_state"]
         stats: dict[str, Any] = {}
         conn = self.connect()
         with conn.cursor() as cur:
-            for t in tables:
-                cur.execute(f"SELECT count(*) FROM {t}")
-                stats[t] = cur.fetchone()[0]
+            cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                        (str(ANALYTIC_TIMEOUT_MS),))
+            if exact:
+                for t in tables:
+                    cur.execute(f"SELECT count(*) FROM {t}")
+                    stats[t] = cur.fetchone()[0]
+            else:
+                cur.execute(
+                    """
+                    SELECT c.relname, c.reltuples::bigint
+                    FROM pg_class c
+                    JOIN pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = current_schema()
+                      AND c.relname = ANY(%s)
+                    """,
+                    (tables,),
+                )
+                est = {r[0]: int(r[1]) for r in cur.fetchall()}
+                # reltuples is -1 for a table that has never been analyzed; clamp to 0.
+                for t in tables:
+                    stats[t] = max(est.get(t, 0), 0)
             cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
             stats["db_size"] = cur.fetchone()[0]
         return stats

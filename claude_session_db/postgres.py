@@ -38,6 +38,14 @@ DEFAULT_DB_NAME = "claude_sessions"
 # set_config(..., is_local=true), so it never touches the long-running ingest path.
 ANALYTIC_TIMEOUT_MS = 15_000
 
+# Reap an abandoned transaction on this (autocommit=False) connection. The archive
+# is a long-lived daemon connection (csd sweep on a launchd timer); a sweep that
+# hangs mid-transaction otherwise sits `idle in transaction` holding locks until
+# killed — once jamming the DB for ~9h. Generous (5 min) so it never trips a slow
+# JSONL parse that runs between a DELETE and its inserts, but bounded far below the
+# multi-hour convoy. See lesson csd-sweep-idle-in-transaction-lock-convoy.
+IDLE_TXN_TIMEOUT_MS = 300_000
+
 
 def resolve_dsn(explicit: Optional[str] = None) -> str:
     """Resolve the connection DSN for the claude_sessions archive.
@@ -687,7 +695,12 @@ class SessionArchive:
 
     def connect(self) -> psycopg.Connection:
         if self.conn is None or self.conn.closed:
-            self.conn = psycopg.connect(self.dsn, autocommit=False)
+            # idle_in_transaction_session_timeout reaps an abandoned txn if a sweep
+            # hangs mid-transaction, so it can never hold locks indefinitely.
+            self.conn = psycopg.connect(
+                self.dsn, autocommit=False,
+                options=f"-c idle_in_transaction_session_timeout={IDLE_TXN_TIMEOUT_MS}",
+            )
         return self.conn
 
     def close(self) -> None:
@@ -707,13 +720,28 @@ class SessionArchive:
     def initialize(self) -> None:
         conn = self.connect()
         with conn.cursor() as cur:
+            # Tables/indexes: IF NOT EXISTS, cheap and low-conflict — run every time
+            # so the schema self-heals.
             cur.execute(SCHEMA_SQL)
-            cur.execute(VIEWS_SQL)
             cur.execute(
                 "INSERT INTO metadata(key, value) VALUES ('schema_version', %s) "
                 "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
                 (str(SCHEMA_VERSION),),
             )
+            # Views: CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on each view, which
+            # on a per-sweep timer can convoy every reader behind it. Recreate views
+            # only when their version marker lags the code's SCHEMA_VERSION (i.e. a
+            # migration), not on every initialize(). See lesson
+            # csd-sweep-idle-in-transaction-lock-convoy.
+            cur.execute("SELECT value FROM metadata WHERE key = 'views_version'")
+            row = cur.fetchone()
+            if (row[0] if row else None) != str(SCHEMA_VERSION):
+                cur.execute(VIEWS_SQL)
+                cur.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('views_version', %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (str(SCHEMA_VERSION),),
+                )
         conn.commit()
 
     def drop_all(self) -> None:

@@ -58,6 +58,10 @@ def main():
     ap.add_argument("session")
     ap.add_argument("--result-head", type=int, default=200,
                     help="Chars of each tool_result to keep (default 200)")
+    ap.add_argument("--full-inputs", action="store_true",
+                    help="Keep tool_use inputs VERBATIM instead of a one-field hint. "
+                         "Actions (create_entry/create_relationship/Edit args) live in tool inputs; "
+                         "hinting them loses 'what was done' recall. Costs more tokens than the hint.")
     args = ap.parse_args()
 
     p = Path(args.session).expanduser()
@@ -110,8 +114,9 @@ def main():
                 out.append(f"\n[ASSISTANT] {t}")
             for b in content or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
-                    hint = input_hint(b.get("input", {}))
-                    out.append(f"  → {b.get('name')}({hint})")
+                    inp = b.get("input", {})
+                    shown = json.dumps(inp, ensure_ascii=False) if args.full_inputs else input_hint(inp)
+                    out.append(f"  → {b.get('name')}({shown})")
 
     sys.stdout.write("\n".join(out) + "\n")
 

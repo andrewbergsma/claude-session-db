@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 import click
 
 from .postgres import SessionArchive, resolve_dsn
+from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
 from .sync import SessionSync
 
 
@@ -184,6 +185,76 @@ def views(ctx: click.Context) -> None:
         rows = a.query(sql)
     for r in rows:
         click.echo(r["viewname"])
+
+
+@main.command(name="reconcile-summaries")
+@click.option("--kmcp-dsn", envvar="KMCP_DATABASE_URL", default=None,
+              help="Knowledge DB DSN (default: archive DSN with dbname swapped to 'knowledge').")
+@click.option("--grow-slack", type=int, default=GROW_SLACK_DEFAULT,
+              help=f"Messages a summarized session may grow before flipping back "
+                   f"to pending (default {GROW_SLACK_DEFAULT} — absorbs the tail "
+                   f"of a self-run /session-summary).")
+@click.pass_context
+def reconcile_summaries(ctx: click.Context, kmcp_dsn: str | None, grow_slack: int) -> None:
+    """Classify every archived session as summarized / not_required / pending.
+
+    The pre-LLM gate for phase-4 roll-ups: cross-checks kmcp `session` entries
+    by session_id (truth from the ledger, not the summarizer's report), then
+    applies the empty / meta_run / trivial heuristics. Idempotent; re-run any
+    time. `csd unsummarized` serves the pending residue to the sweep.
+    """
+    dsn = ctx.obj["dsn"]
+    with SessionArchive(dsn) as a:
+        a.initialize()  # self-heal: ensures summary_state + v_unsummarized exist
+        stats = reconcile(a.connect(), resolve_kmcp_dsn(dsn, kmcp_dsn), grow_slack)
+    click.echo(stats.summary())
+
+
+@main.command()
+@click.option("-n", "--limit", type=int, default=50, help="Max rows (default 50).")
+@click.pass_context
+def unsummarized(ctx: click.Context, limit: int) -> None:
+    """List pending sessions — the phase-4 work queue (newest first).
+
+    Replaces the recent-by-mtime walk, which was ~80% already-summarized.
+    Run `csd reconcile-summaries` first to refresh the classification.
+    """
+    sql = """
+        SELECT session_id, to_char(modified_at, 'YYYY-MM-DD HH24:MI') AS modified,
+               project_name, message_count AS msgs, tool_use_count AS tools,
+               coalesce(reason, '') AS reason,
+               left(coalesce(title, first_prompt, ''), 60) AS title
+        FROM v_unsummarized LIMIT %s
+    """
+    with SessionArchive(ctx.obj["dsn"]) as a:
+        rows = a.query(sql, (limit,))
+    if not rows:
+        click.echo("No pending sessions — the queue is drained.")
+        return
+    for r in rows:
+        flag = f" [{r['reason']}]" if r["reason"] else ""
+        click.echo(f"{r['session_id']}  {r['modified']}  "
+                   f"{str(r['project_name'] or ''):<18.18} {r['msgs']:>4}msg "
+                   f"{r['tools']:>4}tool{flag}  {r['title']}")
+
+
+@main.command(name="mark-summarized")
+@click.argument("session_id")
+@click.option("--app", "application", required=True, help="kmcp application of the summary entry.")
+@click.option("--path", required=True, help="kmcp path of the summary entry.")
+@click.pass_context
+def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str, path: str) -> None:
+    """Stamp a session summarized at its current message-count watermark.
+
+    Call after a VERIFIED kmcp write (the entry row exists). kmcp session
+    entries store neither message_count nor leaf uuid, so csd stamps the
+    re-eval watermark itself at summarize time.
+    """
+    with SessionArchive(ctx.obj["dsn"]) as a:
+        a.initialize()
+        row = mark_summarized(a.connect(), session_id, application, path)
+    click.echo(f"summarized  {row['session_id']}  watermark={row['message_count_at_summary']}msg  "
+               f"-> {row['kmcp_application']}:{row['kmcp_path']}")
 
 
 @main.command(name="dsn")

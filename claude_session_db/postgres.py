@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 4  # Gen3 archive + token-cost pricing tables & cost views
+SCHEMA_VERSION = 5  # + summary_state pre-LLM gate table & v_unsummarized view
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -411,6 +411,36 @@ INSERT INTO service_tier_pricing (service_tier, multiplier, notes) VALUES
     ('priority', 1.0, 'same per-token list price; committed throughput billed separately'),
     ('batch',    0.5, 'Batch API = 50% of standard')
 ON CONFLICT (service_tier) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- summary_state — the pre-LLM gate for phase-4 session roll-ups.
+--
+-- Sibling table keyed by session_id: classifies every archived top-level
+-- session as summarized / not_required / pending so the expensive
+-- digest->summarizer step only ever runs on the genuinely-pending residue.
+-- NEVER mutates archive rows — the transcript stays the lossless source.
+--
+-- "summarized" is derived ONLY from rows that actually exist in the kmcp
+-- `entries` table (entity_type='session', content->>'session_id') — never from
+-- a summarizer's self-report. A claimed-but-unwritten summary therefore stays
+-- pending and self-heals on the next reconcile. See
+-- claudecode:task/claude-session-db/summary-state-and-reconcile-gate.
+CREATE TABLE IF NOT EXISTS summary_state (
+    session_id  TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
+    state       TEXT NOT NULL CHECK (state IN ('summarized', 'not_required', 'pending')),
+    reason      TEXT CHECK (reason IN ('empty', 'meta_run', 'trivial', 'grown')),
+    kmcp_application TEXT,   -- where the summary entry lives (when summarized)
+    kmcp_path        TEXT,
+    -- Re-eval watermark: archive message_count/leaf at the time the session was
+    -- marked summarized. kmcp session entries store neither, so csd stamps them
+    -- itself (at summarize time for phase-4 writes; first-seen at reconcile for
+    -- self-run / historical summaries).
+    message_count_at_summary INTEGER,
+    leaf_uuid_at_summary     TEXT,
+    decided_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_summary_state_state ON summary_state(state);
 """
 
 
@@ -655,6 +685,20 @@ SELECT date_trunc('day', ts)::date AS day,
 FROM v_message_cost
 GROUP BY 1
 ORDER BY day DESC;
+
+-- Phase-4 work queue: pending-only sessions the sweep should summarize next.
+-- This replaces the recent-by-mtime walk (which is ~80% already-summarized —
+-- see claudecode:lesson/recent-by-mtime-backlog-is-mostly-already-summarized).
+CREATE OR REPLACE VIEW v_unsummarized AS
+SELECT o.session_id, o.project_name, o.project_path, o.title, o.first_prompt,
+       o.created_at, o.modified_at, o.message_count, o.user_prompt_count,
+       o.tool_use_count, o.error_count, o.total_output_tokens,
+       ss.reason, ss.decided_at
+FROM v_session_overview o
+JOIN summary_state ss ON ss.session_id = o.session_id
+WHERE ss.state = 'pending'
+  AND NOT o.is_subagent
+ORDER BY o.modified_at DESC NULLS LAST;
 """
 
 # Tables cleared per source_file before re-inserting that file's rows

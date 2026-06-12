@@ -55,23 +55,19 @@ def ingest(ctx: click.Context, rebuild: bool, force: bool, quiet: bool) -> None:
 # it. See claudecode:task/claude-session-db/validate/quiescence-threshold.
 QUIESCE_MIN_DEFAULT = 10
 
+# Activity counts replace the old `doing` tldr — the latest tool-result head line
+# was almost always noise (raw MCP JSON, git plumbing, system-reminders, even
+# leaked secrets). tool_use_count / error_count are precomputed on `sessions` at
+# ingest (the recompute-aggregates pass), so this reads them straight off
+# v_session_overview — no tool_results scan, no join.
 _SWEEP_HEAD_SQL = """
-    WITH latest AS (
-        SELECT DISTINCT ON (tr.session_id)
-               tr.session_id, tr.tldr, tr.is_error
-        FROM tool_results tr
-        JOIN messages m ON m.uuid = tr.message_uuid
-        WHERE NOT m.is_sidechain
-        ORDER BY tr.session_id, m.ts DESC NULLS LAST
-    )
     SELECT o.project_name,
            to_char(o.modified_at, 'HH24:MI') AS at,
            round(extract(epoch FROM (now() - o.modified_at)) / 60)::int AS idle_min,
            o.message_count AS msgs,
-           left(coalesce(latest.tldr, o.first_prompt, ''), 80) AS doing,
-           coalesce(latest.is_error, false) AS is_error
+           coalesce(o.tool_use_count, 0) AS tool_calls,
+           coalesce(o.error_count, 0) AS errors
     FROM v_session_overview o
-    LEFT JOIN latest ON latest.session_id = o.session_id
     WHERE NOT o.is_subagent
       AND o.modified_at > now() - make_interval(mins => %s)
     ORDER BY o.modified_at DESC
@@ -97,23 +93,39 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
     """
     dsn = ctx.obj["dsn"]
     if not no_ingest:
-        sync = SessionSync(dsn=dsn, verbose=not quiet)
+        # verbose=False: suppress the "Found N files" preamble + per-file lines;
+        # the one-line summary below carries the only signal worth keeping.
+        sync = SessionSync(dsn=dsn, verbose=False)
         stats = sync.sync_all()
         if not quiet:
-            click.echo(stats)
+            click.echo(stats.oneline())
     with SessionArchive(dsn) as a:
         rows = a.query(_SWEEP_HEAD_SQL, (window,))
     if not rows:
         click.echo(f"No sessions active in the last {window} min.")
         return
-    click.echo(f"\nActive sessions (last {window} min · idle>{idle}m = quiesced):")
-    for r in rows:
+
+    def render(r) -> str:
         idle_min = int(r["idle_min"] or 0)
         state = "·done" if idle_min >= idle else "live "
-        err = " [ERR]" if r["is_error"] else ""
-        click.echo(f"  {state} {r['at']} {idle_min:>4}m  "
-                   f"{str(r['project_name'] or ''):<18.18} {r['msgs'] or 0:>4}msg  "
-                   f"{r['doing']}{err}")
+        errors = int(r["errors"] or 0)
+        act = f"{int(r['tool_calls'] or 0):>3} tools"
+        if errors:
+            act += f", {errors} err"
+        return (f"  {state} {r['at']} {idle_min:>4}m  "
+                f"{str(r['project_name'] or ''):<18.18} {r['msgs'] or 0:>4}msg  {act}")
+
+    live = [r for r in rows if int(r["idle_min"] or 0) < idle]
+    done = [r for r in rows if int(r["idle_min"] or 0) >= idle]
+    # Foreground live sessions; collapse the quiesced flood to a count. If nothing
+    # is live, still show the few most-recent done rows so the head isn't empty.
+    shown_done = [] if live else done[:5]
+    click.echo(f"\nActive sessions (last {window} min · idle>{idle}m = quiesced):")
+    for r in live + shown_done:
+        click.echo(render(r))
+    remaining = len(done) - len(shown_done)
+    if remaining > 0:
+        click.echo(f"  … +{remaining} quiesced (run `csd recent` to list)")
 
 
 @main.command()
@@ -203,10 +215,21 @@ def reconcile_summaries(ctx: click.Context, kmcp_dsn: str | None, grow_slack: in
     applies the empty / meta_run / trivial heuristics. Idempotent; re-run any
     time. `csd unsummarized` serves the pending residue to the sweep.
     """
+    import psycopg
     dsn = ctx.obj["dsn"]
     with SessionArchive(dsn) as a:
-        a.initialize()  # self-heal: ensures summary_state + v_unsummarized exist
-        stats = reconcile(a.connect(), resolve_kmcp_dsn(dsn, kmcp_dsn), grow_slack)
+        try:
+            if a.ensure_gate_objects():
+                click.echo("schema self-heal: created gate objects")
+        except psycopg.errors.LockNotAvailable:
+            a.connect().rollback()
+            raise click.ClickException(
+                "schema self-heal is blocked on a lock held by a concurrent "
+                "session — retry in a moment, or run `csd ingest` once to settle "
+                "the schema first."
+            )
+        stats = reconcile(a.connect(), resolve_kmcp_dsn(dsn, kmcp_dsn),
+                          grow_slack, log=click.echo)
     click.echo(stats.summary())
 
 

@@ -72,6 +72,20 @@ class SyncStats:
             f"  Errors: {self.errors}"
         )
 
+    def oneline(self) -> str:
+        """Compact single-line summary — only non-zero record counts (errors always)."""
+        counts = [
+            ("msg", self.messages), ("blocks", self.content_blocks),
+            ("results", self.tool_results), ("attach", self.attachments),
+            ("sysevents", self.system_events), ("queueops", self.queue_operations),
+            ("snapshots", self.file_snapshots), ("prs", self.pr_links),
+            ("agents", self.agent_tasks),
+        ]
+        parts = [f"{n:,} {label}" for label, n in counts if n]
+        body = ", ".join(parts) if parts else "no new records"
+        return (f"Synced {self.files_synced}/{self.files_found} files · "
+                f"{body} ({self.errors} errors)")
+
 
 class SessionSync:
     """Sync Claude Code session JSONL into the Postgres archive."""

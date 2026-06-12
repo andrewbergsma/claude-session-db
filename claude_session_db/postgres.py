@@ -428,7 +428,7 @@ ON CONFLICT (service_tier) DO NOTHING;
 CREATE TABLE IF NOT EXISTS summary_state (
     session_id  TEXT PRIMARY KEY REFERENCES sessions(session_id) ON DELETE CASCADE,
     state       TEXT NOT NULL CHECK (state IN ('summarized', 'not_required', 'pending')),
-    reason      TEXT CHECK (reason IN ('empty', 'meta_run', 'trivial', 'grown')),
+    reason      TEXT CHECK (reason IN ('empty', 'meta_run', 'trivial', 'grown', 'natkey')),
     kmcp_application TEXT,   -- where the summary entry lives (when summarized)
     kmcp_path        TEXT,
     -- Re-eval watermark: archive message_count/leaf at the time the session was
@@ -441,6 +441,22 @@ CREATE TABLE IF NOT EXISTS summary_state (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_summary_state_state ON summary_state(state);
+
+-- Migration (idempotent, guarded): widen reason to allow 'natkey' (natural-key
+-- fallback provenance) on a pre-existing table. Guarded by a catalog check so the
+-- ACCESS EXCLUSIVE ALTER fires exactly once, not on every initialize().
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'summary_state_reason_check'
+          AND pg_get_constraintdef(oid) LIKE '%natkey%'
+    ) THEN
+        ALTER TABLE summary_state DROP CONSTRAINT IF EXISTS summary_state_reason_check;
+        ALTER TABLE summary_state ADD CONSTRAINT summary_state_reason_check
+            CHECK (reason IN ('empty', 'meta_run', 'trivial', 'grown', 'natkey'));
+    END IF;
+END $$;
 """
 
 

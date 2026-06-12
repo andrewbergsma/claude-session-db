@@ -89,29 +89,66 @@ class ReconcileStats:
     not_required: dict[str, int] = field(default_factory=dict)
     pending: int = 0
     grown: int = 0          # subset of pending flipped by the re-eval edge
-    duplicates: list[tuple[str, int]] = field(default_factory=list)
+    changed: int = 0        # summary_state rows actually inserted/updated this run
+    duplicates: list["Collision"] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.summarized + sum(self.not_required.values()) + self.pending
 
     def summary(self) -> str:
         nr = sum(self.not_required.values())
-        reasons = ", ".join(f"{k}={v}" for k, v in sorted(self.not_required.items()))
+        reasons = ", ".join(f"{k}={v}" for k, v in sorted(self.not_required.items())) or "none"
         lines = [
-            f"summarized   {self.summarized}",
-            f"not_required {nr}  ({reasons})",
-            f"pending      {self.pending}" + (f"  (incl. {self.grown} grown past watermark)" if self.grown else ""),
+            f"Reconciled {self.total} sessions ({self.changed} reclassified this run):",
+            f"  summarized   {self.summarized}",
+            f"  not_required {nr}  ({reasons})",
+            f"  pending      {self.pending}" + (f"  (incl. {self.grown} grown past watermark)" if self.grown else ""),
         ]
         if self.duplicates:
-            lines.append(f"DUPLICATE kmcp session entries for {len(self.duplicates)} session_ids:")
-            for sid, n in self.duplicates[:10]:
-                lines.append(f"  {sid}  x{n}")
+            cross = sum(1 for c in self.duplicates if c.apps > 1)
+            collide = sum(1 for c in self.duplicates if c.apps == 1)
+            lines.append(
+                f"session_id reuse: {len(self.duplicates)} ids claimed by >1 entry "
+                f"({cross} cross-app copies, {collide} in-app id collisions) — "
+                f"not duplicate documents; each entry has a unique path:"
+            )
+            for c in self.duplicates[:10]:
+                lines.append(f"  {c.session_id}  x{c.entries}  ({c.kind}: "
+                             f"{c.paths} paths, {c.apps} apps)")
         return "\n".join(lines)
 
 
-def fetch_kmcp_session_map(kmcp_dsn: str) -> tuple[dict[str, tuple[str, str]], list[tuple[str, int]]]:
+@dataclass
+class Collision:
+    """A session_id claimed by >1 kmcp session entry. Investigation (2026-06-11)
+    found these are NOT duplicate documents — every entry sits at a unique
+    (application, path). They split into two kinds:
+      - cross_app: the same entry copied into another app (migration artifact).
+      - distinct paths within one app: genuinely different sessions/topics that
+        were stamped with the same (wrong/placeholder) session_id at authoring.
+    `entries` is therefore almost never a deletable-dup count."""
+    session_id: str
+    entries: int
+    paths: int
+    apps: int
+
+    @property
+    def kind(self) -> str:
+        if self.apps > 1 and self.paths <= 1:
+            return "cross-app copy"
+        if self.apps > 1:
+            return "cross-app + collision"
+        return "id collision"  # distinct paths, one app
+
+
+def fetch_kmcp_session_map(kmcp_dsn: str) -> tuple[dict[str, tuple[str, str]], list[Collision]]:
     """session_id -> (application, path) for every kmcp `session` entry.
 
-    Read-only against the knowledge DB. Returns the map plus any session_ids
-    claimed by MORE than one entry (duplicate summaries — corpus hygiene signal).
-    """
+    Read-only against the knowledge DB. Returns the map plus a Collision per
+    session_id claimed by MORE than one entry — characterized (cross-app copy vs
+    in-app id collision) rather than reported as a raw "duplicate" count, since
+    no two entries actually share an (application, path)."""
     sql = """
         SELECT application, path, content->>'session_id' AS session_id
         FROM entries
@@ -120,16 +157,23 @@ def fetch_kmcp_session_map(kmcp_dsn: str) -> tuple[dict[str, tuple[str, str]], l
         ORDER BY created_at
     """
     seen: dict[str, tuple[str, str]] = {}
-    counts: dict[str, int] = {}
+    rows: dict[str, int] = {}
+    paths: dict[str, set[str]] = {}
+    apps: dict[str, set[str]] = {}
     with psycopg.connect(kmcp_dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             for r in cur.fetchall():
                 sid = r["session_id"].lower()
-                counts[sid] = counts.get(sid, 0) + 1
                 seen.setdefault(sid, (r["application"], r["path"]))  # first (oldest) wins
-    dups = sorted(((s, n) for s, n in counts.items() if n > 1), key=lambda x: -x[1])
-    return seen, dups
+                rows[sid] = rows.get(sid, 0) + 1
+                paths.setdefault(sid, set()).add(r["path"])
+                apps.setdefault(sid, set()).add(r["application"])
+    collisions = [
+        Collision(sid, rows[sid], len(paths[sid]), len(apps[sid]))
+        for sid in rows if rows[sid] > 1
+    ]
+    return seen, sorted(collisions, key=lambda c: -c.entries)
 
 
 _UPSERT_SQL = """
@@ -158,9 +202,18 @@ _UPSERT_SQL = """
 
 
 def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
-              grow_slack: int = GROW_SLACK_DEFAULT) -> ReconcileStats:
-    """Classify every non-subagent archived session and upsert summary_state."""
+              grow_slack: int = GROW_SLACK_DEFAULT,
+              log: Optional[Any] = None) -> ReconcileStats:
+    """Classify every non-subagent archived session and upsert summary_state.
+
+    `log`, if given, is called with one-line progress strings at each stage so a
+    caller (the CLI) can surface what the gate is doing instead of blocking mute.
+    """
+    emit = log if callable(log) else (lambda _m: None)
+    emit("reading kmcp session ledger…")
     kmcp_map, dups = fetch_kmcp_session_map(kmcp_dsn)
+    emit(f"  kmcp ledger: {len(kmcp_map)} session entries"
+         + (f", {len(dups)} duplicate ids" if dups else ""))
     stats = ReconcileStats(duplicates=dups)
 
     with archive_conn.cursor(row_factory=dict_row) as cur:
@@ -177,6 +230,7 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
         """)
         rows = cur.fetchall()
 
+    emit(f"classifying {len(rows)} archived sessions…")
     upserts: list[dict[str, Any]] = []
     for r in rows:
         sid = r["session_id"]
@@ -224,8 +278,12 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
             stats.pending += 1
         upserts.append(verdict)
 
+    emit(f"writing summary_state ({len(upserts)} rows)…")
     with archive_conn.cursor() as cur:
         cur.executemany(_UPSERT_SQL, upserts)
+        # rowcount sums the batch; the conditional ON CONFLICT WHERE means
+        # idempotent no-ops don't count — so this is the real churn this run.
+        stats.changed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     archive_conn.commit()
     return stats
 

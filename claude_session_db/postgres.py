@@ -788,6 +788,29 @@ class SessionArchive:
                 )
         conn.commit()
 
+    def ensure_gate_objects(self, lock_timeout_ms: int = 15_000) -> bool:
+        """Cheap self-heal for the reconcile path: ensure summary_state +
+        v_unsummarized exist WITHOUT paying initialize()'s full-schema DDL.
+
+        initialize() re-runs ALTER TABLE / CREATE INDEX every call; those take
+        ACCESS EXCLUSIVE locks that convoy behind concurrent ingests — the 200s
+        silent hang reconcile used to take. Here we check the catalog first
+        (to_regclass: no locks); only if an object is genuinely missing do we run
+        the DDL, and then under a bounded lock_timeout so it fails fast instead of
+        blocking forever. Returns True iff DDL ran.
+        """
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass('public.summary_state') IS NOT NULL, "
+                        "to_regclass('public.v_unsummarized') IS NOT NULL")
+            has_table, has_view = cur.fetchone()
+        if has_table and has_view:
+            return False
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL lock_timeout = %s", (f"{lock_timeout_ms}ms",))
+        self.initialize()
+        return True
+
     def drop_all(self) -> None:
         """Drop every object (for --rebuild). Schema is recreated by initialize()."""
         conn = self.connect()

@@ -37,8 +37,10 @@ Classification precedence (first match wins):
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -56,6 +58,46 @@ TRIVIAL_MAX_PROMPTS_NO_TOOLS = 2
 # Re-eval slack: a self-summarized session's transcript keeps growing for the
 # tail of the /session-summary run itself; don't flip on that noise.
 GROW_SLACK_DEFAULT = 8
+
+# --- Natural-key fallback (session_id is unreliable: ~28% of kmcp session
+# entries carry none, and 100+ ids are reused across distinct entries — see
+# claudecode:lesson/session-id-unreliable-as-kmcp-session-key). When the
+# session_id lookup misses, fall back to a PRECISE natural key — normalized
+# project path + start time to the minute — used ONLY when it resolves to exactly
+# one kmcp entry AND one archive session (both-sides-unique). A false "summarized"
+# is silent data loss, so the bar is exactness, never title similarity.
+NatKey = tuple[str, str]  # (normalized_path, "YYYY-MM-DDTHH:MM")
+
+
+def _norm_path(p: Optional[str]) -> Optional[str]:
+    if not p:
+        return None
+    p = p.strip()
+    if p.startswith("~"):
+        p = os.path.expanduser(p)
+    p = p.rstrip("/")
+    return p or None
+
+
+def _minute_iso(ts: Optional[str]) -> Optional[str]:
+    """Minute key from a kmcp ISO timestamp string (e.g. 2026-02-05T16:55:00Z)."""
+    if not ts or len(ts) < 16 or ts[10] not in "T ":
+        return None
+    return "T".join(ts[:16].split(" "))
+
+
+def _minute_dt(dt: Optional[datetime]) -> Optional[str]:
+    """Minute key from an archive datetime, normalized to UTC to match kmcp."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M")
+
+
+def _natkey(path: Optional[str], minute: Optional[str]) -> Optional[NatKey]:
+    return (path, minute) if path and minute else None
+
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.I
@@ -89,47 +131,109 @@ class ReconcileStats:
     not_required: dict[str, int] = field(default_factory=dict)
     pending: int = 0
     grown: int = 0          # subset of pending flipped by the re-eval edge
-    duplicates: list[tuple[str, int]] = field(default_factory=list)
+    recovered: int = 0      # subset of summarized matched via the natural-key fallback
+    changed: int = 0        # summary_state rows actually inserted/updated this run
+    duplicates: list["Collision"] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.summarized + sum(self.not_required.values()) + self.pending
 
     def summary(self) -> str:
         nr = sum(self.not_required.values())
-        reasons = ", ".join(f"{k}={v}" for k, v in sorted(self.not_required.items()))
+        reasons = ", ".join(f"{k}={v}" for k, v in sorted(self.not_required.items())) or "none"
         lines = [
-            f"summarized   {self.summarized}",
-            f"not_required {nr}  ({reasons})",
-            f"pending      {self.pending}" + (f"  (incl. {self.grown} grown past watermark)" if self.grown else ""),
+            f"Reconciled {self.total} sessions ({self.changed} reclassified this run):",
+            f"  summarized   {self.summarized}" + (f"  (incl. {self.recovered} via natural-key fallback)" if self.recovered else ""),
+            f"  not_required {nr}  ({reasons})",
+            f"  pending      {self.pending}" + (f"  (incl. {self.grown} grown past watermark)" if self.grown else ""),
         ]
         if self.duplicates:
-            lines.append(f"DUPLICATE kmcp session entries for {len(self.duplicates)} session_ids:")
-            for sid, n in self.duplicates[:10]:
-                lines.append(f"  {sid}  x{n}")
+            cross = sum(1 for c in self.duplicates if c.apps > 1)
+            collide = sum(1 for c in self.duplicates if c.apps == 1)
+            lines.append(
+                f"session_id reuse: {len(self.duplicates)} ids claimed by >1 entry "
+                f"({cross} cross-app copies, {collide} in-app id collisions) — "
+                f"not duplicate documents; each entry has a unique path:"
+            )
+            for c in self.duplicates[:10]:
+                lines.append(f"  {c.session_id}  x{c.entries}  ({c.kind}: "
+                             f"{c.paths} paths, {c.apps} apps)")
         return "\n".join(lines)
 
 
-def fetch_kmcp_session_map(kmcp_dsn: str) -> tuple[dict[str, tuple[str, str]], list[tuple[str, int]]]:
-    """session_id -> (application, path) for every kmcp `session` entry.
+@dataclass
+class Collision:
+    """A session_id claimed by >1 kmcp session entry. Investigation (2026-06-11)
+    found these are NOT duplicate documents — every entry sits at a unique
+    (application, path). They split into two kinds:
+      - cross_app: the same entry copied into another app (migration artifact).
+      - distinct paths within one app: genuinely different sessions/topics that
+        were stamped with the same (wrong/placeholder) session_id at authoring.
+    `entries` is therefore almost never a deletable-dup count."""
+    session_id: str
+    entries: int
+    paths: int
+    apps: int
 
-    Read-only against the knowledge DB. Returns the map plus any session_ids
-    claimed by MORE than one entry (duplicate summaries — corpus hygiene signal).
+    @property
+    def kind(self) -> str:
+        if self.apps > 1 and self.paths <= 1:
+            return "cross-app copy"
+        if self.apps > 1:
+            return "cross-app + collision"
+        return "id collision"  # distinct paths, one app
+
+
+def fetch_kmcp_session_map(
+    kmcp_dsn: str,
+) -> tuple[dict[str, tuple[str, str]], list[Collision], dict[NatKey, tuple[str, str]]]:
+    """Indexes over every kmcp `session` entry (read-only against knowledge DB):
+
+    1. session_id -> (application, path) — the primary key for the gate.
+    2. Collisions — session_ids claimed by >1 entry, characterized (cross-app
+       copy vs in-app id collision); not raw "duplicate" counts (no two entries
+       share an (application, path)).
+    3. natkey -> (application, path) — (normalized project_path, start-minute) for
+       entries where that key is UNIQUE corpus-wide; the fallback index for the
+       28% of entries that carry no/wrong session_id. Ambiguous keys are dropped.
     """
     sql = """
-        SELECT application, path, content->>'session_id' AS session_id
+        SELECT application, path,
+               content->>'session_id'   AS session_id,
+               content->>'project_path' AS project_path,
+               content->>'started_at'   AS started_at
         FROM entries
         WHERE entity_type = 'session'
-          AND content->>'session_id' IS NOT NULL
         ORDER BY created_at
     """
     seen: dict[str, tuple[str, str]] = {}
-    counts: dict[str, int] = {}
+    rows: dict[str, int] = {}
+    paths: dict[str, set[str]] = {}
+    apps: dict[str, set[str]] = {}
+    natkey_all: dict[NatKey, set[tuple[str, str]]] = {}
     with psycopg.connect(kmcp_dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             for r in cur.fetchall():
-                sid = r["session_id"].lower()
-                counts[sid] = counts.get(sid, 0) + 1
-                seen.setdefault(sid, (r["application"], r["path"]))  # first (oldest) wins
-    dups = sorted(((s, n) for s, n in counts.items() if n > 1), key=lambda x: -x[1])
-    return seen, dups
+                where = (r["application"], r["path"])
+                sid = r["session_id"]
+                if sid:
+                    sid = sid.lower()
+                    seen.setdefault(sid, where)  # first (oldest) wins
+                    rows[sid] = rows.get(sid, 0) + 1
+                    paths.setdefault(sid, set()).add(r["path"])
+                    apps.setdefault(sid, set()).add(r["application"])
+                nk = _natkey(_norm_path(r["project_path"]), _minute_iso(r["started_at"]))
+                if nk:
+                    natkey_all.setdefault(nk, set()).add(where)
+    collisions = [
+        Collision(sid, rows[sid], len(paths[sid]), len(apps[sid]))
+        for sid in rows if rows[sid] > 1
+    ]
+    # Keep only natural keys that resolve to exactly one kmcp entry.
+    natkey_unique = {nk: next(iter(v)) for nk, v in natkey_all.items() if len(v) == 1}
+    return seen, sorted(collisions, key=lambda c: -c.entries), natkey_unique
 
 
 _UPSERT_SQL = """
@@ -158,15 +262,26 @@ _UPSERT_SQL = """
 
 
 def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
-              grow_slack: int = GROW_SLACK_DEFAULT) -> ReconcileStats:
-    """Classify every non-subagent archived session and upsert summary_state."""
-    kmcp_map, dups = fetch_kmcp_session_map(kmcp_dsn)
+              grow_slack: int = GROW_SLACK_DEFAULT,
+              log: Optional[Any] = None) -> ReconcileStats:
+    """Classify every non-subagent archived session and upsert summary_state.
+
+    `log`, if given, is called with one-line progress strings at each stage so a
+    caller (the CLI) can surface what the gate is doing instead of blocking mute.
+    """
+    emit = log if callable(log) else (lambda _m: None)
+    emit("reading kmcp session ledger…")
+    kmcp_map, dups, natkey_map = fetch_kmcp_session_map(kmcp_dsn)
+    emit(f"  kmcp ledger: {len(kmcp_map)} session entries"
+         + (f", {len(dups)} duplicate ids" if dups else "")
+         + f"; {len(natkey_map)} unique natural keys")
     stats = ReconcileStats(duplicates=dups)
 
     with archive_conn.cursor(row_factory=dict_row) as cur:
         cur.execute("""
             SELECT s.session_id, s.first_prompt, s.message_count,
                    s.user_prompt_count, s.tool_use_count, s.last_prompt_leaf_uuid,
+                   s.cwd, s.created_at,
                    ss.state AS prev_state,
                    ss.message_count_at_summary AS prev_watermark,
                    ss.leaf_uuid_at_summary AS prev_leaf,
@@ -177,6 +292,17 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
         """)
         rows = cur.fetchall()
 
+    # Archive-side natural-key counts: the fallback only fires when the key is
+    # unique on BOTH sides (one kmcp entry AND one archive session) — that guard
+    # is what makes it false-positive-safe (the true owner of a kmcp entry shares
+    # its key, so any contention drops the match).
+    arch_natkey_count: dict[NatKey, int] = {}
+    for r in rows:
+        nk = _natkey(_norm_path(r["cwd"]), _minute_dt(r["created_at"]))
+        if nk:
+            arch_natkey_count[nk] = arch_natkey_count.get(nk, 0) + 1
+
+    emit(f"classifying {len(rows)} archived sessions…")
     upserts: list[dict[str, Any]] = []
     for r in rows:
         sid = r["session_id"]
@@ -190,6 +316,14 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
         }
 
         kmcp_hit = kmcp_map.get(sid.lower())
+        via_natkey = False
+        if not kmcp_hit:
+            # session_id missed — try the precise natural-key fallback, but only
+            # when the key is unambiguous on both sides.
+            nk = _natkey(_norm_path(r["cwd"]), _minute_dt(r["created_at"]))
+            if nk and arch_natkey_count.get(nk) == 1 and nk in natkey_map:
+                kmcp_hit = natkey_map[nk]
+                via_natkey = True
         if kmcp_hit:
             verdict["kmcp_application"], verdict["kmcp_path"] = kmcp_hit
             prev_wm = r["prev_watermark"]
@@ -206,9 +340,12 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
                 wm = prev_wm if prev_wm is not None else msgs
                 leaf = r["prev_leaf"] if prev_wm is not None else r["last_prompt_leaf_uuid"]
                 verdict.update(state="summarized",
+                               reason="natkey" if via_natkey else None,
                                message_count_at_summary=wm,
                                leaf_uuid_at_summary=leaf)
                 stats.summarized += 1
+                if via_natkey:
+                    stats.recovered += 1
         elif is_meta_run(sid, r["first_prompt"]):
             verdict.update(state="not_required", reason="meta_run")
             stats.not_required["meta_run"] = stats.not_required.get("meta_run", 0) + 1
@@ -224,8 +361,12 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
             stats.pending += 1
         upserts.append(verdict)
 
+    emit(f"writing summary_state ({len(upserts)} rows)…")
     with archive_conn.cursor() as cur:
         cur.executemany(_UPSERT_SQL, upserts)
+        # rowcount sums the batch; the conditional ON CONFLICT WHERE means
+        # idempotent no-ops don't count — so this is the real churn this run.
+        stats.changed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
     archive_conn.commit()
     return stats
 

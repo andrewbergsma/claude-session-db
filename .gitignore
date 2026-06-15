@@ -6,3 +6,8 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# Runtime / scratch / generated artifacts
+.claude/
+data/
+/skills-*.csv

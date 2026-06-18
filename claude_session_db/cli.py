@@ -16,7 +16,13 @@ import click
 
 from .postgres import SessionArchive, resolve_dsn
 from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
+from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
 from .sync import SessionSync
+
+# Launchd StartInterval for the sweep (seconds). The watcher flags a heartbeat
+# older than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
+SWEEP_INTERVAL_S = 300
+STALE_INTERVALS = 3
 
 
 def _redact(dsn: str) -> str:
@@ -90,8 +96,42 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
     observability head — one line per recently-active session, labelled live vs
     quiesced and carrying the tldr of its latest tool activity. The phase-4
     roll-up (LLM summaries) is intentionally NOT wired here.
+
+    RELIABILITY: a liveness guard (PID + age) self-aborts if a prior run is still
+    live and fresh, and reclaims a stale/wedged lock so a hung predecessor can
+    never silently starve every launchd tick. A heartbeat is written on every
+    completion (ok/error); `csd sweep-health` (or any mtime watcher) surfaces a
+    stalled sweep. See lessons launchd-per-label-hang-silent-starvation and
+    csd-sweep-idle-in-transaction-lock-convoy.
     """
     dsn = ctx.obj["dsn"]
+    guard = SweepGuard()
+    res = guard.acquire()
+    if not res.acquired:
+        # A live, fresh prior run already holds the lock. Fail FAST and LOUD
+        # instead of piling on (launchd would otherwise just defer to it).
+        click.echo(f"sweep: {res.reason}", err=True)
+        guard.heartbeat(ok=True, detail=f"skipped: {res.reason}")
+        return
+    if res.reclaimed_stale:
+        click.echo(f"sweep: {res.reason}", err=True)
+
+    try:
+        _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
+    except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
+        guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
+        click.echo(f"sweep: FAILED — {type(exc).__name__}: {exc}", err=True)
+        guard.release()
+        raise SystemExit(1)
+    else:
+        guard.heartbeat(ok=True)
+    finally:
+        guard.release()
+
+
+def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
+               no_ingest: bool, quiet: bool) -> None:
+    """The actual sweep body, wrapped by the liveness guard in `sweep()`."""
     if not no_ingest:
         # verbose=False: suppress the "Found N files" preamble + per-file lines;
         # the one-line summary below carries the only signal worth keeping.
@@ -126,6 +166,48 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
     remaining = len(done) - len(shown_done)
     if remaining > 0:
         click.echo(f"  … +{remaining} quiesced (run `csd recent` to list)")
+
+
+@main.command(name="sweep-health")
+@click.option("--stale-intervals", type=int, default=STALE_INTERVALS,
+              help=f"Flag a stall if the heartbeat is older than this many "
+                   f"{SWEEP_INTERVAL_S}s intervals (default {STALE_INTERVALS}).")
+@click.pass_context
+def sweep_health(ctx: click.Context, stale_intervals: int) -> None:
+    """Report sweep liveness: heartbeat age, last outcome, and any held lock.
+
+    The cheap external watcher for the launchd timer — DB-free, so it still works
+    when the archive itself is wedged. Exit 0 = healthy, 1 = STALE or last run
+    errored, 2 = no heartbeat yet. Wire into a monitor (or eyeball it) instead of
+    discovering a hang hours later by hand.
+    """
+    guard = SweepGuard()
+    threshold = stale_intervals * SWEEP_INTERVAL_S
+    age, hb = guard.staleness()
+
+    # Held-lock report (a long-held lock is itself a hang signal).
+    lock = guard._read_lock()
+    if lock:
+        import time as _t
+        lpid = lock.get("pid")
+        lage = _t.time() - float(lock.get("started_at", 0) or 0)
+        click.echo(f"lock: held by pid={lpid}, age={lage:.0f}s "
+                   f"(max {guard.max_age_s}s before reclaimable)")
+    else:
+        click.echo("lock: free")
+
+    if age is None:
+        click.echo("heartbeat: NONE — sweep has never recorded a completion")
+        raise SystemExit(2)
+
+    when = ""
+    if hb and hb.get("ok") is False:
+        when = f" — last run ERRORED: {hb.get('detail', '')[:200]}"
+    status = "STALE" if age > threshold else "ok"
+    click.echo(f"heartbeat: {status} (age={age:.0f}s, threshold={threshold}s, "
+               f"last_ok={hb.get('ok')}){when}")
+    if status == "STALE" or (hb and hb.get("ok") is False):
+        raise SystemExit(1)
 
 
 @main.command()

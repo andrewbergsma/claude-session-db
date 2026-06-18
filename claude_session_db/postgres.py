@@ -1125,6 +1125,12 @@ class SessionArchive:
                 return []
             cols = [d.name for d in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        # autocommit=False: a bare SELECT still opens a transaction that holds its
+        # snapshot (and any locks) until commit/rollback. Close it immediately so
+        # the sweep never sits `idle in transaction` between phases — the exact
+        # state that convoyed the DB. See lesson
+        # csd-sweep-idle-in-transaction-lock-convoy.
+        conn.commit()
         return rows
 
     def statistics(self, exact: bool = False) -> dict:
@@ -1164,4 +1170,6 @@ class SessionArchive:
                     stats[t] = max(est.get(t, 0), 0)
             cur.execute("SELECT pg_size_pretty(pg_database_size(current_database()))")
             stats["db_size"] = cur.fetchone()[0]
+        # Release the read snapshot promptly (see query() rationale).
+        conn.commit()
         return stats

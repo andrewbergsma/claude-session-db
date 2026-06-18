@@ -28,7 +28,54 @@ csd query "SQL"         # Ad-hoc SQL (--csv for CSV)
 csd views               # List analytic views
 csd dsn                 # Print connection target (password redacted)
 csd open                # Interactive shell (pgcli/psql)
+csd sweep               # Launchd-timed: ingest + live observability head (guarded)
+csd sweep-health        # Watcher: heartbeat age / last outcome / held lock (DB-free)
 ```
+
+## Sweep reliability & recovery
+
+The `csd sweep` launchd agent (`com.claude-session-db.sweep`, every 300s) is
+hardened against the failure mode that once silently starved the schedule for
+~9h and convoyed the whole DB:
+
+- **Liveness guard** (`sweepguard.py`): a PID+age pidfile under
+  `~/.local/state/claude-session-db/`. A new sweep self-aborts only while a prior
+  run is *live AND fresh*; a stale lock (dead PID, or alive but older than
+  `CSD_SWEEP_MAX_AGE_S`, default 900s) is **reclaimed** so a wedged predecessor
+  can never become a permanent block. launchd's per-label serialization prevents
+  overlap but converts a hang into silent starvation — this restores fail-fast.
+- **Heartbeat / error detection**: every sweep writes `sweep.heartbeat`
+  (`{ts, ok, detail}`). `csd sweep-health` reports staleness (heartbeat older
+  than `STALE_INTERVALS` × 300s) and last outcome; exit 0=ok, 1=stale/errored,
+  2=never-ran. It is DB-free, so it still works when the archive is wedged.
+- **Transaction lifetime**: the archive connection sets
+  `idle_in_transaction_session_timeout` (`IDLE_TXN_TIMEOUT_MS`, 5 min) so Postgres
+  reaps an abandoned txn; reads (`query`, `statistics`) commit immediately so the
+  sweep never sits `idle in transaction` between phases.
+- **DDL off the hot path**: `CREATE OR REPLACE VIEW` (ACCESS EXCLUSIVE) runs only
+  on a `views_version` ≠ `SCHEMA_VERSION` mismatch (a migration), never every
+  tick — see `initialize()`.
+
+**Recovery recipe — "queries hang but the DB is reachable" (lock convoy):**
+
+```sql
+-- 1. Find the root. The row whose pg_blocking_pids is EMPTY {} and which is
+--    `idle in transaction` is the holder; everything else is a waiter behind it.
+SELECT pid, state, pg_blocking_pids(pid),
+       now() - xact_start AS txn_age, left(query, 60) AS query
+FROM pg_stat_activity
+WHERE state <> 'idle'
+ORDER BY xact_start;
+
+-- 2. Terminate ONLY the root (never the innocent waiters); the convoy drains
+--    automatically in dependency order.
+SELECT pg_terminate_backend(<root_pid>);
+```
+
+If the launchd job looks "running" but is wedged: `csd sweep-health` flags the
+stale heartbeat; clear the stuck process and the next tick's guard reclaims the
+lock. See lessons `claudecode:lesson/csd-sweep-idle-in-transaction-lock-convoy`
+and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 
 ## Architecture
 

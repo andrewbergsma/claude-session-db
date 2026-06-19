@@ -231,6 +231,15 @@ def fetch_kmcp_session_map(
         Collision(sid, rows[sid], len(paths[sid]), len(apps[sid]))
         for sid in rows if rows[sid] > 1
     ]
+    # A colliding session_id (>1 kmcp entry) is non-unique, so the bare-id map's
+    # first-wins pick is arbitrary — for cross-stamped ids it can be a foreign
+    # entry, yielding a false "summarized". Drop those ids from the primary map so
+    # the affected archive sessions fall through to the natural-key disambiguator,
+    # which only matches when unique on both sides. See
+    # claudecode:lesson/session-id-unreliable-as-kmcp-session-key.
+    for sid in rows:
+        if rows[sid] > 1:
+            seen.pop(sid, None)
     # Keep only natural keys that resolve to exactly one kmcp entry.
     natkey_unique = {nk: next(iter(v)) for nk, v in natkey_all.items() if len(v) == 1}
     return seen, sorted(collisions, key=lambda c: -c.entries), natkey_unique

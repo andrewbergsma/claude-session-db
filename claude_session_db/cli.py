@@ -10,6 +10,7 @@ import os
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import click
@@ -23,6 +24,31 @@ from .sync import SessionSync
 # older than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
 SWEEP_INTERVAL_S = 300
 STALE_INTERVALS = 3
+
+
+def _load_dotenv() -> None:
+    """Best-effort load of a local `.env` (repo root or cwd) into os.environ.
+
+    Stdlib-only, no dependency. Existing environment variables always win, so a
+    shell-exported DSN overrides the file. Lines are `KEY=VALUE`; `#` comments and
+    blanks are skipped; surrounding quotes on the value are stripped.
+    """
+    for base in (Path(__file__).resolve().parent.parent, Path.cwd()):
+        env_path = base / ".env"
+        if not env_path.is_file():
+            continue
+        try:
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = val
+        except OSError:
+            pass
 
 
 def _redact(dsn: str) -> str:
@@ -40,6 +66,7 @@ def _redact(dsn: str) -> str:
 @click.pass_context
 def main(ctx: click.Context, dsn: str | None) -> None:
     """Claude Code session archive (Postgres)."""
+    _load_dotenv()
     ctx.ensure_object(dict)
     ctx.obj["dsn"] = resolve_dsn(dsn)
 

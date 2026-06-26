@@ -2,7 +2,7 @@
 
 The LOSSLESS ARCHIVE PLANE: parses Claude Code JSONL and writes straight into a
 `claude_sessions` Postgres database (a telemetry sibling of the knowledge DB on
-db-host — NEVER the knowledge tables).
+the same Postgres host — NEVER the knowledge tables).
 
 Design (per claudecode:design/claude-session-db-postgres-archive):
 - Every row keeps a `raw` JSONB escape-hatch so JSONL field drift never forces a
@@ -55,7 +55,7 @@ def resolve_dsn(explicit: Optional[str] = None) -> str:
       2. $CSD_DATABASE_URL
       3. $DATABASE_URL with its database name swapped to `claude_sessions`
          (DATABASE_URL conventionally points at the sibling `knowledge` DB on
-         the same db-host instance)
+         the same Postgres host)
     """
     if explicit:
         return explicit
@@ -69,7 +69,7 @@ def resolve_dsn(explicit: Optional[str] = None) -> str:
         return urlunsplit(new)
     raise RuntimeError(
         "No database DSN found. Set CSD_DATABASE_URL (or DATABASE_URL pointing at "
-        "the db-host instance)."
+        "the Postgres host). See .env.example."
     )
 
 

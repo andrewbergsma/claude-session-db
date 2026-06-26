@@ -104,7 +104,7 @@ class SessionsIndexParser:
     def decode_project_path(self, encoded: str) -> Path:
         """Decode project path from directory name.
 
-        Example: -Users-andrew-GitHub-knowledge -> /Users/me/GitHub/knowledge
+        Example: -Users-me-GitHub-knowledge -> /Users/me/GitHub/knowledge
         """
         # Remove leading dash and replace remaining dashes with /
         if encoded.startswith("-"):

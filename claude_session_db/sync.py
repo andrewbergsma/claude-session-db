@@ -34,7 +34,7 @@ from .transcript_analyzer import classify_error
 
 
 def decode_project_path(encoded: str) -> str:
-    """Decode a project dir name: -Users-andrew-GitHub-x -> /Users/me/GitHub/x."""
+    """Decode a project dir name: -Users-me-GitHub-x -> /Users/me/GitHub/x."""
     if encoded.startswith("-"):
         encoded = encoded[1:]
     return "/" + encoded.replace("-", "/")

@@ -46,7 +46,7 @@ Point `~/.claude/settings.json` at this script:
 {
   "statusLine": {
     "type": "command",
-    "command": "bash /Users/me/GitHub/claude-session-db/statusline/statusline-command.sh"
+    "command": "bash /path/to/claude-session-db/statusline/statusline-command.sh"
   }
 }
 ```

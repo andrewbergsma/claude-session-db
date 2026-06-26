@@ -27,7 +27,7 @@ badly (`progress` 43.5%→0%, `summary`→`ai-title`, a new `attribution*` syste
 
 ### Project Slug Encoding
 Leading `-` is `/`, subsequent `-` are `/`:
-`-Users-andrew-GitHub-knowledge` → `/Users/me/GitHub/knowledge`.
+`-Users-me-GitHub-knowledge` → `/Users/me/GitHub/knowledge`.
 
 ### Sync signal
 **Glob `**/*.jsonl` + filesystem mtime.** `sessions-index.json` covers <25% of

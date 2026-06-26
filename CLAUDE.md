@@ -5,15 +5,16 @@
 `csd` is the front-end for the **lossless Postgres archive** of Claude Code
 session transcripts. It parses session JSONL (`~/.claude/projects/**/*.jsonl`,
 main + subagent sidechains) and writes straight into a `claude_sessions`
-Postgres database — a telemetry sibling of the `knowledge` DB on
-db-host (NEVER the knowledge tables).
+Postgres database — a telemetry sibling of the `knowledge` DB on the same
+Postgres host (NEVER the knowledge tables).
 
 Design spec: `claudecode:knowledge:design/claude-session-db-postgres-archive`.
 Data model: `DATA_MODEL.md` (re-audited 2026-06-01 against live JSONL).
 
-**Database**: `claude_sessions` on `DB_HOST` (db-host, pg16).
-**Connection**: DSN auto-derived from `$DATABASE_URL` (swap db name →
-`claude_sessions`), or set `$CSD_DATABASE_URL`.
+**Database**: `claude_sessions` on the Postgres host (pg16).
+**Connection**: configured via env (`.env` or shell). DSN auto-derived from
+`$DATABASE_URL` (swap db name → `claude_sessions`), or set `$CSD_DATABASE_URL`.
+See `.env.example`.
 **CLI**: `csd`
 
 ## Commands

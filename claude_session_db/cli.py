@@ -19,11 +19,20 @@ from .postgres import SessionArchive, resolve_dsn
 from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
 from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
 from .sync import SessionSync
+from . import summarize as ph4
 
 # Launchd StartInterval for the sweep (seconds). The watcher flags a heartbeat
 # older than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
 SWEEP_INTERVAL_S = 300
 STALE_INTERVALS = 3
+
+# Launchd StartInterval for the phase-4 summarize timer. Slower than the sweep:
+# each tick can spend minutes of local-LLM time per session. Keep in sync with
+# com.claude-session-db.summarize.plist.
+SUMMARIZE_INTERVAL_S = 1800
+# A summarize run older than this is treated as wedged and its lock reclaimable.
+# Generous: limit×LLM-timeout plus slack.
+SUMMARIZE_MAX_AGE_S = int(os.environ.get("CSD_SUMMARIZE_MAX_AGE_S", "3300"))
 
 
 def _load_dotenv() -> None:
@@ -368,6 +377,105 @@ def unsummarized(ctx: click.Context, limit: int) -> None:
         click.echo(f"{r['session_id']}  {r['modified']}  "
                    f"{str(r['project_name'] or ''):<18.18} {r['msgs']:>4}msg "
                    f"{r['tools']:>4}tool{flag}  {r['title']}")
+
+
+def _summarize_guard() -> SweepGuard:
+    return SweepGuard(max_age_s=SUMMARIZE_MAX_AGE_S,
+                      lock_name="summarize.lock",
+                      heartbeat_name="summarize.heartbeat")
+
+
+@main.command()
+@click.option("-n", "--limit", type=int, default=ph4.DEFAULT_LIMIT,
+              help=f"Max sessions to roll up this run (default {ph4.DEFAULT_LIMIT}).")
+@click.option("--min-idle", type=int, default=ph4.DEFAULT_MIN_IDLE_S,
+              help=f"Seconds a session must be quiescent before roll-up "
+                   f"(default {ph4.DEFAULT_MIN_IDLE_S}).")
+@click.option("--model", default=ph4.DEFAULT_MODEL,
+              help=f"Ollama model (default {ph4.DEFAULT_MODEL}; env CSD_SUMMARIZE_MODEL).")
+@click.option("--ollama-url", default=ph4.DEFAULT_OLLAMA_URL,
+              help="Ollama endpoint (env CSD_OLLAMA_URL).")
+@click.option("--session", "only_session", default=None,
+              help="Roll up only this session_id (must be in the pending queue).")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN (default: archive DSN with db=knowledge).")
+@click.option("--dry-run", is_flag=True, help="List what would be summarized; no LLM, no writes.")
+@click.pass_context
+def summarize(ctx: click.Context, limit: int, min_idle: int, model: str,
+              ollama_url: str, only_session: str | None, kmcp_dsn: str | None,
+              dry_run: bool) -> None:
+    """Phase-4 roll-up: digest → local LLM → kmcp session entry (unattended).
+
+    Drains the reconcile gate's PENDING queue through the canonical off-session
+    path (session_digest → Ollama JSON mode → verified kmcp write →
+    mark-summarized watermark). Never resumes a session, never replays a raw
+    transcript. Run `csd reconcile-summaries` first for a fresh queue; a small
+    default limit lets the launchd timer drain the backlog gradually.
+    """
+    dsn = ctx.obj["dsn"]
+    guard = _summarize_guard()
+    res = guard.acquire()
+    if not res.acquired:
+        click.echo(f"summarize: {res.reason}", err=True)
+        guard.heartbeat(ok=True, detail=f"skipped: {res.reason}")
+        return
+    if res.reclaimed_stale:
+        click.echo(f"summarize: {res.reason}", err=True)
+    try:
+        with SessionArchive(dsn) as a:
+            stats = ph4.run_summarize(
+                a.connect(), dsn, limit=limit, min_idle_s=min_idle, model=model,
+                ollama_url=ollama_url, only_session=only_session,
+                dry_run=dry_run, kmcp_dsn=kmcp_dsn, log=click.echo)
+    except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
+        guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
+        click.echo(f"summarize: FAILED — {type(exc).__name__}: {exc}", err=True)
+        guard.release()
+        raise SystemExit(1)
+    else:
+        # Per-session failures are contained (recorded in summarize_attempts);
+        # the heartbeat only goes not-ok when the RUN itself broke.
+        guard.heartbeat(ok=True, detail=stats.summary().splitlines()[0])
+    finally:
+        guard.release()
+    click.echo(stats.summary())
+
+
+@main.command(name="summarize-health")
+@click.option("--stale-intervals", type=int, default=STALE_INTERVALS,
+              help=f"Flag a stall if the heartbeat is older than this many "
+                   f"{SUMMARIZE_INTERVAL_S}s intervals (default {STALE_INTERVALS}).")
+@click.pass_context
+def summarize_health(ctx: click.Context, stale_intervals: int) -> None:
+    """Report phase-4 summarize liveness (DB-free; mirrors sweep-health).
+
+    Exit 0 = healthy, 1 = STALE or last run errored, 2 = no heartbeat yet.
+    """
+    guard = _summarize_guard()
+    threshold = stale_intervals * SUMMARIZE_INTERVAL_S
+    age, hb = guard.staleness()
+
+    lock = guard._read_lock()
+    if lock:
+        import time as _t
+        lage = _t.time() - float(lock.get("started_at", 0) or 0)
+        click.echo(f"lock: held by pid={lock.get('pid')}, age={lage:.0f}s "
+                   f"(max {guard.max_age_s}s before reclaimable)")
+    else:
+        click.echo("lock: free")
+
+    if age is None:
+        click.echo("heartbeat: NONE — summarize has never recorded a completion")
+        raise SystemExit(2)
+
+    when = ""
+    if hb and hb.get("ok") is False:
+        when = f" — last run ERRORED: {hb.get('detail', '')[:200]}"
+    status = "STALE" if age > threshold else "ok"
+    click.echo(f"heartbeat: {status} (age={age:.0f}s, threshold={threshold}s, "
+               f"last_ok={hb.get('ok')}){when}")
+    if status == "STALE" or (hb and hb.get("ok") is False):
+        raise SystemExit(1)
 
 
 @main.command(name="mark-summarized")

@@ -65,6 +65,11 @@ csd recent 10
 | `csd views` | List the analytic views |
 | `csd sweep` | Launchd-timed ingest + live observability head (guarded) |
 | `csd sweep-health` | Watcher: heartbeat age / last outcome / held lock (DB-free) |
+| `csd reconcile-summaries` | Pre-LLM gate: classify sessions summarized / not_required / pending |
+| `csd unsummarized` | List the pending phase-4 work queue (newest first) |
+| `csd summarize` | Phase-4 roll-up: digest → local Ollama → verified kmcp entry (guarded) |
+| `csd summarize-health` | Watcher for the summarize timer (DB-free) |
+| `csd mark-summarized` | Stamp a session's summary watermark after a verified write |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |
 

@@ -53,18 +53,10 @@ def input_hint(inp):
     return ""
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("session")
-    ap.add_argument("--result-head", type=int, default=200,
-                    help="Chars of each tool_result to keep (default 200)")
-    ap.add_argument("--full-inputs", action="store_true",
-                    help="Keep tool_use inputs VERBATIM instead of a one-field hint. "
-                         "Actions (create_entry/create_relationship/Edit args) live in tool inputs; "
-                         "hinting them loses 'what was done' recall. Costs more tokens than the hint.")
-    args = ap.parse_args()
-
-    p = Path(args.session).expanduser()
+def render(session_path, result_head: int = 200, full_inputs: bool = False) -> str:
+    """Digest one session JSONL into compact text (the CLI body, importable —
+    the phase-4 summarizer calls this in-process instead of a subprocess)."""
+    p = Path(session_path).expanduser()
     recs = load(p)
 
     # Map tool_use_id -> (name, hint) so we can label results.
@@ -99,8 +91,8 @@ def main():
                         body = b.get("content", "")
                         body = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
                         body = body.replace("\n", " ").strip()
-                        head = body[:args.result_head]
-                        more = f" …(+{len(body) - args.result_head}c)" if len(body) > args.result_head else ""
+                        head = body[:result_head]
+                        more = f" …(+{len(body) - result_head}c)" if len(body) > result_head else ""
                         err = " [ERROR]" if b.get("is_error") else ""
                         out.append(f"    ⮑ result[{name}{(' ' + hint) if hint else ''}]{err}: {head}{more}")
             else:
@@ -115,10 +107,23 @@ def main():
             for b in content or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
                     inp = b.get("input", {})
-                    shown = json.dumps(inp, ensure_ascii=False) if args.full_inputs else input_hint(inp)
+                    shown = json.dumps(inp, ensure_ascii=False) if full_inputs else input_hint(inp)
                     out.append(f"  → {b.get('name')}({shown})")
 
-    sys.stdout.write("\n".join(out) + "\n")
+    return "\n".join(out) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("session")
+    ap.add_argument("--result-head", type=int, default=200,
+                    help="Chars of each tool_result to keep (default 200)")
+    ap.add_argument("--full-inputs", action="store_true",
+                    help="Keep tool_use inputs VERBATIM instead of a one-field hint. "
+                         "Actions (create_entry/create_relationship/Edit args) live in tool inputs; "
+                         "hinting them loses 'what was done' recall. Costs more tokens than the hint.")
+    args = ap.parse_args()
+    sys.stdout.write(render(args.session, args.result_head, args.full_inputs))
 
 
 if __name__ == "__main__":

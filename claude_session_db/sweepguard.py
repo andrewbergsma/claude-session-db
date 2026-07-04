@@ -103,11 +103,12 @@ class SweepGuard:
             guard.release()
     """
 
-    def __init__(self, state_dir: Path | None = None, max_age_s: int = DEFAULT_MAX_AGE_S):
+    def __init__(self, state_dir: Path | None = None, max_age_s: int = DEFAULT_MAX_AGE_S,
+                 lock_name: str = LOCK_NAME, heartbeat_name: str = HEARTBEAT_NAME):
         self.state_dir = Path(state_dir) if state_dir else _DEFAULT_STATE_DIR
         self.max_age_s = max_age_s
-        self.lock_path = self.state_dir / LOCK_NAME
-        self.heartbeat_path = self.state_dir / HEARTBEAT_NAME
+        self.lock_path = self.state_dir / lock_name
+        self.heartbeat_path = self.state_dir / heartbeat_name
         self._held = False
 
     # -- lock ---------------------------------------------------------------

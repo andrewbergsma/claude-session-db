@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-session-db.summarize</string>
+
+    <!-- Phase-4 roll-up: digest -> local Ollama -> kmcp session entry.
+         Sources the same private (chmod 600) env file as the sweep for the
+         DSN; launchd starts from a bare environment. Install:
+           cp launchd/com.claude-session-db.summarize.plist ~/Library/LaunchAgents/
+           launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-session-db.summarize.plist -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-c</string>
+        <string>source /Users/andrew/.config/claude-session-db/env &amp;&amp; exec /Users/andrew/GitHub/claude-session-db/.venv/bin/csd summarize</string>
+    </array>
+
+    <!-- Every 30 minutes; the default per-run limit keeps each tick to a couple
+         of local-LLM calls, so the pending backlog drains gradually instead of
+         monopolizing the GPU. The csd-side liveness guard (summarize.lock)
+         handles a wedged predecessor; launchd per-label serialization prevents
+         overlap. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- Deprioritized background work. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andrew/Library/Logs/claude-session-db-summarize.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andrew/Library/Logs/claude-session-db-summarize.log</string>
+</dict>
+</plist>

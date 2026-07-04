@@ -31,7 +31,32 @@ csd dsn                 # Print connection target (password redacted)
 csd open                # Interactive shell (pgcli/psql)
 csd sweep               # Launchd-timed: ingest + live observability head (guarded)
 csd sweep-health        # Watcher: heartbeat age / last outcome / held lock (DB-free)
+csd reconcile-summaries # Pre-LLM gate: classify summarized/not_required/pending
+csd unsummarized        # List the pending phase-4 work queue (newest first)
+csd summarize           # Phase-4 roll-up: digest -> local Ollama -> kmcp entry (guarded)
+csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
+csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 ```
+
+## Phase-4 roll-up (`csd summarize`)
+
+Automated off-session summarization of the reconcile gate's PENDING queue —
+per session: `session_digest.render(--full-inputs)` → local Ollama
+(`CSD_SUMMARIZE_MODEL`, default `gemma4:26b-mlx`, `think:false`) → kmcp
+`session` entry via `knowledge-cli` in local-trusted mode
+(`KNOWLEDGE_ALLOW_UNAUTH_LOCAL=1`) → read-back verify → `mark_summarized`
+watermark. Never `claude --resume`, never raw-transcript replay (the two
+historically failing paths). Auto entries carry the `auto-summary` tag; the
+target application is inferred deterministically from the session cwd
+(`APP_ALIASES` + live app check, fallback `CSD_SUMMARIZE_DEFAULT_APP`).
+
+Reliability mirrors the sweep: `summarize.lock` liveness guard +
+`summarize.heartbeat` (`csd summarize-health`), per-session failure isolation
+with a `summarize_attempts` backoff ledger (`MAX_ATTEMPTS`, 6h backoff), and a
+quiesce gate (`--min-idle`, default 900s) so live sessions are never digested
+mid-flight. Launchd timer: `launchd/com.claude-session-db.summarize.plist`
+(every 30 min, default 2 sessions/tick — the ~700-session backlog drains
+gradually; `csd summarize -n 20` is the manual backfill lever).
 
 ## Sweep reliability & recovery
 

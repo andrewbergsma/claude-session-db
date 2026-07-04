@@ -38,6 +38,7 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
+csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session
 ```
 
 ## Phase-4 roll-up (`csd summarize`)

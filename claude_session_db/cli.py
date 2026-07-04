@@ -556,6 +556,42 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
         sys.exit(1)
 
 
+@main.command(name="angles-serve")
+@click.option("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0 — LAN).")
+@click.option("--port", type=int, default=8791, help="Port (default 8791).")
+@click.option("--window", type=int, default=1800,
+              help="Transcript mtime window in seconds to count a session live (default 1800).")
+@click.option("--model", default=angles_mod.DEFAULT_MODEL,
+              help=f"Probe model (default {angles_mod.DEFAULT_MODEL}; env CSD_ANGLES_MODEL).")
+@click.option("--ollama-url", default=angles_mod.DEFAULT_OLLAMA_URL,
+              help="Ollama endpoint (env CSD_OLLAMA_URL).")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for the knowledge angle (default: archive DSN with db=knowledge).")
+@click.option("--no-probes", is_flag=True,
+              help="Deterministic angles only — skip LLM probes and retrieval.")
+@click.pass_context
+def angles_serve(ctx: click.Context, host: str, port: int, window: int,
+                 model: str, ollama_url: str, kmcp_dsn: str | None,
+                 no_probes: bool) -> None:
+    """Ambient multi-session angles dashboard (LAN, no auth — trusted network only).
+
+    Watches every live transcript under ~/.claude/projects, re-mines a
+    session's latest turn whenever its JSONL settles (~8s debounce), and
+    serves one row per session: direction, files, errors, kmcp writes, token
+    burn — each headline's detail one click away. Probes run through a
+    single-worker queue so concurrent sessions never stampede Ollama.
+
+    Design: claudecode:design/turn-angles-context-cockpit (ambient surface).
+    """
+    from .angles_web import serve
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None
+    serve(host=host, port=port, window_s=window, model=model,
+          base_url=ollama_url, kmcp_dsn=resolved_kmcp, no_probes=no_probes)
+
+
 @main.command(name="dsn")
 @click.pass_context
 def show_dsn(ctx: click.Context) -> None:

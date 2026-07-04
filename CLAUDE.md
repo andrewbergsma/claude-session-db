@@ -36,6 +36,8 @@ csd unsummarized        # List the pending phase-4 work queue (newest first)
 csd summarize           # Phase-4 roll-up: digest -> local Ollama -> kmcp entry (guarded)
 csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
+csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
+csd angles show ID      # Print the persisted detail behind a headline
 ```
 
 ## Phase-4 roll-up (`csd summarize`)
@@ -57,6 +59,20 @@ quiesce gate (`--min-idle`, default 900s) so live sessions are never digested
 mid-flight. Launchd timer: `launchd/com.claude-session-db.summarize.plist`
 (every 30 min, default 2 sessions/tick — the ~700-session backlog drains
 gradually; `csd summarize -n 20` is the manual backfill lever).
+
+## Turn angles (`csd angles`) — pull-based per-turn mining
+
+P1 spike of `claudecode:design/turn-angles-context-cockpit`. The operator fires
+`! csd angles` right after an agent response lands; the latest turn is read
+straight from the live session JSONL (no DB round-trip) and mined by ANGLES:
+deterministic extractors (files F, commands X, git G, kmcp writes W, errors R,
+metrics M — pure code, instant) plus small-model probes (direction D, events E
+on `CSD_ANGLES_MODEL`, default qwen2.5vl:7b) and retrieval (knowledge K via
+hybrid_search). Output is one-line ID-addressable headlines (~1-2K tokens);
+detail persists under the state dir (`csd angles show F1`). Curation is the
+operator's next message ("track E1, load K1, task D1") — nothing is written to
+kmcp by the command itself. Doctrine: pull not push; extraction is code, models
+only judge. A failed probe degrades to `(unavailable)`, never blocks the pull.
 
 ## Sweep reliability & recovery
 

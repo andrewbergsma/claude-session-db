@@ -123,6 +123,12 @@ def _sessions_payload(watcher: AngleWatcher) -> list[dict[str, Any]]:
             "slug": store.get("slug", ""),
             "cwd": store.get("cwd", ""),
             "git_branch": store.get("git_branch", ""),
+            "session_started_at": store.get("session_started_at", ""),
+            "prompt_count": store.get("prompt_count", 0),
+            "record_count": store.get("record_count", 0),
+            "model": store.get("model", ""),
+            "cc_version": store.get("cc_version", ""),
+            "transcript_bytes": transcript.stat().st_size if transcript else 0,
             "user_text": store.get("user_text", "")[:200],
             "turn_span": store.get("turn_span", []),
             "usage": store.get("usage", {}),
@@ -213,23 +219,32 @@ _PAGE = r"""<!doctype html>
           --warn:#d29922; }
   * { box-sizing:border-box; margin:0; }
   body { background:var(--bg); color:var(--fg); font:14px/1.45 ui-monospace,
-         SFMono-Regular,Menlo,monospace; padding:16px; }
-  h1 { font-size:15px; color:var(--dim); font-weight:normal; margin-bottom:12px; }
+         SFMono-Regular,Menlo,monospace; padding:14px; }
+  h1 { font-size:15px; color:var(--dim); font-weight:normal; margin-bottom:10px; }
   h1 b { color:var(--fg); }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
-          padding:12px 14px; margin-bottom:12px; }
-  .card.stale { opacity:.55; }
-  .hdr { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:baseline;
-         margin-bottom:8px; }
+  #tabs { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:0; }
+  .tab { background:var(--card); border:1px solid var(--line);
+         border-bottom:none; border-radius:8px 8px 0 0; padding:7px 12px 6px;
+         cursor:pointer; color:var(--dim); display:flex; gap:7px;
+         align-items:center; max-width:240px; }
+  .tab .t-slug { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tab.active { color:var(--fg); background:#1b2330; border-color:var(--acc); }
+  .tab.stale { opacity:.5; }
   .dot { display:inline-block; width:8px; height:8px; border-radius:50%;
-         background:var(--dim); margin-right:2px; }
+         background:var(--dim); flex:none; }
   .live .dot { background:var(--ok); }
   .mining .dot { background:var(--warn); animation:pulse 1s infinite; }
   @keyframes pulse { 50% { opacity:.3; } }
-  .slug { color:var(--acc); font-weight:bold; }
-  .meta { color:var(--dim); font-size:12px; }
-  .prompt { color:var(--fg); margin-bottom:8px; font-style:italic;
-            white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #panel { background:#1b2330; border:1px solid var(--acc); border-radius:0 8px 8px 8px;
+           padding:14px 16px; }
+  .kv { display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr));
+        gap:4px 22px; margin-bottom:10px; padding-bottom:10px;
+        border-bottom:1px solid var(--line); }
+  .kv div { display:flex; gap:8px; min-width:0; }
+  .kv .k { color:var(--dim); flex:none; width:86px; text-align:right;
+           font-size:12px; padding-top:1px; }
+  .kv .v { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .prompt { color:var(--fg); margin:2px 0 10px; font-style:italic; }
   .angle { display:flex; gap:8px; margin:2px 0; }
   .aname { color:var(--dim); width:82px; flex:none; text-align:right;
            font-size:12px; padding-top:1px; }
@@ -250,47 +265,74 @@ _PAGE = r"""<!doctype html>
   .empty { color:var(--dim); padding:40px; text-align:center; }
 </style></head><body>
 <h1><b>angles</b> · ambient turn dashboard · <span id="stat">…</span></h1>
-<div id="board"></div>
+<div id="tabs"></div><div id="panel"><div class="empty">loading…</div></div>
 <div id="detail"><span class="x" onclick="hide()">✕ close</span><pre id="dbody"></pre></div>
 <script>
 const ORDER = %ANGLE_ORDER%;
-let lastJson = "";
+let rows = [], sel = null, lastJson = "";
 function age(s){ if(s==null) return "?";
   return s<60? s+"s" : s<3600? Math.round(s/60)+"m" : Math.round(s/3600)+"h"; }
+function kb(n){ return n>1048576? (n/1048576).toFixed(1)+" MB" :
+  Math.round((n||0)/1024)+" KB"; }
+function ts(t){ if(!t) return "?"; const d=new Date(t);
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"})+" "+
+         d.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"}); }
+function dur(a,b){ if(!a) return "?"; const ms=(b?new Date(b):new Date())-new Date(a);
+  const m=Math.round(ms/60000); return m<60? m+"m" : (m/60).toFixed(1)+"h"; }
 function esc(t){ const d=document.createElement("i"); d.textContent=t??"";
   return d.innerHTML; }
+function pick(sid){ sel=sid; render(); }
+function render(){
+  const tabs=document.getElementById("tabs"),
+        panel=document.getElementById("panel");
+  if(!rows.length){ tabs.innerHTML="";
+    panel.innerHTML='<div class="empty">no live sessions — the watcher mines '+
+      'each transcript as it settles</div>'; return; }
+  if(!rows.some(s=>s.session_id===sel)) sel=rows[0].session_id;
+  tabs.innerHTML=rows.map(s=>{
+    const mining=s.status==="mining";
+    return `<div class="tab ${s.live?"live":"stale"} ${mining?"mining":""} `+
+      `${s.session_id===sel?"active":""}" onclick="pick('${s.session_id}')">`+
+      `<span class="dot"></span><span class="t-slug">`+
+      `${esc(s.slug||((s.cwd||"").split("/").pop()||"")+" "+s.session_id.slice(0,6))}</span></div>`;
+  }).join("");
+  const s=rows.find(r=>r.session_id===sel); if(!s) return;
+  const u=s.usage||{}, mining=s.status==="mining";
+  const kv=[
+    ["directory", s.cwd||"?"],
+    ["branch", s.git_branch||"—"],
+    ["started", ts(s.session_started_at)],
+    ["duration", dur(s.session_started_at, s.live?null:s.turn_span[1])],
+    ["last turn", age(s.transcript_age_s)+" ago"],
+    ["pulled", age(s.pull_age_s)+" ago"+(mining?" · ⛏ mining":"")],
+    ["prompts", (s.prompt_count||"?")+" · "+(s.record_count||"?")+" records"],
+    ["turn cost", (u.tool_calls??"?")+" tools · "+
+      (u.input_tokens??0).toLocaleString()+" in / "+
+      (u.output_tokens??0).toLocaleString()+" out"],
+    ["model", (s.model||"?")+(s.cc_version?" · cc "+s.cc_version:"")],
+    ["transcript", kb(s.transcript_bytes)],
+    ["session", s.session_id],
+  ];
+  const meta=kv.map(([k,v])=>`<div><span class="k">${k}</span>`+
+    `<span class="v" title="${esc(v)}">${esc(v)}</span></div>`).join("");
+  const angles=ORDER.filter(a=>s.headlines[a]).map(a=>{
+    const items=s.headlines[a].map(h=>
+      `<div class="hl" onclick="show('${s.session_id}','${h.id}')">`+
+      `<span class="id">${h.id}</span>${esc(h.headline)}</div>`).join("");
+    return `<div class="angle ${a}"><div class="aname">${a}</div>`+
+           `<div class="items">${items}</div></div>`;
+  }).join("") || '<div class="empty">no angles yet</div>';
+  const warn=s.status&&s.status!=="ok"&&!mining
+    ? `<div style="color:var(--err);margin-bottom:8px">⚠ ${esc(s.status)}</div>`:"";
+  panel.innerHTML=`<div class="kv">${meta}</div>${warn}`+
+    `<div class="prompt">“${esc(s.user_text)}”</div>${angles}`;
+}
 async function tick(){
   try{
-    const r = await fetch("/api/sessions"); const txt = await r.text();
-    document.getElementById("stat").textContent =
-      new Date().toLocaleTimeString();
+    const r=await fetch("/api/sessions"); const txt=await r.text();
+    document.getElementById("stat").textContent=new Date().toLocaleTimeString();
     if(txt===lastJson) return; lastJson=txt;
-    const rows = JSON.parse(txt); const b=document.getElementById("board");
-    if(!rows.length){ b.innerHTML='<div class="empty">no live sessions — '+
-      'the watcher mines each transcript as it settles</div>'; return; }
-    b.innerHTML = rows.map(s=>{
-      const u=s.usage||{};
-      const mining = s.status==="mining";
-      const proj=(s.cwd||"").split("/").slice(-2).join("/");
-      const angles = ORDER.filter(a=>s.headlines[a]).map(a=>{
-        const items=s.headlines[a].map(h=>
-          `<div class="hl" onclick="show('${s.session_id}','${h.id}')">`+
-          `<span class="id">${h.id}</span>${esc(h.headline)}</div>`).join("");
-        return `<div class="angle ${a}"><div class="aname">${a}</div>`+
-               `<div class="items">${items}</div></div>`;
-      }).join("");
-      return `<div class="card ${s.live?"live":"stale"} ${mining?"mining":""}">
-        <div class="hdr"><span class="dot"></span>
-          <span class="slug">${esc(s.slug||s.session_id.slice(0,8))}</span>
-          <span class="meta">${esc(proj)}${s.git_branch?" · "+esc(s.git_branch):""}
-            · pulled ${age(s.pull_age_s)} ago
-            · turn ${age(s.transcript_age_s)} old
-            · ${(u.tool_calls??"?")} tools · ${(u.output_tokens??0).toLocaleString()} out
-            ${mining?" · ⛏ mining":""}
-            ${s.status&&s.status!=="ok"&&!mining?" · ⚠ "+esc(s.status):""}</span>
-        </div>
-        <div class="prompt">“${esc(s.user_text)}”</div>${angles}</div>`;
-    }).join("");
+    rows=JSON.parse(txt); render();
   }catch(e){ document.getElementById("stat").textContent="offline: "+e; }
 }
 async function show(sid,id){

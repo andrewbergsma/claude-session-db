@@ -87,6 +87,11 @@ class TurnDelta:
     cwd: str = ""
     git_branch: str = ""
     slug: str = ""
+    session_started_at: str = ""
+    prompt_count: int = 0
+    record_count: int = 0
+    model: str = ""
+    cc_version: str = ""
 
 
 def _text_of(content: Any) -> str:
@@ -155,6 +160,15 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
     delta.git_branch = meta_rec.get("gitBranch", "")
     delta.slug = next((r.get("slug") for r in reversed(recs)
                        if r.get("slug")), "") or ""
+    delta.session_started_at = next((r.get("timestamp") for r in recs
+                                     if r.get("timestamp")), "")
+    delta.prompt_count = len(prompt_idx)
+    delta.record_count = len(recs)
+    delta.model = next((r.get("message", {}).get("model") for r in reversed(recs)
+                        if r.get("type") == "assistant"
+                        and r.get("message", {}).get("model")), "") or ""
+    delta.cc_version = next((r.get("version") for r in recs
+                             if r.get("version")), "") or ""
     usage_in = usage_out = 0
     for rec in span:
         if rec.get("isSidechain"):
@@ -426,6 +440,10 @@ def run_angles(cwd: str, angles: Optional[list[str]] = None,
                              "turn_span": [delta.started_at, delta.ended_at],
                              "cwd": delta.cwd, "git_branch": delta.git_branch,
                              "slug": delta.slug,
+                             "session_started_at": delta.session_started_at,
+                             "prompt_count": delta.prompt_count,
+                             "record_count": delta.record_count,
+                             "model": delta.model, "cc_version": delta.cc_version,
                              "usage": delta.usage,
                              "user_text": delta.user_text[:2000],
                              "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),

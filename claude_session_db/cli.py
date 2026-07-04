@@ -19,6 +19,7 @@ from .postgres import SessionArchive, resolve_dsn
 from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
 from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
 from .sync import SessionSync
+from . import angles as angles_mod
 from . import summarize as ph4
 
 # Launchd StartInterval for the sweep (seconds). The watcher flags a heartbeat
@@ -495,6 +496,63 @@ def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str, p
         row = mark_summarized(a.connect(), session_id, application, path)
     click.echo(f"summarized  {row['session_id']}  watermark={row['message_count_at_summary']}msg  "
                f"-> {row['kmcp_application']}:{row['kmcp_path']}")
+
+
+@main.command()
+@click.argument("spec", nargs=-1)
+@click.option("--session", "session_id", default=None,
+              help="Target session UUID (default: newest transcript for the cwd).")
+@click.option("--turn", type=int, default=-1,
+              help="Which turn: -1 = latest user prompt (default), -2 = prior, ...")
+@click.option("--model", default=angles_mod.DEFAULT_MODEL,
+              help=f"Probe model (default {angles_mod.DEFAULT_MODEL}; env CSD_ANGLES_MODEL).")
+@click.option("--ollama-url", default=angles_mod.DEFAULT_OLLAMA_URL,
+              help="Ollama endpoint (env CSD_OLLAMA_URL).")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for the knowledge angle (default: archive DSN with db=knowledge).")
+@click.option("--no-probes", is_flag=True,
+              help="Deterministic angles only — skip LLM probes and retrieval.")
+@click.pass_context
+def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
+           turn: int, model: str, ollama_url: str, kmcp_dsn: str | None,
+           no_probes: bool) -> None:
+    """Pull-based turn mining: one-line ID-addressable headlines for one turn.
+
+    Fire right after an agent response lands (e.g. `! csd angles` inside a
+    Claude Code session). SPEC is either an angle subset (`csd angles
+    files,errors,knowledge`) or `show ID` to print the persisted detail behind
+    a headline (`csd angles show F1`). No SPEC runs every angle. Reads the
+    turn straight from the live session JSONL; nothing is written to kmcp —
+    curation happens in the operator's next message.
+
+    Design: claudecode:design/turn-angles-context-cockpit
+    """
+    if spec and spec[0] == "show":
+        if len(spec) < 2:
+            click.echo("usage: csd angles show ID", err=True)
+            sys.exit(2)
+        click.echo(angles_mod.show_item(spec[1]))
+        return
+    wanted = None
+    if spec:
+        wanted = [a.strip() for chunk in spec for a in chunk.split(",") if a.strip()]
+        unknown = [a for a in wanted if a not in angles_mod.ANGLE_SPECS]
+        if unknown:
+            click.echo(f"unknown angle(s): {', '.join(unknown)} "
+                       f"(have: {', '.join(angles_mod.ANGLE_SPECS)})", err=True)
+            sys.exit(2)
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None  # knowledge angle degrades to unavailable
+    try:
+        click.echo(angles_mod.run_angles(
+            cwd=os.getcwd(), angles=wanted, session_id=session_id, turn=turn,
+            model=model, base_url=ollama_url, kmcp_dsn=resolved_kmcp,
+            no_probes=no_probes))
+    except (FileNotFoundError, ValueError) as exc:
+        click.echo(f"angles: {exc}", err=True)
+        sys.exit(1)
 
 
 @main.command(name="dsn")

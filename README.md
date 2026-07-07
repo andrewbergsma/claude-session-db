@@ -72,6 +72,7 @@ csd recent 10
 | `csd mark-summarized` | Stamp a session's summary watermark after a verified write |
 | `csd angles` | Pull-based turn mining: ID-addressable headlines for one turn |
 | `csd angles show ID` | Print the persisted detail behind a headline |
+| `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |
 

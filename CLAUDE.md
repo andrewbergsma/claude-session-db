@@ -41,6 +41,7 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
+csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
 csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)

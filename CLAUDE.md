@@ -41,7 +41,34 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
+csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
+csd usage add-account   # Vault the currently logged-in account (run once per account)
+csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)
+csd usage list          # List vaulted accounts (no network)
 ```
+
+## Dual-account usage (`csd usage`)
+
+Reports live Claude Max quota for both Max accounts from the same OAuth endpoints
+Claude Code's own `/usage` uses — refresh at `platform.claude.com/v1/oauth/token`
+(Claude Code public `client_id`), quota at `api.anthropic.com/api/oauth/usage`,
+identity at `.../api/oauth/profile` (`anthropic-beta: oauth-2025-04-20`). The
+refresh response self-labels each account (email + org), so no extra lookup names
+them.
+
+**One-account-at-a-time constraint.** Only the logged-in account is authenticated
+(macOS keychain `Claude Code-credentials` is authoritative; `~/.claude/.credentials.json`
+is a mirror). To poll *both*, each account's refresh token is vaulted (0600) at
+`$CSD_STATE_DIR/usage-accounts.json`. Anthropic **rotates the refresh token on
+every use**, so the vault is rewritten after each refresh and the active
+account's rotated creds are written back to keychain+file (preserving `mcpOAuth`)
+so the two stores never desync. `csd usage use LABEL` performs a rotation-safe
+account swap in place of the interactive `/login`. Bootstrap: log into each
+account and run `csd usage add-account` once.
+
+Local per-account token/cost is **not attributable** (transcripts carry no
+account identity), so the reported cost is a commingled all-accounts aggregate
+from `v_token_cost_daily`.
 
 ## Phase-4 roll-up (`csd summarize`)
 

@@ -21,6 +21,7 @@ from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
 from .sync import SessionSync
 from . import angles as angles_mod
 from . import summarize as ph4
+from . import usage as ug
 
 # Launchd StartInterval for the sweep (seconds). The watcher flags a heartbeat
 # older than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
@@ -572,6 +573,182 @@ def open_psql(ctx: click.Context) -> None:
         click.echo("Neither pgcli nor psql found on PATH.", err=True)
         sys.exit(1)
     os.execvp(tool, [tool, dsn])
+
+
+def _render_usage(rows: list[dict], cost: dict | None) -> None:
+    """Human-readable dual-account quota report."""
+    for row in rows:
+        tag = "  ● active" if row.get("active") else ""
+        name = row.get("label") or row.get("email") or "account"
+        plan = ug.TIER_LABELS.get(row.get("tier") or "", row.get("tier") or "?")
+        click.echo(f"\n{click.style(name, bold=True)}  ({row.get('email') or '?'} · {plan}){tag}")
+        if row.get("error"):
+            click.echo(f"    {click.style('✗ ' + row['error'], fg='red')}")
+            continue
+        u = row.get("usage") or {}
+
+        def line(caption: str, entry: dict | None) -> None:
+            if not entry:
+                click.echo(f"    {caption:<8} (n/a)")
+                return
+            pct = entry.get("percent") or 0
+            mark = ug._SEVERITY_MARK.get(entry.get("severity", "normal"), "")
+            fg = {"warning": "yellow", "critical": "red", "exceeded": "red"}.get(
+                entry.get("severity"), None)
+            bar = click.style(ug._bar(pct), fg=fg) if fg else ug._bar(pct)
+            click.echo(f"    {caption:<8} {bar} {pct:>3.0f}%{mark}   resets {ug._fmt_reset(entry.get('resets_at'))}")
+
+        line("5-hour", u.get("five_hour"))
+        line("weekly", u.get("weekly"))
+        for sc in u.get("scoped") or []:
+            if (sc.get("percent") or 0) > 0:
+                line(sc.get("name", "scoped")[:8], sc)
+    if cost is not None:
+        click.echo(f"\n{click.style('local cost', dim=True)} (all accounts, commingled): "
+                   f"${cost['week']:.2f} last 7d · ${cost['today']:.2f} today")
+    click.echo()
+
+
+@main.group(invoke_without_command=True)
+@click.option("--json", "as_json", is_flag=True, help="Emit the raw report as JSON.")
+@click.option("--no-cost", is_flag=True, help="Skip the local Postgres cost aggregate.")
+@click.pass_context
+def usage(ctx: click.Context, as_json: bool, no_cost: bool) -> None:
+    """Report Claude Max quota across all vaulted accounts (default action).
+
+    Bare `csd usage` polls every vaulted account's live quota. Use the
+    subcommands to manage the vault and switch the active account.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    vault = ug.load_vault()
+    rows: list[dict] = []
+    seen_emails: set[str] = set()
+
+    # 1) Active account via the LIVE (authoritative, current) refresh token.
+    live = ug.read_live_oauth()
+    if live and live.get("refreshToken"):
+        row = ug.poll(live["refreshToken"], vault, is_active=True,
+                      known_tier=live.get("rateLimitTier") or None)
+        rows.append(row)
+        if row.get("email"):
+            seen_emails.add(row["email"])
+
+    # 2) Remaining vaulted (inactive) accounts.
+    for acct in vault["accounts"]:
+        if acct.get("email") and acct["email"] in seen_emails:
+            continue
+        if not acct.get("refresh_token"):
+            continue
+        rows.append(ug.poll(acct["refresh_token"], vault, is_active=False,
+                            label=acct.get("label"), known_tier=acct.get("rate_limit_tier")))
+        if acct.get("email"):
+            seen_emails.add(acct["email"])
+
+    ug.save_vault(vault)  # persist rotated refresh tokens
+
+    if not rows:
+        click.echo("No accounts to report. Log into an account and run "
+                   "`csd usage add-account` to vault it.", err=True)
+        return
+
+    cost = None if no_cost else ug.local_aggregate_cost(ctx.obj["dsn"])
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps({"accounts": rows, "local_cost": cost}, indent=2, default=str))
+    else:
+        _render_usage(rows, cost)
+
+
+@usage.command("add-account")
+@click.argument("label", required=False)
+def usage_add_account(label: str | None) -> None:
+    """Vault the currently logged-in account (run once per account).
+
+    Reads the live keychain credential, refreshes it to confirm validity and learn
+    the account identity, and stores its (rotating) refresh token in the 0600
+    vault. LABEL defaults to the account's email local-part.
+    """
+    live = ug.read_live_oauth()
+    if not live or not live.get("refreshToken"):
+        click.echo("No live Claude credentials found (keychain/`~/.claude/.credentials.json`). "
+                   "Log in with Claude Code first.", err=True)
+        sys.exit(1)
+    vault = ug.load_vault()
+    try:
+        tok = ug.refresh(live["refreshToken"])
+    except ug.UsageError as e:
+        click.echo(f"Could not validate the live account: {e}", err=True)
+        sys.exit(1)
+    tier = live.get("rateLimitTier") or None
+    if not tier:
+        try:
+            tier = ((ug.fetch_profile(tok["access_token"]).get("organization") or {})
+                    .get("rate_limit_tier"))
+        except ug.UsageError:
+            tier = None
+    acct = ug.upsert_from_refresh(vault, tok, label=label, tier=tier)
+    # We just rotated the live refresh token — write it back so the live login survives.
+    ug.write_live_oauth(ug._oauth_from_token_response(tok, live))
+    ug.save_vault(vault)
+    click.echo(f"Vaulted '{acct['label']}' ({acct.get('email')} · "
+               f"{ug.TIER_LABELS.get(tier or '', tier or '?')}). "
+               f"{len(vault['accounts'])} account(s) now tracked.")
+
+
+@usage.command("use")
+@click.argument("label")
+def usage_use(label: str) -> None:
+    """Switch the active account to LABEL (replaces the interactive /login swap).
+
+    Refreshes the vaulted account and writes its fresh creds into the live
+    keychain + mirror file, so the next Claude Code session runs as that account.
+    """
+    vault = ug.load_vault()
+    acct = ug._find_account(vault, label)
+    if not acct:
+        names = ", ".join(a.get("label", "?") for a in vault["accounts"]) or "(none)"
+        click.echo(f"No vaulted account '{label}'. Known: {names}", err=True)
+        sys.exit(1)
+    try:
+        tok = ug.refresh(acct["refresh_token"])
+    except ug.UsageError as e:
+        click.echo(f"Refresh failed for '{label}': {e}", err=True)
+        sys.exit(1)
+    ug.upsert_from_refresh(vault, tok, label=acct.get("label"),
+                           tier=acct.get("rate_limit_tier"))
+    changed = ug.write_live_oauth(ug._oauth_from_token_response(tok, {
+        "rateLimitTier": acct.get("rate_limit_tier", ""),
+    }))
+    ug.save_vault(vault)
+    click.echo(f"Active account is now '{acct['label']}' ({acct.get('email')}). "
+               f"Wrote: {', '.join(changed) or 'nothing'}. Restart Claude Code to pick it up.")
+
+
+@usage.command("list")
+def usage_list() -> None:
+    """List vaulted accounts (no network)."""
+    vault = ug.load_vault()
+    if not vault["accounts"]:
+        click.echo("(no accounts vaulted — run `csd usage add-account`)")
+        return
+    for a in vault["accounts"]:
+        tier = ug.TIER_LABELS.get(a.get("rate_limit_tier") or "", a.get("rate_limit_tier") or "?")
+        click.echo(f"  {a.get('label'):<16} {a.get('email') or '?':<28} {tier}")
+
+
+@usage.command("remove")
+@click.argument("label")
+def usage_remove(label: str) -> None:
+    """Forget a vaulted account (does not touch the live login)."""
+    vault = ug.load_vault()
+    acct = ug._find_account(vault, label)
+    if not acct:
+        click.echo(f"No vaulted account '{label}'.", err=True)
+        sys.exit(1)
+    vault["accounts"] = [a for a in vault["accounts"] if a is not acct]
+    ug.save_vault(vault)
+    click.echo(f"Removed '{label}'. {len(vault['accounts'])} account(s) remain.")
 
 
 if __name__ == "__main__":

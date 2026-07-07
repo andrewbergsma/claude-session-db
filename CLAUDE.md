@@ -8,7 +8,10 @@ main + subagent sidechains) and writes straight into a `claude_sessions`
 Postgres database — a telemetry sibling of the `knowledge` DB on the same
 Postgres host (NEVER the knowledge tables).
 
-Design spec: `claudecode:knowledge:design/claude-session-db-postgres-archive`.
+Design spec: `claude_session_db:design/claude-session-db-postgres-archive`
+(the csd knowledge corpus lives in its own `claude_session_db` kmcp app —
+CLI reference `claude_session_db:command/csd`, curated by
+`claude_session_db:agent/steward`).
 Data model: `DATA_MODEL.md` (re-audited 2026-06-01 against live JSONL).
 
 **Database**: `claude_sessions` on the Postgres host (pg16).

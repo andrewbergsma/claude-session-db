@@ -556,9 +556,7 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
         sys.exit(1)
 
 
-@main.command(name="angles-serve")
-@click.option("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0 — LAN).")
-@click.option("--port", type=int, default=8791, help="Port (default 8791).")
+@main.command(name="angles-watch")
 @click.option("--window", type=int, default=1800,
               help="Transcript mtime window in seconds to count a session live (default 1800).")
 @click.option("--model", default=angles_mod.DEFAULT_MODEL,
@@ -570,26 +568,51 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
 @click.option("--no-probes", is_flag=True,
               help="Deterministic angles only — skip LLM probes and retrieval.")
 @click.pass_context
-def angles_serve(ctx: click.Context, host: str, port: int, window: int,
-                 model: str, ollama_url: str, kmcp_dsn: str | None,
-                 no_probes: bool) -> None:
-    """Ambient multi-session angles dashboard (LAN, no auth — trusted network only).
+def angles_watch(ctx: click.Context, window: int, model: str, ollama_url: str,
+                 kmcp_dsn: str | None, no_probes: bool) -> None:
+    """Headless miner: keep the angles state dir warm for every live session.
 
-    Watches every live transcript under ~/.claude/projects, re-mines a
-    session's latest turn whenever its JSONL settles (~8s debounce), and
-    serves one row per session: direction, files, errors, kmcp writes, token
-    burn — each headline's detail one click away. Probes run through a
+    Watches every live transcript under ~/.claude/projects and re-mines a
+    session's latest turn whenever its JSONL settles (~8s debounce), writing
+    headlines + detail to the angles state dir. Mining runs through a
     single-worker queue so concurrent sessions never stampede Ollama.
+
+    Serves nothing. Readers pick the results up off disk: `csd angles show ID`,
+    or the session console's angle rail.
 
     Design: claudecode:design/turn-angles-context-cockpit (ambient surface).
     """
-    from .angles_web import serve
+    from .angles_watch import run_watch
     try:
         resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
     except Exception:
         resolved_kmcp = None
-    serve(host=host, port=port, window_s=window, model=model,
-          base_url=ollama_url, kmcp_dsn=resolved_kmcp, no_probes=no_probes)
+    try:
+        run_watch(window_s=window, model=model, base_url=ollama_url,
+                  kmcp_dsn=resolved_kmcp, no_probes=no_probes)
+    except KeyboardInterrupt:
+        click.echo("angles-watch: stopped", err=True)
+
+
+@main.command(name="console")
+@click.option("--port", type=int, default=4462, help="Port (default 4462).")
+def console(port: int) -> None:
+    """Reply-capable session console: chat + kmcp reads + angle rail.
+
+    Binds 127.0.0.1 only. Renders each session's transcript as a chronological
+    event stream with the kmcp context it loaded inline, plus the latest turn's
+    angle headlines read off the state dir (run `csd angles-watch` to keep them
+    fresh). Answer resumes the session; Fork branches it at a chosen message.
+
+    Design: claudecode:design/turn-angles-context-cockpit (conversation surface).
+    """
+    from http.server import ThreadingHTTPServer
+
+    from .console import server as console_server
+
+    click.echo(f"session console → http://127.0.0.1:{port}/")
+    ThreadingHTTPServer(("127.0.0.1", port),
+                        console_server.Handler).serve_forever()
 
 
 @main.command(name="dsn")

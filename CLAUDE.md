@@ -41,7 +41,8 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
-csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session
+csd angles-watch        # Headless miner: keep the angles state dir warm (serves nothing)
+csd console             # Reply-capable session console (127.0.0.1:4462)
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
 csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)
@@ -105,6 +106,34 @@ operator's next message ("track E1, load K1, task D1") — nothing is written to
 kmcp by the command itself. Doctrine: pull not push; extraction is code, models
 only judge. A failed probe degrades to `(unavailable)`, never blocks the pull.
 
+### One engine, one surface
+
+Three commands, one seam — **the state dir**. Nothing serves what it mines.
+
+- `csd angles` — the operator's synchronous pull for one turn.
+- `csd angles-watch` (`angles_watch.py`) — the same miner, headless and
+  ambient. Watches every live transcript; mines a session's latest turn once
+  its JSONL **settles** (`(mtime_ns, size)` signature unchanged and quiet for
+  `DEBOUNCE_S`), so a turn is never mined mid-write. A **single worker** drains
+  the job queue, so N live sessions cannot stampede the local Ollama. It writes
+  to `$CSD_STATE_DIR/angles/<sid>.json` and serves nothing.
+- `csd console` (`console/`) — the reply-capable surface, and the only web UI.
+
+The console is **Direction A**: it renders a session's own transcript (chat
+turns, kmcp reads joined to their `tool_result` by `tool_use_id`) plus the angle
+headlines it reads *off disk*. It never runs a probe, calls Ollama, or queries
+kmcp/Postgres. Answer resumes the session (`claude -p --resume`, refused if the
+session wrote within 15s — the two-writer guard); Fork branches it, and a point
+fork writes a **new** session file rather than mutating the original.
+
+The kmcp reads-rail counts the `knowledge-cli call <tool>` Bash shim as a read,
+not just `mcp__*__<tool>` — a session that took the fallback loaded just as much
+context and must not vanish from the rail.
+
+Superseded: `angles-serve` / `angles_web.py`, a read-only LAN dashboard that
+duplicated the session list and reads-rail beside the console. Its watcher is
+now `angles_watch.py`; its UI is gone.
+
 ## Sweep reliability & recovery
 
 The `csd sweep` launchd agent (`com.claude-session-db.sweep`, every 300s) is
@@ -158,6 +187,10 @@ and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 - `postgres.py` — `SessionArchive`: schema DDL, JSONB escape-hatch columns,
   batched upserts (idempotent by uuid / per-source_file clear), analytic views.
 - `sync.py` — `SessionSync`: glob+mtime incremental sync engine.
+- `angles.py` — turn extraction + the ANGLES extractors/probes; the state dir.
+- `angles_watch.py` — headless ambient miner (settle-detect + single worker).
+- `console/` — reply-capable session console (stdlib HTTP, `server.py` +
+  `index.html`); reads transcripts and the angles state dir, nothing else.
 - `cli.py` — Click CLI.
 - `scripts/audit_jsonl.py` — Phase-0 field-frequency re-audit (regenerates DATA_MODEL.md).
 

@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kmcp — session console</title>
+<style>
+  :root {
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
+    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#6e7a87;
+    --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+    --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
+    --mode-section:#3fb950; --mode-batch:#39c5cf;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; }
+  body {
+    background:var(--bg); color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:grid; grid-template-columns:270px minmax(0,1fr) 320px;
+    grid-template-rows:100vh; height:100vh; overflow:hidden;
+  }
+  @media (max-width:1100px){ body{ grid-template-columns:230px minmax(0,1fr); } #rail{ display:none; } }
+  #nav, #main, #rail { min-height:0; }
+
+  /* ---- left: projects + sessions ---- */
+  #nav { background:var(--surface); border-right:1px solid var(--border);
+         overflow-y:auto; }
+  #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
+              border-bottom:1px solid var(--border); z-index:2; }
+  #nav .top h1 { font-size:13px; font-weight:600; letter-spacing:.3px; }
+  #nav .top .sub { color:var(--muted); font-size:11px; margin-top:2px; }
+  .proj { color:var(--ink2); font-size:10.5px; font-weight:700; text-transform:uppercase;
+          letter-spacing:.7px; padding:12px 14px 4px; }
+  .sess { display:flex; gap:8px; align-items:baseline; padding:7px 14px; cursor:pointer;
+          border-left:2px solid transparent; }
+  .sess:hover { background:var(--surface2); }
+  .sess.active { background:var(--surface2); border-left-color:var(--accent); }
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px; }
+  .dot.running { background:var(--warn); box-shadow:0 0 5px var(--warn); }
+  .dot.awaiting { background:var(--good); box-shadow:0 0 5px var(--good); }
+  .dot.stale,.dot.idle { background:var(--muted); }
+  .sess .meta { min-width:0; flex:1; }
+  .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  /* ---- center: chat ---- */
+  #main { display:flex; flex-direction:column; min-width:0; }
+  #chdr { padding:12px 20px; border-bottom:1px solid var(--border); background:var(--surface);
+          display:flex; flex-direction:column; gap:5px; }
+  #chdr .row1 { display:flex; align-items:center; gap:10px; }
+  #chdr h2 { font-size:15px; font-weight:600; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+  #chdr .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { font-size:11px; font-family:var(--mono); color:var(--ink2);
+          background:var(--surface2); border:1px solid var(--border);
+          border-radius:5px; padding:2px 8px; white-space:nowrap; }
+  .chip b { color:var(--ink); font-weight:600; }
+  .chip.sid { color:var(--accent); }
+  .chip.br { color:var(--purple); }
+
+  #stream { flex:1; overflow-y:auto; padding:16px 20px 8px; }
+  .ev { display:flex; gap:10px; margin:2px 0; }
+  .ev .gutter { min-width:44px; text-align:right; color:var(--muted);
+                font:11px/1.6 var(--mono); flex:none; padding-top:2px; }
+  .ev .b { min-width:0; flex:1; }
+
+  .turn { border-radius:8px; padding:9px 13px; }
+  .turn.user { background:var(--surface2); border:1px solid var(--border); }
+  .turn.assistant { background:transparent; }
+  .who { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+         letter-spacing:.5px; margin-bottom:3px; }
+  .turn.user .who { color:var(--accent); }
+  .turn.assistant .who { color:var(--ink2); }
+  .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
+  .turn.assistant .txt { color:var(--ink); }
+  .subtools { margin-top:6px; color:var(--muted); font:11px var(--mono); }
+
+  /* inline kmcp read marker */
+  .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
+          border-radius:6px; border:1px solid transparent; font-size:12.5px; }
+  .read:hover { background:var(--surface2); border-color:var(--border); }
+  .read.sel { background:var(--surface2); border-color:var(--accent); }
+  .read .ic { flex:none; }
+  .read .pth { font-family:var(--mono); font-size:12px; white-space:nowrap;
+               overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+  .read .pth .app { color:var(--ink2); }
+  .read.sub .pth::before { content:"⤷sub "; color:var(--purple); }
+  .badge { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.4px; border:1px solid; border-radius:4px; padding:1px 5px;
+           flex:none; }
+  .badge.full{color:var(--mode-full);border-color:var(--mode-full);}
+  .badge.summary{color:var(--mode-summary);border-color:var(--mode-summary);}
+  .badge.sections,.badge.section{color:var(--mode-sections);border-color:var(--mode-sections);}
+  .badge.batch{color:var(--mode-batch);border-color:var(--mode-batch);}
+  .read .sz { color:var(--muted); font:11px var(--mono); flex:none; }
+  .search { display:flex; align-items:center; gap:8px; padding:3px 10px;
+            color:var(--ink2); font-size:12px; }
+  .search .q { font-family:var(--mono); font-size:11.5px; color:var(--ink2);
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+  .toolev { padding:2px 10px; color:var(--muted); font:11px var(--mono); }
+
+  /* AskUserQuestion choice card */
+  .turn.choice { background:var(--surface2); border:1px solid var(--border); }
+  .turn.choice .who { color:var(--purple); }
+  .cq + .cq { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+  .cq-q { font-size:13.5px; margin-bottom:7px; display:flex; gap:8px;
+          align-items:baseline; flex-wrap:wrap; }
+  .ctag { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+          letter-spacing:.5px; border:1px solid; border-radius:4px; padding:1px 5px; flex:none; }
+  .ctag.hdr { color:var(--purple); border-color:var(--purple); }
+  .ctag.pend { color:var(--warn); border-color:var(--warn); }
+  .copt { display:flex; gap:8px; align-items:baseline; padding:6px 10px;
+          border:1px solid var(--border); border-radius:6px; margin-bottom:5px;
+          background:var(--surface); }
+  .copt.sel { border-color:var(--good); background:rgba(63,185,80,.09); }
+  .copt .lbl { font-weight:600; font-size:12.5px; color:var(--ink); flex:none; }
+  .copt.sel .lbl { color:var(--good); }
+  .copt .desc { color:var(--muted); font-size:11.5px; min-width:0; }
+  .copt .tick { color:var(--good); font-weight:700; margin-left:auto; flex:none; }
+
+  /* compose */
+  #compose { border-top:1px solid var(--border); padding:12px 20px; background:var(--surface);
+             display:flex; gap:8px; align-items:center; }
+  #compose input { flex:1; background:var(--bg); border:1px solid var(--border);
+                   border-radius:8px; color:var(--ink); padding:10px 14px;
+                   font:13px var(--mono); outline:none; }
+  #compose input:focus { border-color:var(--accent); }
+  #compose button { border:1px solid var(--border); border-radius:8px; cursor:pointer;
+                    font-size:13px; font-weight:600; padding:10px 16px;
+                    background:var(--surface2); color:var(--ink); }
+  #compose button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #compose button:disabled { opacity:.4; cursor:not-allowed; }
+  #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
+             min-height:14px; background:var(--surface); }
+
+  /* ---- right: read detail rail ---- */
+  #rail { background:var(--surface); border-left:1px solid var(--border);
+          overflow-y:auto; padding:14px 16px; }
+  #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
+             color:var(--ink2); margin-bottom:12px; }
+  .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
+  #angles { margin-top:22px; }
+  .ang-g { margin-bottom:10px; }
+  .ang-h { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.6px; color:var(--muted); margin-bottom:3px; }
+  .ang-i { font-size:12.5px; line-height:1.45; padding:3px 0; cursor:pointer;
+           display:flex; gap:7px; align-items:baseline; }
+  .ang-i:hover { color:var(--purple); }
+  .ang-id { font:10px var(--mono); font-weight:700; color:var(--muted);
+            flex:0 0 auto; }
+  .ang-i:hover .ang-id { color:var(--purple); }
+  .ang-head { font-size:13px; margin:4px 0 8px; }
+  .ang-detail { font:11.5px/1.5 var(--mono); white-space:pre-wrap;
+                word-break:break-word; max-height:46vh; overflow-y:auto;
+                background:var(--bg); border:1px solid var(--border);
+                border-radius:5px; padding:8px; }
+  .rl-path { font:13px var(--mono); word-break:break-all; margin-bottom:2px; }
+  .rl-app { color:var(--ink2); }
+  .kv { display:flex; justify-content:space-between; gap:10px; padding:7px 0;
+        border-bottom:1px solid var(--border); font-size:12.5px; }
+  .kv .k { color:var(--muted); font:11px var(--mono); text-transform:uppercase;
+           letter-spacing:.4px; }
+  .kv .v { font-family:var(--mono); text-align:right; word-break:break-word; }
+  .rl-open { display:block; margin-top:16px; text-align:center; text-decoration:none;
+             background:var(--surface2); border:1px solid var(--border); border-radius:8px;
+             color:var(--ink); padding:9px; font-size:12.5px; }
+  .rl-open:hover { border-color:var(--accent); color:var(--accent); }
+  .rl-secs { margin-top:12px; }
+  .rl-secs .s { display:inline-block; font:11px var(--mono); color:var(--mode-sections);
+                border:1px solid var(--mode-sections); border-radius:4px;
+                padding:1px 6px; margin:0 4px 4px 0; }
+  #summary { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }
+
+  /* first-class search rows + rail hit list */
+  .read.search .ic { filter:none; }
+  .read.search .pth .app { color:var(--purple); }
+  .badge.srf { color:var(--purple); border-color:var(--purple); }
+  .rl-tag { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+            letter-spacing:.6px; color:var(--mode-full); margin-bottom:6px; }
+  .rl-tag.srf { color:var(--purple); }
+  .rl-hits { margin-top:14px; }
+  .rl-hits-h { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+               color:var(--muted); margin-bottom:8px; }
+  .hit { display:block; text-decoration:none; padding:6px 8px; border:1px solid var(--border);
+         border-radius:6px; margin-bottom:6px; background:var(--surface2); }
+  .hit:hover { border-color:var(--purple); }
+  .hit-t { display:block; font-size:12px; color:var(--ink); white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis; }
+  .hit-p { display:block; font:10.5px var(--mono); color:var(--muted); white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis; }
+
+  .empty { color:var(--muted); padding:24px; font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+  <nav id="nav">
+    <div class="top">
+      <h1>kmcp · session console</h1>
+      <div class="sub" id="navsub">loading…</div>
+    </div>
+    <div id="navlist"></div>
+  </nav>
+
+  <main id="main">
+    <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
+    <div id="stream"><div class="empty">pick a session on the left</div></div>
+    <div id="cstatus"></div>
+    <div id="compose">
+      <input id="cin" placeholder="answer this session… (fork if it's running)" disabled
+             onkeydown="if(event.key==='Enter')send(false)">
+      <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
+      <button id="bfork" disabled onclick="send(true)">Fork</button>
+    </div>
+  </main>
+
+  <aside id="rail">
+    <h3>Read detail</h3>
+    <div id="raildetail" class="rl-empty">
+      Click a <b>📖 read</b> in the transcript to inspect what this session
+      consumed from the base — mode, size, sections, and a link into /browse.
+    </div>
+    <div id="angles"></div>
+    <div id="summary"></div>
+  </aside>
+
+<script>
+const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
+let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
+
+function esc(x){ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function rel(ts){ const s=Math.max(0,(Date.now()-new Date(ts).getTime())/1000);
+  if(s<60)return Math.floor(s)+"s"; if(s<3600)return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; }
+function clock(ts){ if(!ts)return""; const d=new Date(ts);
+  return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}); }
+function kb(n){ if(n==null)return "—"; if(n<1024)return n+" ch"; return (n/1024).toFixed(1)+" kB"; }
+
+/* ---------- nav ---------- */
+async function loadNav(){
+  let d; try { d = await (await fetch("/api/sessions")).json(); } catch(e){ return; }
+  const list = document.getElementById("navlist");
+  const byProj = {};
+  for(const s of d.sessions){ (byProj[s.project_label||s.project] ??= []).push(s); }
+  let html = "";
+  for(const [proj, ss] of Object.entries(byProj)){
+    html += `<div class="proj">${esc(proj)}</div>`;
+    for(const s of ss){
+      html += `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
+        <span class="dot ${s.state}" title="${s.state}"></span>
+        <span class="meta">
+          <div class="ttl">${esc(s.title)}</div>
+          <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}</div>
+        </span></div>`;
+    }
+  }
+  list.innerHTML = html || `<div class="empty">no recent sessions</div>`;
+  document.getElementById("navsub").textContent = `${d.sessions.length} sessions · ${Object.keys(byProj).length} projects`;
+}
+
+/* ---------- session detail ---------- */
+async function openSession(id){
+  curId = id; selIdx = null; pinnedBottom = true;
+  document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
+  await refreshSession(true);
+  loadNav();
+}
+
+async function refreshSession(scrollBottom){
+  if(!curId) return;
+  let s; try { s = await (await fetch("/api/session?id="+curId)).json(); } catch(e){ return; }
+  if(s.error) return;
+  curSession = s;
+  renderHeader(s); renderStream(s); renderAngles(s); renderSummary(s);
+  const st = document.getElementById("stream");
+  if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
+}
+
+function renderHeader(s){
+  const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
+  const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
+  const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
+  document.getElementById("chdr").innerHTML = `
+    <div class="row1">
+      <span class="dot ${s.state}" title="${s.state}"></span>
+      <h2 title="${esc(s.title)}">${esc(s.title)}</h2>
+    </div>
+    <div class="chips">
+      <span class="chip sid">${esc(s.session_id)}</span>
+      <span class="chip">📁 <b>${esc(folder)}</b></span>
+      ${s.branch?`<span class="chip br">⎇ ${esc(s.branch)}</span>`:""}
+      ${model}${ctx}
+      <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
+      <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
+      <span class="chip">${s.state}</span>
+      ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
+    </div>`;
+  const running = s.state==="running";
+  document.getElementById("cin").disabled = false;
+  document.getElementById("cin").placeholder = running
+    ? "session is running — Fork to speak into a copy" : "answer this session…";
+  document.getElementById("bans").disabled = running;
+  document.getElementById("bfork").disabled = false;
+}
+
+function readRow(e, idx){
+  const mode = e.mode||"read";
+  const secs = e.sections?.length ? `<span class="sz">[${esc(e.sections.join(", "))}]</span>` : "";
+  const cnt = e.count ? `<span class="sz">×${e.count}</span>` : "";
+  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})">
+    <span class="ic">📖</span>
+    <span class="pth"><span class="app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</span>
+    ${cnt}<span class="badge ${mode}">${mode}</span>${secs}
+    <span class="sz">${kb(e.chars)}</span>
+  </div>`;
+}
+
+function searchRow(e, idx){
+  const n = e.result?.total;
+  const got = e.result?.hits?.length;
+  return `<div class="read search ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})">
+    <span class="ic">🔍</span>
+    <span class="pth"><span class="app">${esc(e.tool)}:</span> ${esc(e.query)}</span>
+    ${n!=null?`<span class="badge srf">${n.toLocaleString()} hits</span>`:""}
+    ${got?`<span class="sz">▸${got}</span>`:""}
+    <span class="sz">${kb(e.chars)}</span>
+  </div>`;
+}
+
+function choiceCard(e){
+  const qs = (e.questions||[]).map(q=>{
+    // multiSelect answer payload is the selected labels joined by ", " inside one
+    // "Q"="A" pair (verified across real transcripts). Match a label as a whole
+    // comma-delimited token so labels containing a comma still resolve.
+    const sel = q.selected!=null ? String(q.selected) : null;
+    const norm = s => "," + s.replace(/,\s*/g, ",") + ",";
+    const isSel = lbl => sel!=null && (sel===lbl || norm(sel).includes(norm(lbl)));
+    const opts = (q.options||[]).map(o=>`
+      <div class="copt ${isSel(o.label)?"sel":""}">
+        <span class="lbl">${esc(o.label)}</span>
+        ${o.description?`<span class="desc">${esc(o.description)}</span>`:""}
+        ${isSel(o.label)?`<span class="tick">✓</span>`:""}
+      </div>`).join("");
+    const matched = (q.options||[]).some(o=>isSel(o.label));
+    const custom = (q.selected!=null && !matched) ? `
+      <div class="copt sel"><span class="lbl">${esc(q.selected)}</span>
+      <span class="desc">(custom answer)</span><span class="tick">✓</span></div>` : "";
+    const hdr = q.header?`<span class="ctag hdr">${esc(q.header)}${q.multi?" · multi":""}</span>`:"";
+    const pend = q.selected==null?`<span class="ctag pend">awaiting choice</span>`:"";
+    return `<div class="cq"><div class="cq-q">${hdr}<span>${esc(q.question)}</span>${pend}</div>${opts}${custom}</div>`;
+  }).join("");
+  return `<div class="turn choice"><div class="who">choice · AskUserQuestion</div>${qs}</div>`;
+}
+
+function renderStream(s){
+  let html = "";
+  s.events.forEach((e, i) => {
+    const g = `<span class="gutter">${clock(e.ts)}</span>`;
+    if(e.kind==="user")
+      html += `<div class="ev">${g}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+    else if(e.kind==="assistant"){
+      const tools = e.tools?.length ? `<div class="subtools">⚙ ${esc(e.tools.map(t=>t.replace(/^mcp__.+__/,"")).join(", "))}</div>` : "";
+      html += `<div class="ev">${g}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+    } else if(e.kind==="read")
+      html += `<div class="ev">${g}<div class="b">${readRow(e, i)}</div></div>`;
+    else if(e.kind==="search")
+      html += `<div class="ev">${g}<div class="b">${searchRow(e, i)}</div></div>`;
+    else if(e.kind==="tool")
+      html += `<div class="ev">${g}<div class="b"><div class="toolev">⚙ ${esc(e.tools.map(t=>t.replace(/^mcp__.+__/,"")).join(", "))}</div></div></div>`;
+    else if(e.kind==="choice")
+      html += `<div class="ev">${g}<div class="b">${choiceCard(e)}</div></div>`;
+  });
+  const st = document.getElementById("stream");
+  st.onscroll = () => { pinnedBottom = st.scrollHeight - st.scrollTop - st.clientHeight < 40; };
+  st.innerHTML = html || `<div class="empty">empty transcript</div>`;
+}
+
+function selectEvent(idx){
+  selIdx = idx;
+  renderStream(curSession);
+  const e = curSession.events[idx];
+  const rail = document.getElementById("raildetail");
+  rail.innerHTML = e.kind === "search" ? searchDetail(e) : readDetail(e);
+}
+
+function readDetail(e){
+  const href = BROWSE_BASE + encodeURIComponent(e.app||"") + "/" + (e.path||"");
+  const secs = e.sections?.length
+    ? `<div class="rl-secs">${e.sections.map(x=>`<span class="s">${esc(x)}</span>`).join("")}</div>` : "";
+  return `
+    <div class="rl-tag">📖 consumed</div>
+    <div class="rl-path"><span class="rl-app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</div>
+    <div class="kv"><span class="k">mode</span><span class="v"><span class="badge ${e.mode||"read"}">${e.mode||"read"}</span></span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${e.chars!=null?e.chars.toLocaleString()+" chars":"—"}</span></div>
+    <div class="kv"><span class="k">~tokens</span><span class="v">${e.chars!=null?"≈"+Math.round(e.chars/4).toLocaleString():"—"}</span></div>
+    <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
+    <div class="kv"><span class="k">entity</span><span class="v">${esc(e.etype||"—")}</span></div>
+    <div class="kv"><span class="k">via</span><span class="v">mcp${e.sub?" · subagent":""}</span></div>
+    <div class="kv"><span class="k">at</span><span class="v">${clock(e.ts)}</span></div>
+    ${secs}
+    <a class="rl-open" href="${href}" target="_blank">open in /browse ↗</a>`;
+}
+
+function searchDetail(e){
+  const r = e.result || {};
+  const tc = r.type_counts && Object.keys(r.type_counts).length
+    ? `<div class="rl-secs">${Object.entries(r.type_counts).sort((a,b)=>b[1]-a[1])
+        .map(([t,n])=>`<span class="s">${esc(t)} ${n}</span>`).join("")}</div>` : "";
+  const hits = (r.hits||[]).map(h=>{
+    const href = BROWSE_BASE + encodeURIComponent(h.app||"") + "/" + (h.path||"");
+    return `<a class="hit" href="${href}" target="_blank" title="open in /browse">
+      <span class="hit-t">${esc(h.title||h.path||"")}</span>
+      <span class="hit-p">${esc(h.app||"")}:${esc(h.path||"")}${h.score!=null?" · "+h.score:""}</span></a>`;
+  }).join("");
+  return `
+    <div class="rl-tag srf">🔍 surfaced</div>
+    <div class="rl-path">${esc(e.query)}</div>
+    <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
+    <div class="kv"><span class="k">total hits</span><span class="v">${r.total!=null?r.total.toLocaleString():"—"}</span></div>
+    <div class="kv"><span class="k">returned</span><span class="v">${(r.hits||[]).length}</span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${e.chars!=null?e.chars.toLocaleString()+" chars":"—"}</span></div>
+    <div class="kv"><span class="k">at</span><span class="v">${clock(e.ts)}</span></div>
+    ${tc}
+    ${hits ? `<div class="rl-hits"><div class="rl-hits-h">surfaced entries — offered, not consumed</div>${hits}</div>` : ""}`;
+}
+
+/* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
+const ANGLE_GLYPH = {direction:"→", events:"◆", files:"F", kmcp:"W", commands:"$",
+                     git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
+
+function renderAngles(s){
+  const el = document.getElementById("angles");
+  const r = s.rail;
+  if(!r || !r.angles.length){
+    el.innerHTML = `<h3>Turn angles</h3>
+      <div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
+      to keep the latest turn's angles warm.</div>`;
+    return;
+  }
+  const age = r.mined_age_s==null ? "" :
+    `<span class="k" style="float:right">mined ${rel(Date.now()-r.mined_age_s*1000)}</span>`;
+  const groups = r.angles.map(g=>`
+    <div class="ang-g">
+      <div class="ang-h">${esc(ANGLE_GLYPH[g.angle]||"·")} ${esc(g.angle)}</div>
+      ${g.items.map(i=>`<div class="ang-i" onclick="showAngle('${esc(i.id)}')">
+        <span class="ang-id">${esc(i.id)}</span> ${esc(i.headline)}</div>`).join("")}
+    </div>`).join("");
+  el.innerHTML = `<h3>Turn angles ${age}</h3>${groups}`;
+}
+
+async function showAngle(itemId){
+  const box = document.getElementById("raildetail");
+  box.classList.remove("rl-empty");
+  box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">loading…</div>`;
+  let d;
+  try { d = await (await fetch(`/api/detail?id=${curId}&item=${itemId}`)).json(); }
+  catch(e){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">unavailable</div>`; return; }
+  if(d.error){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">${esc(d.error)}</div>`; return; }
+  const detail = d.detail ?? d;
+  box.innerHTML = `<h4>${esc(itemId)} · ${esc(d.angle||"")}</h4>
+    <div class="ang-head">${esc(d.headline||"")}</div>
+    <pre class="ang-detail">${esc(typeof detail==="string"?detail:JSON.stringify(detail,null,2))}</pre>`;
+}
+
+function renderSummary(s){
+  const reads = s.events.filter(e=>e.kind==="read");
+  const searches = s.events.filter(e=>e.kind==="search");
+  const byMode = {}; let total = 0;
+  reads.forEach(e=>{ byMode[e.mode]=(byMode[e.mode]||0)+1; total += e.chars||0; });
+  const srfBytes = searches.reduce((a,e)=>a+(e.chars||0),0);
+  const modes = Object.entries(byMode).map(([m,n])=>`<span class="badge ${m}">${m} ${n}</span>`).join(" ");
+  const el = document.getElementById("summary");
+  if(!reads.length && !searches.length){ el.innerHTML=""; return; }
+  el.innerHTML = `
+    <h3>Session kmcp usage</h3>
+    <div class="kv"><span class="k">📖 consumed</span><span class="v">${reads.length} · ${kb(total)}</span></div>
+    <div class="kv"><span class="k">🔍 surfaced</span><span class="v">${searches.length} · ${kb(srfBytes)}</span></div>
+    <div class="kv"><span class="k">≈ tokens read</span><span class="v">≈${Math.round(total/4/1000)}k</span></div>
+    ${modes?`<div style="margin-top:8px">${modes}</div>`:""}`;
+}
+
+/* ---------- answer / fork ---------- */
+async function send(isFork){
+  const inp = document.getElementById("cin"); const text = inp.value.trim();
+  if(!text || !curSession) return;
+  const st = document.getElementById("cstatus");
+  st.textContent = isFork ? "forking…" : "answering…";
+  try {
+    const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });
+    const d = await r.json();
+    st.textContent = d.error ? "✗ "+d.error
+      : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
+      : d.action==="fork" ? "⑂ forked from end (headless)"
+      : "✓ answer sent — headless turn running";
+    if(!d.error) inp.value="";
+  } catch(e){ st.textContent = "✗ "+e; }
+}
+
+loadNav(); setInterval(loadNav, 5000);
+setInterval(()=>refreshSession(false), 3000);
+</script>
+</body>
+</html>

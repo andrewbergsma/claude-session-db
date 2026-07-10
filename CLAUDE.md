@@ -121,10 +121,49 @@ Three commands, one seam — **the state dir**. Nothing serves what it mines.
 
 The console is **Direction A**: it renders a session's own transcript (chat
 turns, kmcp reads joined to their `tool_result` by `tool_use_id`) plus the angle
-headlines it reads *off disk*. It never runs a probe, calls Ollama, or queries
-kmcp/Postgres. Answer resumes the session (`claude -p --resume`, refused if the
-session wrote within 15s — the two-writer guard); Fork branches it, and a point
-fork writes a **new** session file rather than mutating the original.
+headlines it reads *off disk*. Answer resumes the session (`claude -p --resume`,
+refused if the session wrote within 15s — the two-writer guard); Fork branches
+it, and a point fork writes a **new** session file rather than mutating the
+original.
+
+### Console actions
+
+- **Stop** — SIGINT → SIGTERM → SIGKILL to the process group of a run *the
+  console spawned*. It cannot reach anything else, and the button is disabled
+  with that reason. Claude Code opens a transcript, appends, and closes (no
+  process holds it open), and an interactive `claude` carries no session id in
+  argv — so an arbitrary live session **cannot be mapped to a pid**.
+  `claude -p --resume` never attaches to a running session either; it spawns a
+  new process that appends to the same file. That is what the two-writer guard
+  is guarding.
+- **Archive** — an index entry in `$CSD_STATE_DIR/console/archived.json`
+  (atomic replace), never a mutation of `~/.claude/projects`. Archived sessions
+  drop out of the sidebar, stay retrievable by id, ignore the 72h cutoff, and
+  return on unarchive. Nothing is destructive.
+- **Summarize + archive** — runs `/session-summary` on the session
+  (`claude -p --resume`), then archives it **only if the run exits 0**. A failed
+  summary leaves the session in the sidebar, where the failure is visible.
+- **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
+  usable without `csd angles-watch` running.
+
+### Curation — the span action-vocabulary
+
+`track → event`, `record → lesson`, `task → task` deposit kmcp writes;
+`load` / `drop` are context ops that compose the operator's *next message*
+(the design's "the operator's next message IS the curation") and write nothing.
+
+Writes are **two-phase**: compose a draft, validate with `import_entries`
+`dry_run`, show it, write only on explicit confirm. A small model's headline
+never reaches the corpus unreviewed. Two further guards:
+
+- The entry document is passed as **JSON**, which is valid YAML 1.2 — sidestepping
+  the `import_entries` YAML footguns wholesale (unquoted `#` truncation, bare
+  timestamps coerced to datetime, angle-bracket placeholder rejection).
+- Application inference **proposes, never decides**. The cwd basename is a guess
+  (`final-taglists` is not a kmcp app); it is validated against the live
+  `list_applications`. A confirmed write is *refused* when the app was a
+  fallback or when kmcp is unreachable — otherwise the entry lands silently in
+  the wrong corpus, or invents a junk application out of a directory name.
 
 The kmcp reads-rail counts the `knowledge-cli call <tool>` Bash shim as a read,
 not just `mcp__*__<tool>` — a session that took the fallback loaded just as much

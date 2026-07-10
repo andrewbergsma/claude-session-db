@@ -604,7 +604,12 @@ def angles_watch(ctx: click.Context, window: int, model: str, ollama_url: str,
 @click.option("--no-auth", is_flag=True,
               help="Serve a non-loopback bind with NO auth. This exposes "
                    "unauthenticated code execution — see the command help.")
-def console(host: str, port: int, token: str | None, no_auth: bool) -> None:
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for angle curation writes "
+                   "(default: archive DSN with db=knowledge).")
+@click.pass_context
+def console(ctx: click.Context, host: str, port: int, token: str | None,
+            no_auth: bool, kmcp_dsn: str | None) -> None:
     """Reply-capable session console: chat + kmcp reads + angle rail.
 
     Renders each session's transcript as a chronological event stream with the
@@ -628,7 +633,12 @@ def console(host: str, port: int, token: str | None, no_auth: bool) -> None:
         click.confirm(
             f"--no-auth on {host}:{port} exposes unauthenticated code execution "
             "to every host on the network. Proceed?", abort=True)
-    serve(host=host, port=port, token=token, no_auth=no_auth)
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None
+    serve(host=host, port=port, token=token, no_auth=no_auth,
+          kmcp_dsn=resolved_kmcp)
 
 
 @main.command(name="dsn")

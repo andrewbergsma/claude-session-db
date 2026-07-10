@@ -1,0 +1,27 @@
+
+--- spawn 21:13:23: claude -p --resume a5a4ba27-ac64-4852-a3b3-277e76ae6e84 /session-summary (cwd=/Users/andrew/Projects/controltech)
+I've stopped rather than keep firing denied calls. Every knowledge-mcp tool (`search`, `get_entry`, `get_entries`, and by extension the write tools) is coming back **"permissions not granted"** — the MCP server dropped and reconnected mid-session, which reset the grants. The `knowledge-cli` shim fallback is also blocked by the Bash sandbox. So I can read and analyze, but I cannot write a single entry right now.
+
+Here's the triage and the exact write plan, ready to execute the moment you grant kmcp access.
+
+**Triage: stumbled → full flow, but only just.** This session did one thing: run the off-session summary on `e08ca573` and discover it had already summarized itself. No code changed, no data moved. The one real signal is a *near-miss*, and it's worth capturing precisely because it nearly cost something.
+
+**The stumble.** The `session-summary` skill's off-session mode has no idempotency check. It opens with "This skill is conclusive: it triages, creates all entries, patches owners, and reports. No questions asked," walks Step 0b → Step 9, and nothing in that path tells the agent to ask whether the target session was *already* summarized. Followed literally, this run would have created a second copy of 6 events, 4 lessons, 7 tasks, a duplicate session entry, ~20 relationships, and re-patched 5 owner entries that were already correct — including re-appending to `controltech:data/instrumentation-scope-audit` and `controltech:contracts/pricing-table-pt8`, whose patches are `append` ops on string arrays and would have silently doubled. I only caught it because the digest's tail showed `/session-summary` as the target session's final user turn.
+
+That's Cat-1 (a fact absent from the corpus, not merely unfindable): nothing anywhere says "check before you write." The cheap detection is two lines — grep the digest tail for a `/session-summary` command turn, and `get_entry` the predicted `session/{date}/{topic}` path before Step 4.
+
+**Planned writes**, once unblocked:
+
+| what | path | note |
+|---|---|---|
+| event | `claudecode:event/2026-07-10/detect-already-summarized-session-before-writing` | `event_type: decision`; scope = the skill file + `controltech:session/2026-07-09/bid-tubing-reconciliation-and-ei-detail-7-1-1-carve` |
+| lesson | `claudecode:lesson/off-session-summary-has-no-idempotency-guard` | Cat-1; evidence = this session id + the digest tail |
+| owner patch | the `session-summary` skill's kmcp owner entry | add the pre-write existence check to Step 0b and Step 4 |
+| session | skipped | one investigation, no follow-ups of its own — the changelog carries it |
+
+I'd add a `see_also` from the lesson to `claudecode:lesson/session-id-unreliable-as-kmcp-session-key`, since both are failure modes of the same reconcile gate: that one is *wrong id written*, this one is *right id written twice*.
+
+Two things I'd need from you before writing. First, grant kmcp — re-approving `search`/`get_entry`/`import_entries`/`patch_content`/`create_relationship` should be enough. Second, I don't yet know the skill's owner entry path (`search` is exactly what's blocked), so I can't confirm the patch target; if you know whether it lives under `claudecode:` or `agent:`, that saves me a lookup.
+
+Worth saying plainly: if you'd rather not spend the writes, skipping is defensible. The near-miss is real but the corpus is unharmed, and the finding is now in this transcript. The reason I'd still write it is that the *next* off-session run — mine or another agent's — hits the same instruction gap with no memory of this one.
+SessionEnd hook [/Users/andrew/.claude/hooks/wt-reap.sh] failed: Hook cancelled

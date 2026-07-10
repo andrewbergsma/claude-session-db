@@ -142,6 +142,31 @@
   #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
              color:var(--ink2); margin-bottom:12px; }
   .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
+  .acts { display:flex; gap:6px; align-items:center; margin-top:9px; flex-wrap:wrap; }
+  .act { font:11px var(--mono); padding:4px 9px; border-radius:5px; cursor:pointer;
+         background:var(--surface); color:var(--ink2);
+         border:1px solid var(--border); }
+  .act:hover:not(:disabled) { color:var(--ink); border-color:var(--muted); }
+  .act:disabled { opacity:.38; cursor:not-allowed; }
+  .act.sm { font-size:10px; padding:3px 7px; }
+  .act.primary { color:var(--purple); border-color:var(--purple); }
+  .actmsg { font:10.5px var(--mono); color:var(--muted); margin-left:4px; }
+  .actmsg.bad { color:var(--warn); }
+  .navtog { float:right; cursor:pointer; color:var(--muted); text-decoration:underline; }
+  .navtog:hover { color:var(--purple); }
+  .tag { font:8.5px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+         color:var(--warn); border:1px solid var(--warn); border-radius:3px;
+         padding:0 3px; vertical-align:middle; }
+  .curate { display:flex; gap:5px; flex-wrap:wrap; margin:8px 0; }
+  .cur-row { display:flex; gap:8px; align-items:center; font-size:11.5px; margin:4px 0; }
+  .cur-row code { font:11px var(--mono); word-break:break-all; }
+  .cur-row select { font:11px var(--mono); background:var(--bg); color:var(--ink);
+                    border:1px solid var(--border); border-radius:4px; padding:2px 4px; }
+  .cur-ok  { font:10.5px var(--mono); color:var(--mode-full); margin:6px 0; }
+  .cur-err { font:10.5px var(--mono); color:var(--warn); margin:6px 0;
+             word-break:break-word; }
+  .cur-warn{ font-size:11.5px; line-height:1.5; color:var(--warn); margin:6px 0;
+             border-left:2px solid var(--warn); padding-left:7px; }
   #angles { margin-top:22px; }
   .ang-g { margin-bottom:10px; }
   .ang-h { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
@@ -238,8 +263,12 @@ function clock(ts){ if(!ts)return""; const d=new Date(ts);
 function kb(n){ if(n==null)return "—"; if(n<1024)return n+" ch"; return (n/1024).toFixed(1)+" kB"; }
 
 /* ---------- nav ---------- */
+let showArchived = false;
+
 async function loadNav(){
-  let d; try { d = await (await fetch("/api/sessions")).json(); } catch(e){ return; }
+  let d;
+  try { d = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
+  catch(e){ return; }
   const list = document.getElementById("navlist");
   const byProj = {};
   for(const s of d.sessions){ (byProj[s.project_label||s.project] ??= []).push(s); }
@@ -247,17 +276,22 @@ async function loadNav(){
   for(const [proj, ss] of Object.entries(byProj)){
     html += `<div class="proj">${esc(proj)}</div>`;
     for(const s of ss){
+      const busy = d.summarizing?.[s.session_id] === "running";
       html += `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
         <span class="dot ${s.state}" title="${s.state}"></span>
         <span class="meta">
-          <div class="ttl">${esc(s.title)}</div>
+          <div class="ttl">${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
           <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}</div>
         </span></div>`;
     }
   }
-  list.innerHTML = html || `<div class="empty">no recent sessions</div>`;
-  document.getElementById("navsub").textContent = `${d.sessions.length} sessions · ${Object.keys(byProj).length} projects`;
+  list.innerHTML = html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+  document.getElementById("navsub").innerHTML =
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${Object.keys(byProj).length} projects
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
 }
+
+function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 
 /* ---------- session detail ---------- */
 async function openSession(id){
@@ -295,6 +329,18 @@ function renderHeader(s){
       <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
       <span class="chip">${s.state}</span>
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
+      ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
+    </div>
+    <div class="acts">
+      <button class="act" ${s.stoppable?"":"disabled"} onclick="act('stop')"
+        title="${s.stoppable
+          ? "SIGINT the run this console spawned (same signal as Esc)"
+          : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
+      <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
+      <button class="act" onclick="act('summarize')"
+        title="Run /session-summary on this session, then archive it if the run exits cleanly">✎ Summarize + archive</button>
+      <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <span id="actmsg" class="actmsg"></span>
     </div>`;
   const running = s.state==="running";
   document.getElementById("cin").disabled = false;
@@ -425,6 +471,47 @@ function searchDetail(e){
     ${hits ? `<div class="rl-hits"><div class="rl-hits-h">surfaced entries — offered, not consumed</div>${hits}</div>` : ""}`;
 }
 
+/* ---------- session actions: stop / archive / summarize ---------- */
+function actmsg(text, bad){
+  const el = document.getElementById("actmsg");
+  if(!el) return;
+  el.textContent = text || "";
+  el.className = "actmsg" + (bad ? " bad" : "");
+}
+
+async function post(url, body){
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                             body: JSON.stringify(body)});
+  return [r.ok, await r.json()];
+}
+
+async function act(kind){
+  if(!curSession) return;
+  const s = curSession;
+  if(kind === "summarize" && !confirm(
+      "Run /session-summary on this session, then archive it?\n\n" +
+      "This appends a real agent turn to the transcript and costs a Claude run. " +
+      "It archives only if the summary exits cleanly."))
+    return;
+  const body = {session_id: s.session_id, cwd: s.cwd};
+  if(kind === "archive") body.archived = !s.archived;
+  actmsg(kind + "…");
+  const [ok, d] = await post("/api/" + kind, body);
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(kind === "stop" ? "stopped" :
+         kind === "archive" ? (body.archived ? "archived" : "unarchived") :
+         "summary running — archives when it finishes");
+  await refreshSession(false); loadNav();
+}
+
+async function mine(){
+  if(!curSession) return;
+  actmsg("mining…");
+  const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
+  if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
+  actmsg("mined"); await refreshSession(false);
+}
+
 /* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
 const ANGLE_GLYPH = {direction:"→", events:"◆", files:"F", kmcp:"W", commands:"$",
                      git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
@@ -460,7 +547,71 @@ async function showAngle(itemId){
   const detail = d.detail ?? d;
   box.innerHTML = `<h4>${esc(itemId)} · ${esc(d.angle||"")}</h4>
     <div class="ang-head">${esc(d.headline||"")}</div>
+    <div class="curate">
+      <button class="act sm" onclick="curate('${itemId}','track')" title="Create a kmcp event">track → event</button>
+      <button class="act sm" onclick="curate('${itemId}','record')" title="Create a kmcp lesson">record → lesson</button>
+      <button class="act sm" onclick="curate('${itemId}','task')" title="Create a kmcp task">task → task</button>
+      <button class="act sm" onclick="ctx('${itemId}','load')" title="Reference it in your next message">load</button>
+      <button class="act sm" onclick="ctx('${itemId}','drop')" title="Tell the session to stop carrying it">drop</button>
+    </div>
+    <div id="curatebox"></div>
     <pre class="ang-detail">${esc(typeof detail==="string"?detail:JSON.stringify(detail,null,2))}</pre>`;
+}
+
+/* load / drop are CONTEXT ops: they steer the next message, they don't write.
+   This is the design's "the operator's next message IS the curation". */
+function ctx(itemId, verb){
+  const inp = document.getElementById("cin");
+  const item = (curSession?.rail?.angles || [])
+    .flatMap(g => g.items).find(i => i.id === itemId);
+  const what = item ? `${itemId} (${item.headline})` : itemId;
+  const phrase = verb === "load" ? `Load ${what} into context.`
+                                 : `Drop ${what} from context; stop re-injecting it.`;
+  inp.value = (inp.value ? inp.value.trimEnd() + " " : "") + phrase;
+  inp.focus();
+}
+
+/* Curation is two-phase: draft (dry_run) → review → confirm. A small model's
+   headline never reaches the corpus unreviewed. */
+async function curate(itemId, action, fields){
+  const box = document.getElementById("curatebox");
+  box.innerHTML = `<div class="k">composing draft…</div>`;
+  const [ok, d] = await post("/api/angles/curate",
+    {session_id: curId, item_id: itemId, action, fields: fields || {}});
+  if(!d.draft){ box.innerHTML = `<div class="cur-err">${esc(d.error||"failed")}</div>`; return; }
+
+  const apps = d.applications || [];
+  const warn = d.app_status === "matched" || d.app_status === "explicit" ? "" :
+    `<div class="cur-warn">The session cwd (<code>${esc(d.cwd||"unknown")}</code>) names no
+     live kmcp app, so <b>${esc(d.draft.application)}</b> is a guess. Pick the target below —
+     a confirmed write is refused until you do.</div>`;
+  const dry = JSON.stringify(d.dry_run||{});
+  const bad = dry.includes('"error"') || dry.includes("Missing") || dry.includes("Unfilled");
+
+  box.innerHTML = `
+    ${warn}
+    <div class="cur-row"><span class="k">app</span>
+      <select id="curapp">${apps.map(a=>`<option ${a===d.draft.application?"selected":""}>${esc(a)}</option>`).join("")}</select>
+    </div>
+    <div class="cur-row"><span class="k">path</span><code>${esc(d.draft.path)}</code></div>
+    ${bad?`<div class="cur-err">validation: ${esc(dry.slice(0,300))}</div>`:
+          `<div class="cur-ok">dry run OK — nothing written yet</div>`}
+    <div class="curate">
+      <button class="act sm primary" onclick="curateConfirm('${itemId}','${action}')">Write to kmcp</button>
+      <button class="act sm" onclick="document.getElementById('curatebox').innerHTML=''">Cancel</button>
+    </div>`;
+}
+
+async function curateConfirm(itemId, action){
+  const box = document.getElementById("curatebox");
+  const app = document.getElementById("curapp")?.value;
+  box.innerHTML = `<div class="k">writing…</div>`;
+  const [ok, d] = await post("/api/angles/curate",
+    {session_id: curId, item_id: itemId, action, confirm: true,
+     fields: app ? {application: app} : {}});
+  if(!d.ok){ box.innerHTML = `<div class="cur-err">${esc(d.error||"write failed")}</div>`; return; }
+  const p = `${d.draft.application}:${d.draft.path}`;
+  box.innerHTML = `<div class="cur-ok">written + verified → <code>${esc(p)}</code></div>`;
 }
 
 function renderSummary(s){

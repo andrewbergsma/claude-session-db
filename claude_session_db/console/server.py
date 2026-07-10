@@ -34,9 +34,14 @@ import json
 import os
 import re
 import secrets
+import shutil
+import signal
 import subprocess
+import sys
+import threading
 import time
 import uuid as uuidlib
+from datetime import datetime, timezone
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -110,6 +115,101 @@ def angle_detail(sid: str, item_id: str):
     if not store:
         return None
     return (store.get("items") or {}).get(item_id.upper())
+
+
+# ----------------------------------------------------------------------------
+# run registry — what the console spawned, and can therefore stop
+#
+# Claude Code opens a transcript, appends, and closes; no process holds it open,
+# and an interactive `claude` carries no session id in argv. So a session that
+# was started in a terminal CANNOT be mapped to a pid, and Stop cannot reach it.
+# `claude -p --resume` never attaches to that process either — it spawns a NEW
+# one that appends to the same file (which is why /api/answer has a two-writer
+# guard). We can only stop what we started. The UI says so rather than guessing.
+# ----------------------------------------------------------------------------
+RUNS: dict[str, list] = {}          # session_id -> [Popen, ...]
+_RUNS_LOCK = threading.Lock()
+
+
+def _register(sid: str, proc):
+    if not sid:
+        return
+    with _RUNS_LOCK:
+        RUNS.setdefault(sid, []).append(proc)
+
+
+def _live_procs(sid: str):
+    with _RUNS_LOCK:
+        procs = [p for p in RUNS.get(sid, []) if p.poll() is None]
+        if procs:
+            RUNS[sid] = procs
+        else:
+            RUNS.pop(sid, None)
+        return list(procs)
+
+
+def stoppable(sid: str) -> bool:
+    return bool(_live_procs(sid))
+
+
+def stop_session(sid: str) -> dict:
+    """SIGINT the process group (Esc's signal), escalating if it won't die."""
+    procs = _live_procs(sid)
+    if not procs:
+        return {"ok": False, "error": "no console-spawned run for this session; "
+                                      "a session started in a terminal cannot be "
+                                      "stopped from here"}
+    killed = []
+    for p in procs:
+        for sig, wait in ((signal.SIGINT, 2.0), (signal.SIGTERM, 2.0),
+                          (signal.SIGKILL, 1.0)):
+            if p.poll() is not None:
+                break
+            try:
+                os.killpg(os.getpgid(p.pid), sig)   # start_new_session=True
+            except (ProcessLookupError, PermissionError):
+                break
+            deadline = time.time() + wait
+            while time.time() < deadline and p.poll() is None:
+                time.sleep(0.05)
+        killed.append({"pid": p.pid, "rc": p.poll()})
+    _live_procs(sid)
+    return {"ok": True, "stopped": killed}
+
+
+# ----------------------------------------------------------------------------
+# archive — hide from the sidebar, never touch the transcript
+#
+# Archiving is an index entry in the console's own state, NOT a mutation of
+# ~/.claude/projects. The JSONL is never moved, renamed, or deleted; an
+# archived session is fully retrievable by id and reappears the moment it is
+# unarchived. Nothing here is destructive.
+# ----------------------------------------------------------------------------
+CONSOLE_STATE = ANGLES_DIR.parent / "console"
+ARCHIVE_FILE = CONSOLE_STATE / "archived.json"
+_ARCHIVE_LOCK = threading.Lock()
+
+
+def _read_archive() -> dict:
+    try:
+        return json.loads(ARCHIVE_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def set_archived(sid: str, archived: bool, reason: str = "") -> dict:
+    with _ARCHIVE_LOCK:
+        idx = _read_archive()
+        if archived:
+            idx[sid] = {"archived_at": datetime.now(timezone.utc).isoformat(),
+                        "reason": reason}
+        else:
+            idx.pop(sid, None)
+        CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
+        tmp = ARCHIVE_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(idx, indent=1))
+        tmp.replace(ARCHIVE_FILE)          # atomic; never a half-written index
+    return {"ok": True, "session_id": sid, "archived": archived}
 
 
 # ----------------------------------------------------------------------------
@@ -362,17 +462,26 @@ def summarize_nav(path: Path):
     }
 
 
-def discover_sessions():
+def discover_sessions(archived=False):
+    """Nav list. archived=False hides archived sessions; True shows only them.
+
+    An archived session is filtered from this list, never from disk — it is
+    still served by /api/session and returns the moment it is unarchived.
+    """
+    idx = _read_archive()
     cutoff = time.time() - MAX_AGE_H * 3600
     cands = []
     for p in PROJECTS.glob("*/*.jsonl"):
         if "subagents" in p.parts:
             continue
+        if (p.stem in idx) != archived:
+            continue
         try:
             m = p.stat().st_mtime
         except OSError:
             continue
-        if m >= cutoff:
+        # Archived sessions ignore the age cutoff — retrieval is the point.
+        if m >= cutoff or archived:
             cands.append((m, p))
     cands.sort(reverse=True)
     out = []
@@ -382,6 +491,8 @@ def discover_sessions():
         except OSError:
             continue
         if s:
+            s["archived"] = p.stem in idx
+            s["stoppable"] = stoppable(p.stem)
             out.append(s)
     return out
 
@@ -520,21 +631,275 @@ def build_session(sid: str):
                    "events": len(events)},
         "events": events,
         "rail": angle_rail(sid),
+        "archived": sid in _read_archive(),
+        "stoppable": stoppable(sid),
     }
 
 
 # ----------------------------------------------------------------------------
 # answer / fork (unchanged behaviour from the prototype)
 # ----------------------------------------------------------------------------
-def spawn_claude(args, cwd):
+def spawn_claude(args, cwd, session_id=None):
+    """Spawn a claude run, registering it so Stop can signal its process group."""
     with open(ANSWER_LOG, "a") as log:
         log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: claude {' '.join(args)} (cwd={cwd})\n")
         log.flush()
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["claude"] + args, cwd=cwd or str(Path.home()),
             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True,
         )
+    _register(session_id, proc)
+    return proc
+
+
+# ----------------------------------------------------------------------------
+# angles: mine on demand, then curate
+#
+# The action-vocabulary named in claudecode:design/turn-angles-context-cockpit:
+#   track  -> event      record -> lesson      task -> task
+#   load/drop -> context (client-side: it edits the NEXT message, not the base)
+#   link   -> edge       (deferred: needs a second endpoint to link to)
+#
+# Curation is the only thing here that WRITES to kmcp, and it is two-phase:
+# compose a draft, validate it with import_entries dry_run, show it, and write
+# only on explicit confirm. A small model's headline never reaches the corpus
+# unreviewed.
+# ----------------------------------------------------------------------------
+KMCP_DSN = None            # set by serve()
+MINE_TIMEOUT_S = 300
+KMCP_TIMEOUT_S = 120
+
+EVENT_TYPES = {"schema_change", "deployment", "data_migration", "decision",
+               "bugfix", "configuration", "import", "security", "refactor",
+               "feature", "deprecation"}
+
+
+def _csd_bin():
+    return shutil.which("csd") or None
+
+
+def mine_angles(sid: str, no_probes=False) -> dict:
+    """Run the miner for one session, the way we already shell out to claude."""
+    csd = _csd_bin()
+    cmd = ([csd] if csd else [sys.executable, "-m", "claude_session_db.cli"])
+    cmd += ["angles", "--session", sid]
+    if no_probes:
+        cmd.append("--no-probes")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=MINE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": f"mining timed out after {MINE_TIMEOUT_S}s"}
+    if p.returncode != 0:
+        return {"ok": False, "error": (p.stderr or p.stdout).strip()[:400]}
+    return {"ok": True, "rail": angle_rail(sid)}
+
+
+class KmcpError(RuntimeError):
+    pass
+
+
+def _kmcp_call(tool: str, args: dict) -> dict:
+    """knowledge-cli in local-trusted mode — the same path csd summarize uses."""
+    cli = (os.environ.get("CSD_KNOWLEDGE_CLI") or shutil.which("knowledge-cli")
+           or str(Path.home() / ".local" / "bin" / "knowledge-cli"))
+    if not Path(cli).exists():
+        raise KmcpError("knowledge-cli not found (set CSD_KNOWLEDGE_CLI)")
+    env = dict(os.environ)
+    if KMCP_DSN:
+        env["DATABASE_URL"] = KMCP_DSN
+    env["KNOWLEDGE_ALLOW_UNAUTH_LOCAL"] = "1"
+    state = CONSOLE_STATE.parent / "kmcp-data"
+    state.mkdir(parents=True, exist_ok=True)
+    env.setdefault("KNOWLEDGE_DATA_DIR", str(state))
+    try:
+        p = subprocess.run([cli, "call", tool, "-"], input=json.dumps(args),
+                           capture_output=True, text=True, env=env,
+                           cwd=str(state), timeout=KMCP_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise KmcpError(f"{tool}: timed out after {KMCP_TIMEOUT_S}s") from exc
+    out = p.stdout.strip()
+    brace = out.find("{")
+    if brace >= 0:
+        try:
+            return json.loads(out[brace:])
+        except json.JSONDecodeError:
+            pass
+    raise KmcpError(f"{tool}: rc={p.returncode} out={out[:200]!r} "
+                    f"err={p.stderr.strip()[:200]!r}")
+
+
+def _slug(text: str, cap=60) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return (s[:cap].rstrip("-")) or "untitled"
+
+
+DEFAULT_APP = os.environ.get("CSD_CONSOLE_DEFAULT_APP", "claudecode")
+_APPS_CACHE: dict = {"names": None, "at": 0.0}
+_APPS_TTL_S = 300
+
+# cwd basenames that don't match their kmcp app name
+APP_ALIASES = {
+    "knowledge": "knowledge_mcp_code",
+    "claude_session_db": "claude_session_db",
+    "claude-session-db": "claude_session_db",
+}
+
+
+def _live_apps() -> set:
+    if (_APPS_CACHE["names"] is not None
+            and time.time() - _APPS_CACHE["at"] < _APPS_TTL_S):
+        return _APPS_CACHE["names"]
+    try:
+        r = _kmcp_call("list_applications", {})
+        names = {a["name"] for a in r.get("applications", []) if a.get("name")}
+    except KmcpError:
+        names = set()
+    if names:
+        _APPS_CACHE.update(names=names, at=time.time())
+    return names
+
+
+def _infer_app(cwd: str) -> tuple:
+    """(application, status) where status is matched | fallback | unknown.
+
+    The cwd basename is a GUESS. Two failure modes, both real:
+      - `final_taglists` is not a kmcp app; writing there would CREATE a junk
+        application out of a directory name.
+      - Silently falling back to DEFAULT_APP is worse: the write succeeds, in
+        the wrong corpus, and nothing says so.
+    So inference only ever PROPOSES. A `fallback` never gets written without
+    the operator naming the application explicitly.
+    """
+    base = Path(cwd or "").name
+    cand = APP_ALIASES.get(base) or APP_ALIASES.get(base.replace("-", "_")) \
+        or base.replace("-", "_")
+    live = _live_apps()
+    if not live:                       # kmcp unreachable — don't pretend
+        return cand, "unknown"
+    if cand in live:
+        return cand, "matched"
+    return DEFAULT_APP, "fallback"
+
+
+def compose_curation(sid: str, item_id: str, action: str, fields: dict) -> dict:
+    """Build the kmcp entry document for one curated angle headline."""
+    item = angle_detail(sid, item_id)
+    if not item:
+        raise KmcpError(f"{item_id} not mined for {sid}")
+    store = _angles_store(sid) or {}
+    headline = fields.get("headline") or item.get("headline") or item_id
+    detail = item.get("detail")
+    detail_txt = (detail if isinstance(detail, str)
+                  else json.dumps(detail, indent=2, ensure_ascii=False))[:4000]
+    if fields.get("application"):
+        app = fields["application"]
+        live = _live_apps()
+        app_status = "explicit" if (not live or app in live) else "fallback"
+    else:
+        app, app_status = _infer_app(store.get("cwd", ""))
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prov = (f"Curated from turn-angle {item_id} ({item.get('angle')}) of "
+            f"session {sid}. Session cwd: {store.get('cwd') or 'unknown'}.")
+
+    if action == "track":
+        etype = fields.get("event_type", "decision")
+        if etype not in EVENT_TYPES:
+            raise KmcpError(f"event_type {etype!r} not in {sorted(EVENT_TYPES)}")
+        doc = {
+            "application": app, "path": f"event/{today}/{_slug(headline)}",
+            "entity_type": "event", "title": headline,
+            "description": fields.get("description") or headline,
+            "tags": fields.get("tags") or ["turn-angles"],
+            "content": {
+                "summary": headline, "details": f"{detail_txt}\n\n{prov}",
+                "event_type": etype, "occurred_at": today,
+                "actor": "console-curation", "scope": [sid],
+            },
+        }
+    elif action == "record":
+        doc = {
+            "application": app, "path": f"lesson/{_slug(headline)}",
+            "entity_type": "lesson", "title": headline,
+            "description": fields.get("description") or headline,
+            "tags": fields.get("tags") or ["turn-angles"],
+            "content": {
+                "problem": fields.get("problem") or headline,
+                "solution": fields.get("solution") or "",
+                "lesson_learned": fields.get("lesson_learned") or headline,
+                "category": fields.get("category", "process"),
+                "severity": fields.get("severity", "medium"),
+                "context": f"{detail_txt}\n\n{prov}",
+                "date_learned": today,
+            },
+        }
+    elif action == "task":
+        doc = {
+            "application": app, "path": f"task/{_slug(headline)}",
+            "entity_type": "task", "title": headline,
+            "description": fields.get("description") or headline,
+            "tags": fields.get("tags") or ["turn-angles"],
+            "content": {
+                "objective": fields.get("objective") or headline,
+                "task_type": fields.get("task_type", "action"),
+                "status": "pending",
+                "context": f"{detail_txt}\n\n{prov}",
+                "acceptance_criteria": fields.get("acceptance_criteria")
+                                       or [headline],
+            },
+        }
+    else:
+        raise KmcpError(f"unknown action {action!r} "
+                        "(track | record | task; load/drop are client-side)")
+    doc["_app_status"] = app_status        # stripped before the write
+    doc["_cwd"] = store.get("cwd", "")
+    return doc
+
+
+def curate(sid: str, item_id: str, action: str, fields: dict,
+           confirm: bool) -> dict:
+    """Two-phase: dry_run validates and returns the draft; confirm writes it.
+
+    JSON is valid YAML 1.2, so passing the document as JSON sidesteps the
+    import_entries YAML footguns wholesale — unquoted `#` truncation, bare
+    timestamps coerced to datetime, angle-bracket placeholder rejection.
+    """
+    doc = compose_curation(sid, item_id, action, fields)
+    status = doc.pop("_app_status")
+    cwd = doc.pop("_cwd")
+    apps = sorted(_live_apps())
+
+    if not confirm:
+        res = _kmcp_call("import_entries", {"content": json.dumps(doc),
+                                            "dry_run": True})
+        return {"ok": True, "phase": "draft", "draft": doc, "dry_run": res,
+                "app_status": status, "cwd": cwd, "applications": apps}
+
+    # Two ways a confirmed write lands somewhere wrong, both refused here:
+    #   fallback — the cwd basename named no live app, so `application` is a
+    #              default, not a decision. Silently writing there puts the
+    #              entry in the wrong corpus and says nothing.
+    #   unknown  — kmcp was unreachable, so we cannot know if the app exists;
+    #              writing could CREATE a junk application from a directory name.
+    if status in ("fallback", "unknown"):
+        why = (f"the session cwd ({cwd or 'unknown'}) names no live kmcp app"
+               if status == "fallback" else
+               "the kmcp application list is unreachable")
+        return {"ok": False, "phase": "refused", "draft": doc,
+                "app_status": status, "cwd": cwd, "applications": apps,
+                "error": f"refusing to write: {why}, so "
+                         f"{doc['application']!r} is a guess, not a choice. "
+                         "Name the application explicitly."}
+
+    res = _kmcp_call("import_entries", {"content": json.dumps(doc),
+                                        "dry_run": False})
+    verify = _kmcp_call("get_entry", {"application": doc["application"],
+                                      "path": doc["path"], "summary": True})
+    wrote = "error" not in verify
+    return {"ok": wrote, "phase": "written", "draft": doc, "result": res,
+            "verified": verify if wrote else None,
+            "error": None if wrote else f"read-back failed: {verify.get('error')}"}
 
 
 def point_fork(session_id: str, at_uuid: str):
@@ -566,6 +931,43 @@ def point_fork(session_id: str, at_uuid: str):
     }))
     dst.write_text("\n".join(kept) + "\n")
     return new_id
+
+
+# ----------------------------------------------------------------------------
+# session summary -> archive
+#
+# Runs the /session-summary skill on the session itself (`claude -p --resume`),
+# which captures changelog events + attribution-tagged lessons that patch the
+# corpus upstream. It costs a real agent turn on that session and appends to its
+# transcript — which is why it archives only AFTER the run exits cleanly. A
+# failed summary leaves the session in the sidebar, where you can see it failed.
+# ----------------------------------------------------------------------------
+SUMMARIZE_PROMPT = "/session-summary"
+SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
+
+
+def _summarize_then_archive(sid: str, proc):
+    rc = proc.wait()
+    if rc == 0:
+        set_archived(sid, True, reason="session-summary")
+        SUMMARIZING[sid] = "done"
+    else:
+        SUMMARIZING[sid] = f"summary failed (rc={rc}); not archived"
+
+
+def summarize_session(sid: str, cwd: str) -> dict:
+    if SUMMARIZING.get(sid) == "running":
+        return {"ok": False, "error": "a summary is already running"}
+    src = find_session(sid)
+    if src and time.time() - src.stat().st_mtime < 15:
+        return {"ok": False, "error": "session active in the last 15s — "
+                                      "summary refused (two-writer guard)"}
+    proc = spawn_claude(["-p", "--resume", sid, SUMMARIZE_PROMPT], cwd, sid)
+    SUMMARIZING[sid] = "running"
+    threading.Thread(target=_summarize_then_archive, args=(sid, proc),
+                     daemon=True, name=f"summarize-{sid[:8]}").start()
+    return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
+            "note": "archives automatically when the summary exits cleanly"}
 
 
 # ----------------------------------------------------------------------------
@@ -642,8 +1044,11 @@ class Handler(SimpleHTTPRequestHandler):
             return
         u = urlparse(self.path)
         if u.path == "/api/sessions":
+            arch = (parse_qs(u.query).get("archived") or ["0"])[0] == "1"
             try:
-                return self._json({"sessions": discover_sessions(),
+                return self._json({"sessions": discover_sessions(archived=arch),
+                                   "archived_count": len(_read_archive()),
+                                   "summarizing": SUMMARIZING,
                                    "generated_at": time.time()})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
@@ -675,30 +1080,64 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self._json({"error": "bad JSON"}, 400)
+        # Route on the PATH alone: a POST may legitimately carry ?token=.
+        route = urlparse(self.path).path
         sid = body.get("session_id", "")
-        text = (body.get("text") or "").strip()
         cwd = body.get("cwd")
-        if not sid or not text:
-            return self._json({"error": "session_id and text required"}, 400)
+        if not sid:
+            return self._json({"error": "session_id required"}, 400)
 
-        if self.path == "/api/answer":
+        # --- endpoints that act on the session, no text needed --------------
+        if route == "/api/stop":
+            r = stop_session(sid)
+            return self._json(r, 200 if r["ok"] else 409)
+
+        if route == "/api/archive":
+            return self._json(set_archived(sid, bool(body.get("archived", True)),
+                                           body.get("reason", "")))
+
+        if route == "/api/summarize":
+            r = summarize_session(sid, cwd)
+            return self._json(r, 200 if r["ok"] else 409)
+
+        if route == "/api/angles/mine":
+            r = mine_angles(sid, bool(body.get("no_probes")))
+            return self._json(r, 200 if r["ok"] else 500)
+
+        if route == "/api/angles/curate":
+            try:
+                r = curate(sid, body.get("item_id", ""), body.get("action", ""),
+                           body.get("fields") or {}, bool(body.get("confirm")))
+                return self._json(r, 200 if r["ok"] else 400)
+            except KmcpError as e:
+                return self._json({"ok": False, "error": str(e)[:400]}, 400)
+            except Exception as e:
+                return self._json({"ok": False, "error": str(e)[:400]}, 500)
+
+        # --- endpoints that send a message ----------------------------------
+        text = (body.get("text") or "").strip()
+        if not text:
+            return self._json({"error": "text required"}, 400)
+
+        if route == "/api/answer":
             src = find_session(sid)
             if src and time.time() - src.stat().st_mtime < 15:
                 return self._json(
                     {"error": "session active in the last 15s — answer refused "
                               "(two-writer guard); fork instead"}, 409)
-            spawn_claude(["-p", "--resume", sid, text], cwd)
+            spawn_claude(["-p", "--resume", sid, text], cwd, sid)
             return self._json({"ok": True, "action": "answer", "session": sid})
 
-        if self.path == "/api/fork":
+        if route == "/api/fork":
             at = body.get("at_uuid")
             try:
                 if at:
                     new_id = point_fork(sid, at)
-                    spawn_claude(["-p", "--resume", new_id, text], cwd)
+                    spawn_claude(["-p", "--resume", new_id, text], cwd, new_id)
                     return self._json({"ok": True, "action": "point-fork",
                                        "new_session": new_id})
-                spawn_claude(["-p", "--resume", sid, "--fork-session", text], cwd)
+                spawn_claude(["-p", "--resume", sid, "--fork-session", text],
+                             cwd, sid)
                 return self._json({"ok": True, "action": "fork"})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
@@ -706,9 +1145,11 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json({"error": "unknown endpoint"}, 404)
 
 
-def serve(host="127.0.0.1", port=4462, token=None, no_auth=False):
+def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None):
     """Bind and serve. Non-loopback binds are authenticated unless no_auth."""
-    global TOKEN
+    global TOKEN, KMCP_DSN
+
+    KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
 
     if _loopback(host) or no_auth:
         TOKEN = None

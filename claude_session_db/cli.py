@@ -595,24 +595,40 @@ def angles_watch(ctx: click.Context, window: int, model: str, ollama_url: str,
 
 
 @main.command(name="console")
+@click.option("--host", default="127.0.0.1",
+              help="Bind address (default 127.0.0.1; use 0.0.0.0 for LAN).")
 @click.option("--port", type=int, default=4462, help="Port (default 4462).")
-def console(port: int) -> None:
+@click.option("--token", default=None,
+              help="Shared secret for non-loopback binds (env CSD_CONSOLE_TOKEN; "
+                   "generated if unset).")
+@click.option("--no-auth", is_flag=True,
+              help="Serve a non-loopback bind with NO auth. This exposes "
+                   "unauthenticated code execution — see the command help.")
+def console(host: str, port: int, token: str | None, no_auth: bool) -> None:
     """Reply-capable session console: chat + kmcp reads + angle rail.
 
-    Binds 127.0.0.1 only. Renders each session's transcript as a chronological
-    event stream with the kmcp context it loaded inline, plus the latest turn's
-    angle headlines read off the state dir (run `csd angles-watch` to keep them
-    fresh). Answer resumes the session; Fork branches it at a chosen message.
+    Renders each session's transcript as a chronological event stream with the
+    kmcp context it loaded inline, plus the latest turn's angle headlines read
+    off the state dir (run `csd angles-watch` to keep them fresh). Answer
+    resumes the session; Fork branches it at a chosen message.
+
+    SECURITY. This is not a read-only surface: `/api/answer` and `/api/fork`
+    spawn `claude -p --resume` with caller-supplied text in a caller-supplied
+    cwd, and the transcripts it serves are verbatim. On 127.0.0.1 that is fine.
+    On any other bind a token is REQUIRED (auto-generated and printed at start;
+    pin it with CSD_CONSOLE_TOKEN) — because without one, anyone who can reach
+    the port can run code as you. `--no-auth` opts out; it is never the default,
+    and the port should still never leave a trusted LAN.
 
     Design: claudecode:design/turn-angles-context-cockpit (conversation surface).
     """
-    from http.server import ThreadingHTTPServer
+    from .console.server import serve
 
-    from .console import server as console_server
-
-    click.echo(f"session console → http://127.0.0.1:{port}/")
-    ThreadingHTTPServer(("127.0.0.1", port),
-                        console_server.Handler).serve_forever()
+    if no_auth and host != "127.0.0.1":
+        click.confirm(
+            f"--no-auth on {host}:{port} exposes unauthenticated code execution "
+            "to every host on the network. Proceed?", abort=True)
+    serve(host=host, port=port, token=token, no_auth=no_auth)
 
 
 @main.command(name="dsn")

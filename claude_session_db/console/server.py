@@ -29,13 +29,16 @@ Endpoints
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
 """
+import hmac
 import json
 import os
 import re
+import secrets
 import subprocess
 import time
 import uuid as uuidlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
@@ -566,6 +569,23 @@ def point_fork(session_id: str, at_uuid: str):
 
 
 # ----------------------------------------------------------------------------
+# auth
+#
+# The console is NOT a read-only surface: /api/answer and /api/fork spawn
+# `claude -p --resume` with caller-supplied text in a caller-supplied cwd. On a
+# non-loopback bind with no auth that is unauthenticated RCE, and the GETs leak
+# every transcript verbatim. So: loopback stays frictionless (TOKEN=None), and
+# any other bind REQUIRES a shared secret unless the operator opts out loudly.
+# ----------------------------------------------------------------------------
+TOKEN = None          # set by serve(); None = auth disabled
+COOKIE = "csd_console"
+
+
+def _loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+# ----------------------------------------------------------------------------
 # HTTP
 # ----------------------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
@@ -583,7 +603,43 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # -- auth ------------------------------------------------------------
+    def _presented_token(self):
+        q = parse_qs(urlparse(self.path).query).get("token")
+        if q:
+            return q[0], True          # from query → worth setting a cookie
+        raw = self.headers.get("Cookie")
+        if raw:
+            c = SimpleCookie(raw)
+            if COOKIE in c:
+                return c[COOKIE].value, False
+        return None, False
+
+    def _authed(self):
+        """True if the request may proceed. Emits its own 401 when not."""
+        if TOKEN is None:
+            return True
+        tok, from_query = self._presented_token()
+        if tok and hmac.compare_digest(tok, TOKEN):
+            self._set_cookie = from_query
+            return True
+        self.send_response(401)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"401 unauthorized - append ?token=<secret>\n")
+        return False
+
+    def end_headers(self):
+        if getattr(self, "_set_cookie", False):
+            self.send_header(
+                "Set-Cookie",
+                f"{COOKIE}={TOKEN}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800")
+            self._set_cookie = False
+        super().end_headers()
+
     def do_GET(self):
+        if not self._authed():
+            return
         u = urlparse(self.path)
         if u.path == "/api/sessions":
             try:
@@ -612,6 +668,8 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
     def do_POST(self):
+        if not self._authed():
+            return
         try:
             n = int(self.headers.get("Content-Length", 0))
             body = json.loads(self.rfile.read(n) or b"{}")
@@ -648,7 +706,40 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json({"error": "unknown endpoint"}, 404)
 
 
+def serve(host="127.0.0.1", port=4462, token=None, no_auth=False):
+    """Bind and serve. Non-loopback binds are authenticated unless no_auth."""
+    global TOKEN
+
+    if _loopback(host) or no_auth:
+        TOKEN = None
+    else:
+        TOKEN = token or os.environ.get("CSD_CONSOLE_TOKEN") or secrets.token_urlsafe(24)
+
+    lan_ip = host
+    if host in ("0.0.0.0", "::"):
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            lan_ip, _ = s.getsockname()
+            s.close()
+        except OSError:
+            lan_ip = host
+
+    # flush=True: the token is the one line the operator needs, and a
+    # backgrounded/nohup'd console would otherwise buffer it out of sight.
+    if TOKEN:
+        print(f"session console → http://{lan_ip}:{port}/?token={TOKEN}", flush=True)
+        print("  auth: token required (cookie set on first load).", flush=True)
+        print(f"  reuse this token: export CSD_CONSOLE_TOKEN={TOKEN}", flush=True)
+    else:
+        print(f"session console → http://{lan_ip}:{port}/", flush=True)
+        if not _loopback(host):
+            print("  *** WARNING: bound to a non-loopback address with NO AUTH.", flush=True)
+            print("  *** /api/answer and /api/fork spawn `claude -p --resume`:", flush=True)
+            print("  *** anyone who can reach this port can run code as you.", flush=True)
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
 if __name__ == "__main__":
-    # 127.0.0.1: local prototype only (LAN exposure is a separate, later decision).
-    print("session console → http://127.0.0.1:4462/")
-    ThreadingHTTPServer(("127.0.0.1", 4462), Handler).serve_forever()
+    serve()

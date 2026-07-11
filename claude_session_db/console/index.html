@@ -76,7 +76,18 @@
   .turn.assistant .who { color:var(--ink2); }
   .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
   .turn.assistant .txt { color:var(--ink); }
-  .subtools { margin-top:6px; color:var(--muted); font:11px var(--mono); }
+  .subtools { margin-top:6px; }
+  .trow { font:11px var(--mono); margin:2px 0; }
+  .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
+  .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  .tlabel { color:var(--ink2); word-break:break-word; }
+  .tsize { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
+  .terr { color:var(--warn); font-size:9.5px; text-transform:uppercase;
+          border:1px solid var(--warn); border-radius:3px; padding:0 3px; }
+  .tdet { color:var(--muted); padding:1px 0 2px 18px; white-space:pre-wrap;
+          word-break:break-word; opacity:.85;
+          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+          overflow:hidden; }
 
   /* inline kmcp read marker */
   .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
@@ -353,10 +364,19 @@ function renderHeader(s){
 function readRow(e, idx){
   const mode = e.mode||"read";
   const secs = e.sections?.length ? `<span class="sz">[${esc(e.sections.join(", "))}]</span>` : "";
-  const cnt = e.count ? `<span class="sz">×${e.count}</span>` : "";
-  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})">
+  // A batch get_entries reads as its targets: first ref + "(+N)", not "(batch)".
+  let pth, cnt = "";
+  if(e.targets?.length){
+    const first = e.targets[0], more = e.targets.length - 1;
+    pth = `${esc(first)}${more>0?` <span class="app">(+${more})</span>`:""}`;
+  } else {
+    pth = `<span class="app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}`;
+    if(e.count) cnt = `<span class="sz">×${e.count}</span>`;
+  }
+  const tip = e.targets?.length ? ` title="${esc(e.targets.join("\n"))}"` : "";
+  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})"${tip}>
     <span class="ic">📖</span>
-    <span class="pth"><span class="app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</span>
+    <span class="pth">${pth}</span>
     ${cnt}<span class="badge ${mode}">${mode}</span>${secs}
     <span class="sz">${kb(e.chars)}</span>
   </div>`;
@@ -399,6 +419,22 @@ function choiceCard(e){
   return `<div class="turn choice"><div class="who">choice · AskUserQuestion</div>${qs}</div>`;
 }
 
+/* Render each non-kmcp tool_use as one readable line: a verb (the command, the
+   skill, the subagent + description, the file), an optional peek, and the
+   result size with an error flag. Legacy string-only tools still render. */
+const TOOL_GLYPH = {Bash:"$", Write:"✎", Edit:"✎", Read:"📄", Skill:"◆",
+                    Agent:"⇲", Task:"⇲", SendMessage:"→", ToolSearch:"⚿"};
+function toolRow(t){
+  if(typeof t === "string") return `<div class="trow"><span class="tlabel">⚙ ${esc(t.replace(/^mcp__.+__/,""))}</span></div>`;
+  const glyph = TOOL_GLYPH[t.name] || "⚙";
+  const size = t.chars!=null ? `<span class="tsize">${kb(t.chars)}</span>` : "";
+  const err = t.is_error ? `<span class="terr">error</span>` : "";
+  const det = t.detail ? `<div class="tdet">${esc(t.detail)}</div>` : "";
+  return `<div class="trow"><div class="tline"><span class="tg">${glyph}</span>
+    <span class="tlabel">${esc(t.label||t.name)}</span>${err}${size}</div>${det}</div>`;
+}
+function toolRows(tools){ return (tools||[]).map(toolRow).join(""); }
+
 function renderStream(s){
   let html = "";
   s.events.forEach((e, i) => {
@@ -406,14 +442,14 @@ function renderStream(s){
     if(e.kind==="user")
       html += `<div class="ev">${g}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
-      const tools = e.tools?.length ? `<div class="subtools">⚙ ${esc(e.tools.map(t=>t.replace(/^mcp__.+__/,"")).join(", "))}</div>` : "";
+      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools)}</div>` : "";
       html += `<div class="ev">${g}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `<div class="ev">${g}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
       html += `<div class="ev">${g}<div class="b">${searchRow(e, i)}</div></div>`;
     else if(e.kind==="tool")
-      html += `<div class="ev">${g}<div class="b"><div class="toolev">⚙ ${esc(e.tools.map(t=>t.replace(/^mcp__.+__/,"")).join(", "))}</div></div></div>`;
+      html += `<div class="ev">${g}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
     else if(e.kind==="choice")
       html += `<div class="ev">${g}<div class="b">${choiceCard(e)}</div></div>`;
   });
@@ -623,12 +659,38 @@ function renderSummary(s){
   const modes = Object.entries(byMode).map(([m,n])=>`<span class="badge ${m}">${m} ${n}</span>`).join(" ");
   const el = document.getElementById("summary");
   if(!reads.length && !searches.length){ el.innerHTML=""; return; }
+  // Roll the consumed reads up to unique entries so each one is a link into
+  // /browse — the aggregate counts say how much context was loaded, this says
+  // *which* entries (a re-read of the same entry folds in as ×n).
+  const seen = new Map();
+  reads.forEach(e=>{
+    const key = `${e.app||"?"}:${e.path||"("+e.tool+")"}`;
+    const g = seen.get(key) || {app:e.app, path:e.path, tool:e.tool,
+                                mode:e.mode, n:0, chars:0};
+    g.n++; g.chars += e.chars||0;
+    seen.set(key, g);
+  });
+  const entries = [...seen.values()].map(g=>{
+    const sub = `<span class="badge ${g.mode||"read"}">${esc(g.mode||"read")}</span>`
+              + ` ${kb(g.chars)}${g.n>1?" · ×"+g.n:""}`;
+    if(g.path){
+      const href = BROWSE_BASE + encodeURIComponent(g.app||"") + "/" + g.path;
+      return `<a class="hit" href="${esc(href)}" target="_blank" title="open in /browse">
+        <span class="hit-t">${esc(g.path)}</span>
+        <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></a>`;
+    }
+    // A pathless read (get_entries batch) has no single entry to link.
+    return `<div class="hit" style="cursor:default">
+      <span class="hit-t">${esc(g.tool)} · batch</span>
+      <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></div>`;
+  }).join("");
   el.innerHTML = `
     <h3>Session kmcp usage</h3>
     <div class="kv"><span class="k">📖 consumed</span><span class="v">${reads.length} · ${kb(total)}</span></div>
     <div class="kv"><span class="k">🔍 surfaced</span><span class="v">${searches.length} · ${kb(srfBytes)}</span></div>
     <div class="kv"><span class="k">≈ tokens read</span><span class="v">≈${Math.round(total/4/1000)}k</span></div>
-    ${modes?`<div style="margin-top:8px">${modes}</div>`:""}`;
+    ${modes?`<div style="margin-top:8px">${modes}</div>`:""}
+    ${entries?`<div class="rl-hits"><div class="rl-hits-h">consumed entries — linked into /browse</div>${entries}</div>`:""}`;
 }
 
 /* ---------- answer / fork ---------- */

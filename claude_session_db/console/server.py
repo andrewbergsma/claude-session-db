@@ -282,11 +282,48 @@ def _result_map(records):
                 if not tid:
                     continue
                 txt = _text_of(b.get("content"))
-                rec = {"chars": len(txt)}
+                rec = {"chars": len(txt), "is_error": bool(b.get("is_error"))}
                 if len(txt) <= 65536:
                     rec["text"] = txt
                 out[tid] = rec
     return out
+
+
+def _tool_summary(name, inp):
+    """(label, detail) — the one salient field that makes a tool_use readable.
+
+    The console makes kmcp reads/searches first-class; every other tool used to
+    collapse to a bare name chip, which for a Bash/Skill/Agent-heavy session is
+    unreadable. label is the short verb shown inline; detail is the peek.
+    """
+    inp = inp or {}
+    short = name.rsplit("__", 1)[-1] if name.startswith("mcp__") else name
+    # label carries NO sigil — the client renders an aligned glyph column.
+    if name == "Bash":
+        cmd = (inp.get("command") or "").strip()
+        first = cmd.split("\n", 1)[0]
+        return (first + (" …" if "\n" in cmd else ""),
+                inp.get("description") or "")
+    if name in ("Write", "Edit", "NotebookEdit", "Read"):
+        return (name + " " + (inp.get("file_path") or ""), "")
+    if name == "Skill":
+        return ("Skill " + (inp.get("skill") or "?"),
+                str(inp.get("args") or "")[:200])
+    if name in ("Agent", "Task"):
+        sub = inp.get("subagent_type") or "agent"
+        bg = " (bg)" if str(inp.get("run_in_background")).lower() == "true" else ""
+        return (f"Agent[{sub}]{bg} " + (inp.get("description") or ""),
+                str(inp.get("prompt") or "")[:400])
+    if name == "SendMessage":
+        return (inp.get("summary") or inp.get("to") or "",
+                str(inp.get("message") or inp.get("content") or "")[:400])
+    if name == "ToolSearch":
+        return (str(inp.get("query") or ""), "")
+    if name in ("TodoWrite",):
+        return (name, "")
+    # generic MCP write / unknown tool — show a compact input peek
+    peek = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(inp.items())[:3])
+    return (short, peek)
 
 
 def _parse_search_result(text):
@@ -562,14 +599,24 @@ def build_session(sid: str):
                         mode, secs = _read_meta(base, inp)
                         path_ = inp.get("path")
                         app_ = inp.get("application")
+                        # A batch get_entries carries no top-level app/path — the
+                        # refs live in `entries`. Surface them so the row reads
+                        # as its targets, not a bare "(batch)".
+                        targets = None
+                        if base == "get_entries":
+                            targets = [
+                                f"{it.get('application','?')}:{it.get('path','?')}"
+                                for it in (inp.get("entries") or inp.get("paths") or [])
+                                if isinstance(it, dict)
+                            ]
                         events.append({
                             "kind": "read", "ts": ts, "uuid": uid, "sub": sub,
                             "tool": base, "app": app_, "path": path_,
                             "mode": mode, "sections": secs, "via": via,
                             "etype": inp.get("entity_type") or _etype_hint(path_),
                             "chars": (rmap.get(tid) or {}).get("chars"),
-                            "count": len(inp.get("entries") or inp.get("paths") or [])
-                                     if base == "get_entries" else None,
+                            "count": len(targets) if targets is not None else None,
+                            "targets": targets,
                         })
                     elif base in SURFACE_TOOLS:
                         n_searches += 1
@@ -592,7 +639,13 @@ def build_session(sid: str):
                         events.append({"kind": "choice", "ts": ts, "uuid": uid,
                                        "sub": sub, "questions": qs})
                     elif base is None and name:
-                        other_tools.append(name)
+                        label, detail = _tool_summary(name, inp)
+                        res = rmap.get(tid) or {}
+                        other_tools.append({
+                            "name": name, "label": label, "detail": detail,
+                            "chars": res.get("chars"),
+                            "is_error": res.get("is_error", False),
+                        })
             text = "\n".join(tp for tp in text_parts if tp).strip()
             if text:
                 events.append({"kind": "assistant", "ts": ts, "uuid": uid,

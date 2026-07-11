@@ -1,0 +1,15 @@
+- generic [active] [ref=f2e1]:
+  - navigation [ref=f2e2]:
+    - generic [ref=f2e3]:
+      - heading "kmcp · session console" [level=1] [ref=f2e4]
+      - generic [ref=f2e5]: loading…
+  - main [ref=f2e6]:
+    - heading "select a session" [level=2] [ref=f2e8]
+    - generic [ref=f2e9]: pick a session on the left
+    - generic [ref=f2e12]:
+      - textbox "answer this session… (fork if it's running)" [disabled] [ref=f2e13]
+      - button "Answer" [disabled] [ref=f2e14]
+      - button "Fork" [disabled] [ref=f2e15]
+  - complementary [ref=f2e16]:
+    - heading "Read detail" [level=3] [ref=f2e17]
+    - generic [ref=f2e18]: Click a 📖 read in the transcript to inspect what this session consumed from the base — mode, size, sections, and a link into /browse.

@@ -12,16 +12,25 @@
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --rail-w:320px;
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
   body {
     background:var(--bg); color:var(--ink);
     font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    display:grid; grid-template-columns:270px minmax(0,1fr) 320px;
+    display:grid; grid-template-columns:270px minmax(0,1fr) var(--rail-w);
     grid-template-rows:100vh; height:100vh; overflow:hidden;
   }
-  @media (max-width:1100px){ body{ grid-template-columns:230px minmax(0,1fr); } #rail{ display:none; } }
+  @media (max-width:1100px){ body{ grid-template-columns:230px minmax(0,1fr); } #rail,#railgrip{ display:none; } }
+
+  /* drag handle straddling the left edge of the right rail */
+  #railgrip { position:fixed; top:0; bottom:0; right:var(--rail-w); width:9px;
+              margin-right:-4px; cursor:col-resize; z-index:30; }
+  #railgrip::after { content:""; position:absolute; top:0; bottom:0; left:4px; width:1px;
+                     background:transparent; transition:background .12s; }
+  #railgrip:hover::after, #railgrip.drag::after { background:var(--accent); width:2px; }
+  body.raildrag { user-select:none; cursor:col-resize; }
   #nav, #main, #rail { min-height:0; }
 
   /* ---- left: projects + sessions ---- */
@@ -204,6 +213,10 @@
              background:var(--surface2); border:1px solid var(--border); border-radius:8px;
              color:var(--ink); padding:9px; font-size:12.5px; }
   .rl-open:hover { border-color:var(--accent); color:var(--accent); }
+  .rl-back { display:inline-flex; align-items:center; gap:5px; font:11px var(--mono);
+             color:var(--ink2); background:var(--surface2); border:1px solid var(--border);
+             border-radius:6px; padding:3px 10px; cursor:pointer; margin-bottom:12px; }
+  .rl-back:hover { border-color:var(--accent); color:var(--accent); }
   .rl-secs { margin-top:12px; }
   .rl-secs .s { display:inline-block; font:11px var(--mono); color:var(--mode-sections);
                 border:1px solid var(--mode-sections); border-radius:4px;
@@ -261,9 +274,48 @@
     <div id="angles"></div>
     <div id="summary"></div>
   </aside>
+  <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
+
+/* ---------- resizable right rail (drag the grip on its left edge) ---------- */
+(function(){
+  const KEY = "csd.consoleRailW", MIN = 240, MAX = 760, DEF = 320;
+  const root = document.documentElement;
+  const setW = w => root.style.setProperty("--rail-w",
+                     Math.max(MIN, Math.min(MAX, w)) + "px");
+  const saved = parseInt(localStorage.getItem(KEY), 10);
+  if(saved) setW(saved);
+  const grip = document.getElementById("railgrip");
+  let dragging = false;
+  grip.addEventListener("pointerdown", e => {
+    dragging = true; grip.classList.add("drag");
+    document.body.classList.add("raildrag");
+    grip.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  grip.addEventListener("pointermove", e => {
+    if(dragging) setW(window.innerWidth - e.clientX);
+  });
+  const end = () => {
+    if(!dragging) return;
+    dragging = false; grip.classList.remove("drag");
+    document.body.classList.remove("raildrag");
+    localStorage.setItem(KEY,
+      parseInt(getComputedStyle(root).getPropertyValue("--rail-w"), 10));
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => { setW(DEF); localStorage.setItem(KEY, DEF); });
+})();
+
+/* Escape also dismisses an open rail detail — as long as you're not typing. */
+document.addEventListener("keydown", e => {
+  const box = document.getElementById("raildetail");
+  if(e.key === "Escape" && box && !box.classList.contains("rl-empty") &&
+     !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || ""))
+    clearRail();
+});
 let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
 
 function esc(x){ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
@@ -349,7 +401,7 @@ function renderHeader(s){
           : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
       <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
       <button class="act" onclick="act('summarize')"
-        title="Run /session-summary on this session, then archive it if the run exits cleanly">✎ Summarize + archive</button>
+        title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
       <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
       <span id="actmsg" class="actmsg"></span>
     </div>`;
@@ -463,7 +515,24 @@ function selectEvent(idx){
   renderStream(curSession);
   const e = curSession.events[idx];
   const rail = document.getElementById("raildetail");
+  rail.className = "";
   rail.innerHTML = e.kind === "search" ? searchDetail(e) : readDetail(e);
+}
+
+/* Dismiss whatever detail is showing and restore the rail's default view, so
+   the Session kmcp usage panel is back at the top. */
+const RAIL_PLACEHOLDER =
+  `Click a <b>📖 read</b> in the transcript to inspect what this session
+   consumed from the base — mode, size, sections, and a link into /browse.`;
+const RAIL_BACK = `<button class="rl-back" onclick="clearRail()">← back to session</button>`;
+
+function clearRail(){
+  selIdx = null;
+  if(curSession) renderStream(curSession);
+  const box = document.getElementById("raildetail");
+  box.className = "rl-empty";
+  box.innerHTML = RAIL_PLACEHOLDER;
+  document.getElementById("rail").scrollTop = 0;
 }
 
 function readDetail(e){
@@ -471,6 +540,7 @@ function readDetail(e){
   const secs = e.sections?.length
     ? `<div class="rl-secs">${e.sections.map(x=>`<span class="s">${esc(x)}</span>`).join("")}</div>` : "";
   return `
+    ${RAIL_BACK}
     <div class="rl-tag">📖 consumed</div>
     <div class="rl-path"><span class="rl-app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</div>
     <div class="kv"><span class="k">mode</span><span class="v"><span class="badge ${e.mode||"read"}">${e.mode||"read"}</span></span></div>
@@ -496,6 +566,7 @@ function searchDetail(e){
       <span class="hit-p">${esc(h.app||"")}:${esc(h.path||"")}${h.score!=null?" · "+h.score:""}</span></a>`;
   }).join("");
   return `
+    ${RAIL_BACK}
     <div class="rl-tag srf">🔍 surfaced</div>
     <div class="rl-path">${esc(e.query)}</div>
     <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
@@ -525,9 +596,10 @@ async function act(kind){
   if(!curSession) return;
   const s = curSession;
   if(kind === "summarize" && !confirm(
-      "Run /session-summary on this session, then archive it?\n\n" +
-      "This appends a real agent turn to the transcript and costs a Claude run. " +
-      "It archives only if the summary exits cleanly."))
+      "Summarize this session independently, then archive it?\n\n" +
+      "This spawns a SEPARATE off-session Claude run that digests the transcript " +
+      "from disk and writes to kmcp — it never resumes or touches this session. " +
+      "The session is archived immediately."))
     return;
   const body = {session_id: s.session_id, cwd: s.cwd};
   if(kind === "archive") body.archived = !s.archived;
@@ -536,7 +608,7 @@ async function act(kind){
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(kind === "stop" ? "stopped" :
          kind === "archive" ? (body.archived ? "archived" : "unarchived") :
-         "summary running — archives when it finishes");
+         "archived · independent summary running off-session");
   await refreshSession(false); loadNav();
 }
 
@@ -581,7 +653,7 @@ async function showAngle(itemId){
   catch(e){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">unavailable</div>`; return; }
   if(d.error){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">${esc(d.error)}</div>`; return; }
   const detail = d.detail ?? d;
-  box.innerHTML = `<h4>${esc(itemId)} · ${esc(d.angle||"")}</h4>
+  box.innerHTML = `${RAIL_BACK}<h4>${esc(itemId)} · ${esc(d.angle||"")}</h4>
     <div class="ang-head">${esc(d.headline||"")}</div>
     <div class="curate">
       <button class="act sm" onclick="curate('${itemId}','track')" title="Create a kmcp event">track → event</button>

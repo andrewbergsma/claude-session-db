@@ -140,9 +140,14 @@ original.
   (atomic replace), never a mutation of `~/.claude/projects`. Archived sessions
   drop out of the sidebar, stay retrievable by id, ignore the 72h cutoff, and
   return on unarchive. Nothing is destructive.
-- **Summarize + archive** — runs `/session-summary` on the session
-  (`claude -p --resume`), then archives it **only if the run exits 0**. A failed
-  summary leaves the session in the sidebar, where the failure is visible.
+- **Summarize + archive** — runs `/session-summary` **independently, off-session**:
+  a throwaway `claude -p` process (no `--resume`) is handed the session UUID as
+  the skill argument, so the skill digests the transcript from disk
+  (`session_digest.py`) and writes the changelog + lessons to kmcp **without ever
+  resuming or appending to the session**. Because nothing writes back, the 15s
+  two-writer guard is gone and the archive is decoupled — the session is archived
+  the moment the summary is dispatched (its outcome is tracked in `SUMMARIZING`
+  for visibility, not as an archive gate).
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
 

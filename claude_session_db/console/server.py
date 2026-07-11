@@ -987,40 +987,41 @@ def point_fork(session_id: str, at_uuid: str):
 
 
 # ----------------------------------------------------------------------------
-# session summary -> archive
+# session summary + archive — independent, off-session
 #
-# Runs the /session-summary skill on the session itself (`claude -p --resume`),
-# which captures changelog events + attribution-tagged lessons that patch the
-# corpus upstream. It costs a real agent turn on that session and appends to its
-# transcript — which is why it archives only AFTER the run exits cleanly. A
-# failed summary leaves the session in the sidebar, where you can see it failed.
+# Runs /session-summary in its OFF-SESSION mode: a throwaway `claude -p` process
+# (no --resume) is handed the session UUID as the skill argument, so the skill
+# digests the target transcript from disk (session_digest.py) and writes the
+# changelog events + attribution-tagged lessons to kmcp WITHOUT ever resuming or
+# appending to the original session. The transcript is read, never touched.
+#
+# Because nothing writes back to the session, two things fall away from the old
+# inline path: the 15s two-writer guard (an independent reader can't collide with
+# a live session), and the archive-after-rc==0 coupling. The session is archived
+# the moment the summary is dispatched; the summary's outcome is tracked in
+# SUMMARIZING for visibility but no longer gates the archive.
 # ----------------------------------------------------------------------------
 SUMMARIZE_PROMPT = "/session-summary"
 SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
 
 
-def _summarize_then_archive(sid: str, proc):
+def _await_summary(sid: str, proc):
     rc = proc.wait()
-    if rc == 0:
-        set_archived(sid, True, reason="session-summary")
-        SUMMARIZING[sid] = "done"
-    else:
-        SUMMARIZING[sid] = f"summary failed (rc={rc}); not archived"
+    SUMMARIZING[sid] = "done" if rc == 0 else f"summary failed (rc={rc})"
 
 
 def summarize_session(sid: str, cwd: str) -> dict:
     if SUMMARIZING.get(sid) == "running":
         return {"ok": False, "error": "a summary is already running"}
-    src = find_session(sid)
-    if src and time.time() - src.stat().st_mtime < 15:
-        return {"ok": False, "error": "session active in the last 15s — "
-                                      "summary refused (two-writer guard)"}
-    proc = spawn_claude(["-p", "--resume", sid, SUMMARIZE_PROMPT], cwd, sid)
+    # Off-session: fresh `claude -p`, the UUID as the /session-summary argument.
+    # No --resume — the original transcript is digested, never appended to.
+    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid)
     SUMMARIZING[sid] = "running"
-    threading.Thread(target=_summarize_then_archive, args=(sid, proc),
+    set_archived(sid, True, reason="session-summary")
+    threading.Thread(target=_await_summary, args=(sid, proc),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
-            "note": "archives automatically when the summary exits cleanly"}
+            "note": "independent off-session summary dispatched; session archived"}
 
 
 # ----------------------------------------------------------------------------

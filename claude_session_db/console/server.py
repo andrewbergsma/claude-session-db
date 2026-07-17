@@ -1558,8 +1558,9 @@ class Handler(SimpleHTTPRequestHandler):
             src = find_session(sid)
             if src and time.time() - src.stat().st_mtime < 15:
                 return self._json(
-                    {"error": "session active in the last 15s — answer refused "
-                              "(two-writer guard); fork instead"}, 409)
+                    {"error": "session written in the last 15s — answer refused "
+                              "(two-writer guard); wait for it to settle, "
+                              "or fork"}, 409)
             spawn_claude(["-p", "--resume", sid, text], cwd, sid)
             return self._json({"ok": True, "action": "answer", "session": sid})
 

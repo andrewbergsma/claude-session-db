@@ -74,7 +74,8 @@ csd recent 10
 | `csd angles show ID` | Print the persisted detail behind a headline |
 | `csd angles sessions` | Session-management lens: open-thread inventory + delta-after-summary verdicts |
 | `csd angles digest REF` | Per-session digest (`--delta` for the post-summary tail, `--head/--tail/--full`) |
-| `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session |
+| `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session, drill into subagents |
+| `csd backfill-subagents` | One-shot: materialize child session rows for already-ingested sidechains |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |
 
@@ -93,6 +94,7 @@ On top sit **analytic views**, ready to `SELECT` from:
 | `v_error_by_class` · `v_error_recovery` | Where things fail, and how they recover |
 | `v_tool_usage` | Tool-call frequency and cost |
 | `v_compaction` | Context-compaction events and pre-token counts |
+| `v_agent_children` | One row per subagent spawn — type, status, tokens, child session link |
 
 ```bash
 csd views        # full list, live from the database

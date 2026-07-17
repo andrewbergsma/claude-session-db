@@ -44,6 +44,7 @@ csd angles show ID      # Print the persisted detail behind a headline
 csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
 csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
 csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session (+ sessions tab)
+csd backfill-subagents  # One-shot: child session rows for already-ingested sidechains
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
 csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)
@@ -135,6 +136,31 @@ source never mutated (read-only over archive + knowledge DB + transcripts,
 no new state tables, no kmcp writes); DB/transcript failures degrade a row to
 `unknown`, never crash the lens. `csd angles-serve` exposes the lens as a
 "sessions" tab (`/api/mgmt`, `/api/digest/<sid>`), polled at 30s.
+
+## Subagent (sidechain) visibility
+
+Every sidechain file also upserts a **child session row** keyed
+`<parent_session_id>:<agent_id>` (`is_subagent=true`; agentType/description
+from the adjacent `agent-<id>.meta.json` sidecar; seed prompt as
+`first_prompt`). Sidechain **messages stay under the parent session_id** —
+source is never re-shaped. Aggregate semantics: on MAIN sessions the unprefixed
+aggregate columns are **ROLL-UP** (children included, as they always were);
+`own_*` columns carry main-chain-only counts; `user_prompt_count` is
+main-chain-only (sidechain seed prompts no longer inflate it). Child rows carry
+their own aggregates (`total_* == own_*`). `v_agent_children` is the spawn
+ledger: one row per Agent tool_use ⨝ tool_result (`tool_use_result` carries
+agentId/agentType/status/totals — the harness's record, never agent
+self-report) with a `child_session_key` link. Navigation: `csd angles` accepts
+`<parent>:<agent_id>` or a bare 17-hex agent id as `--session`; the `agents`
+angle (prefix A) headlines each Agent/SendMessage/TaskStop in a turn; the web
+focus view links Agent chips to child focus views (back-link jumps to the
+spawning message), the sessions tab shows an `agents n (running/failed)` badge,
+and live background children appear as collapsed child rows on the board.
+Volatile background-task outputs
+(`/private/tmp/claude-*/<proj>/<sid>/tasks/*.output`) are swept verbatim into
+`task_outputs` at sync time (idempotent by mtime, 5MB bound) — the archive is
+their only durable copy. `csd backfill-subagents` is the one-shot backfill for
+pre-existing archives.
 
 ## Sweep reliability & recovery
 

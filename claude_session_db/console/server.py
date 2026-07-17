@@ -392,6 +392,36 @@ _CLI_ARG_RE = re.compile(
     r"""--(application|path|query)(?:=|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))""")
 
 
+def _cli_json_payload(tail):
+    """First parseable {...} JSON object in a command tail, or None.
+
+    The shim's documented form is a JSON positional argument
+    (`knowledge-cli call get_entry '{"application":…,"path":…}'`), which the
+    --flag regex never sees — those calls used to surface as "?:(batch)".
+    Brace-matching (not a quote regex) so nested objects like get_entries'
+    `entries` array parse whole.
+    """
+    i = tail.find("{")
+    while i != -1:
+        depth = 0
+        for j in range(i, len(tail)):
+            ch = tail[j]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(tail[i:j + 1])
+                        if isinstance(obj, dict):
+                            return obj
+                    except ValueError:
+                        pass
+                    break
+        i = tail.find("{", i + 1)
+    return None
+
+
 def _bash_kmcp(inp):
     """(base, input-like) when a Bash command is the knowledge-cli shim.
 
@@ -406,6 +436,11 @@ def _bash_kmcp(inp):
     base = m.group(1)
     if base not in READ_TOOLS and base not in SURFACE_TOOLS:
         return None
+    # JSON positional argument (the documented form) carries the same shape as
+    # the MCP input — application/path/query/entries all come through intact.
+    payload = _cli_json_payload(cmd[m.end():])
+    if payload is not None:
+        return base, payload
     args = {k: (dq or sq or bare)
             for k, dq, sq, bare in _CLI_ARG_RE.findall(cmd)}
     shim = {"application": args.get("application"), "path": args.get("path")}

@@ -221,6 +221,10 @@
   .rl-secs .s { display:inline-block; font:11px var(--mono); color:var(--mode-sections);
                 border:1px solid var(--mode-sections); border-radius:4px;
                 padding:1px 6px; margin:0 4px 4px 0; }
+  /* batch-read target chips are links into /browse; keep the chip look */
+  .rl-secs a.s { color:var(--mode-batch); border-color:var(--mode-batch);
+                 text-decoration:none; }
+  .rl-secs a.s:hover { border-color:var(--accent); color:var(--accent); }
   #summary { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }
 
   /* first-class search rows + rail hit list */
@@ -545,14 +549,20 @@ function renderHeader(s){
   document.getElementById("bfork").disabled = false;
 }
 
+/* "app:path" ref → [app, path] (path may itself contain no colon worth splitting) */
+function splitRef(r){ const i = (r||"").indexOf(":");
+  return i < 0 ? [null, r] : [r.slice(0, i), r.slice(i + 1)]; }
+
 function readRow(e, idx){
   const mode = e.mode||"read";
   const secs = e.sections?.length ? `<span class="sz">[${esc(e.sections.join(", "))}]</span>` : "";
   // A batch get_entries reads as its targets: first ref + "(+N)", not "(batch)".
+  // One target renders exactly like a single read.
   let pth, cnt = "";
   if(e.targets?.length){
-    const first = e.targets[0], more = e.targets.length - 1;
-    pth = `${esc(first)}${more>0?` <span class="app">(+${more})</span>`:""}`;
+    const [a, p] = splitRef(e.targets[0]), more = e.targets.length - 1;
+    pth = `<span class="app">${esc(a||"?")}:</span>${esc(p||"?")}`
+        + (more>0?` <span class="app">(+${more})</span>`:"");
   } else {
     pth = `<span class="app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}`;
     if(e.count) cnt = `<span class="sz">×${e.count}</span>`;
@@ -675,20 +685,33 @@ function clearRail(){
 }
 
 function readDetail(e){
-  const href = BROWSE_BASE + encodeURIComponent(e.app||"") + "/" + (e.path||"");
+  // A batch get_entries identifies as its targets: the first ref heads the
+  // panel (with +N), and the full list renders below, each linked into /browse.
+  const tg = e.targets || [];
+  const [ta, tp] = tg.length ? splitRef(tg[0]) : [e.app, e.path];
+  const app = ta || e.app, path = tp || e.path;
+  const href = BROWSE_BASE + encodeURIComponent(app||"") + "/" + (path||"");
+  const more = tg.length > 1 ? ` <span class="rl-app">(+${tg.length-1})</span>` : "";
+  const targets = tg.length > 1
+    ? `<div class="rl-secs">${tg.map(t=>{
+        const [a,p] = splitRef(t);
+        return `<a class="s" href="${esc(BROWSE_BASE+encodeURIComponent(a||"")+"/"+(p||""))}"
+          target="_blank">${esc(t)}</a>`;}).join("")}</div>` : "";
   const secs = e.sections?.length
     ? `<div class="rl-secs">${e.sections.map(x=>`<span class="s">${esc(x)}</span>`).join("")}</div>` : "";
   return `
     ${RAIL_BACK}
     <div class="rl-tag">📖 consumed</div>
-    <div class="rl-path"><span class="rl-app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</div>
+    <div class="rl-path"><span class="rl-app">${esc(app||"?")}:</span>${esc(path||"("+(e.tool||"?")+")")}${more}</div>
     <div class="kv"><span class="k">mode</span><span class="v"><span class="badge ${e.mode||"read"}">${e.mode||"read"}</span></span></div>
+    ${tg.length>1?`<div class="kv"><span class="k">entries</span><span class="v">${tg.length}</span></div>`:""}
     <div class="kv"><span class="k">size</span><span class="v">${e.chars!=null?e.chars.toLocaleString()+" chars":"—"}</span></div>
     <div class="kv"><span class="k">~tokens</span><span class="v">${e.chars!=null?"≈"+Math.round(e.chars/4).toLocaleString():"—"}</span></div>
     <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
     <div class="kv"><span class="k">entity</span><span class="v">${esc(e.etype||"—")}</span></div>
-    <div class="kv"><span class="k">via</span><span class="v">mcp${e.sub?" · subagent":""}</span></div>
+    <div class="kv"><span class="k">via</span><span class="v">${esc(e.via||"mcp")}${e.sub?" · subagent":""}</span></div>
     <div class="kv"><span class="k">at</span><span class="v">${clock(e.ts)}</span></div>
+    ${targets}
     ${secs}
     <a class="rl-open" href="${href}" target="_blank">open in /browse ↗</a>`;
 }
@@ -875,22 +898,33 @@ function renderSummary(s){
   // *which* entries (a re-read of the same entry folds in as ×n).
   const seen = new Map();
   reads.forEach(e=>{
-    const key = `${e.app||"?"}:${e.path||"("+e.tool+")"}`;
+    // A batch get_entries identifies as its target refs; identical batches
+    // fold together like re-reads of one entry.
+    const key = e.targets?.length ? e.targets.join("\n")
+              : `${e.app||"?"}:${e.path||"("+e.tool+")"}`;
     const g = seen.get(key) || {app:e.app, path:e.path, tool:e.tool,
-                                mode:e.mode, n:0, chars:0};
+                                mode:e.mode, targets:e.targets, n:0, chars:0};
     g.n++; g.chars += e.chars||0;
     seen.set(key, g);
   });
   const entries = [...seen.values()].map(g=>{
     const sub = `<span class="badge ${g.mode||"read"}">${esc(g.mode||"read")}</span>`
               + ` ${kb(g.chars)}${g.n>1?" · ×"+g.n:""}`;
+    if(g.targets?.length){
+      // Batch: first ref (+N) links to its first entry; full list on hover.
+      const [a, p] = splitRef(g.targets[0]), more = g.targets.length - 1;
+      const href = BROWSE_BASE + encodeURIComponent(a||"") + "/" + (p||"");
+      return `<a class="hit" href="${esc(href)}" target="_blank" title="${esc(g.targets.join("\n"))}">
+        <span class="hit-t">${esc(p||"?")}${more>0?` +${more}`:""}</span>
+        <span class="hit-p"><span class="rl-app">${esc(a||"?")}</span> · ${sub}</span></a>`;
+    }
     if(g.path){
       const href = BROWSE_BASE + encodeURIComponent(g.app||"") + "/" + g.path;
       return `<a class="hit" href="${esc(href)}" target="_blank" title="open in /browse">
         <span class="hit-t">${esc(g.path)}</span>
         <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></a>`;
     }
-    // A pathless read (get_entries batch) has no single entry to link.
+    // A pathless, targetless read (malformed input) still gets a row.
     return `<div class="hit" style="cursor:default">
       <span class="hit-t">${esc(g.tool)} · batch</span>
       <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></div>`;

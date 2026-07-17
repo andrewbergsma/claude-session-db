@@ -29,9 +29,10 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import angles as A
+from . import session_mgmt as mgmt
 from .session_digest import input_hint
 
 SCAN_INTERVAL_S = 5          # transcript poll cadence
@@ -249,10 +250,43 @@ def _session_payload(sid: str) -> dict[str, Any]:
     }
 
 
+def _mgmt_payload(csd_dsn: Optional[str], kmcp_dsn: Optional[str],
+                  window_days: int, live_min: int) -> Any:
+    """Session-management lens payload. DB-degraded: an unreachable archive
+    returns {"error": ...} instead of a 500 — the lens page reports it."""
+    if not csd_dsn:
+        return {"error": "no archive DSN configured (start angles-serve with a DSN)"}
+    try:
+        rows = mgmt.inventory(csd_dsn, kmcp_dsn, window_days=window_days,
+                              live_min=live_min, with_delta=True)
+    except Exception as exc:  # noqa: BLE001 — degrade, don't die
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    out = []
+    for r in rows:
+        out.append({
+            "session_id": r["session_id"],
+            "project_name": r["project_name"],
+            "cwd": r["cwd"],
+            "git_branch": r["git_branch"],
+            "message_count": r["message_count"],
+            "last_ts": r["last_ts"].isoformat() if r["last_ts"] else None,
+            "idle_s": r["idle_s"],
+            "state": r["state"],
+            "reason": r["reason"],
+            "kmcp_target": (f"{r['kmcp_application']}:{r['kmcp_path']}"
+                            if r["kmcp_application"] else None),
+            "delta": r["delta"],
+            "verdict": r["verdict"],
+        })
+    return {"sessions": out}
+
+
 # --- HTTP -----------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
     watcher: AngleWatcher  # injected by serve()
+    csd_dsn: Optional[str] = None   # injected by serve()
+    kmcp_dsn: Optional[str] = None  # injected by serve()
 
     def log_message(self, *args: Any) -> None:  # quiet
         pass
@@ -270,12 +304,33 @@ class Handler(BaseHTTPRequestHandler):
                    "application/json; charset=utf-8")
 
     def do_GET(self) -> None:  # noqa: N802 — http.server API
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         try:
             if path == "/":
                 self._send(200, _PAGE.encode(), "text/html; charset=utf-8")
             elif path == "/api/sessions":
                 self._json(_sessions_payload(self.watcher))
+            elif path == "/api/mgmt":
+                q = parse_qs(parsed.query)
+                self._json(_mgmt_payload(
+                    self.csd_dsn, self.kmcp_dsn,
+                    int(q.get("days", ["7"])[0]),
+                    int(q.get("live_min", [str(mgmt.LIVE_MIN_DEFAULT)])[0])))
+            elif path.startswith("/api/digest/"):
+                q = parse_qs(parsed.query)
+                try:
+                    text = mgmt.digest_for(
+                        path.split("/")[3], dsn=self.csd_dsn,
+                        kmcp_dsn=self.kmcp_dsn,
+                        delta=q.get("delta", ["0"])[0] == "1",
+                        head=int(q["head"][0]) if "head" in q else None,
+                        tail=int(q["tail"][0]) if "tail" in q else None,
+                        full=q.get("full", ["0"])[0] == "1")
+                    self._send(200, text.encode(), "text/plain; charset=utf-8")
+                except ValueError as exc:
+                    self._send(404, f"digest: {exc}".encode(),
+                               "text/plain; charset=utf-8")
             elif path.startswith("/api/session/"):
                 self._json(_session_payload(path.split("/")[3]))
             elif path.startswith("/api/detail/"):
@@ -293,10 +348,13 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(host: str, port: int, window_s: int, model: str, base_url: str,
-          kmcp_dsn: Optional[str], no_probes: bool) -> None:
+          kmcp_dsn: Optional[str], no_probes: bool,
+          csd_dsn: Optional[str] = None) -> None:
     watcher = AngleWatcher(window_s, model, base_url, kmcp_dsn, no_probes)
     watcher.start()
     Handler.watcher = watcher
+    Handler.csd_dsn = csd_dsn
+    Handler.kmcp_dsn = kmcp_dsn
     httpd = ThreadingHTTPServer((host, port), Handler)
     print(f"angles dashboard on http://{host}:{port}/  "
           f"(live window {window_s}s, probes {'OFF' if no_probes else model})")
@@ -397,9 +455,17 @@ _PAGE = r"""<!doctype html>
   #detail pre { white-space:pre-wrap; word-break:break-all; font-size:12px; }
   #detail .x { float:right; cursor:pointer; color:var(--dim); }
   .empty { color:var(--dim); padding:40px; text-align:center; }
+  .v-LIVE { color:var(--ok); } .v-OPEN { color:var(--warn); }
+  .v-OPENdelta { color:var(--err); font-weight:bold; }
+  .v-OPENq { color:var(--warn); } .v-CLOSED { color:var(--dim); }
+  .modes { color:var(--dim); }
+  .modes span { cursor:pointer; }
+  .modes span.on { color:var(--fg); border-bottom:1px solid var(--acc); }
   @media (max-width:900px){ #rail { display:none; } }
 </style></head><body>
-<h1><b class="crumb" onclick="goRoot()">angles</b> · <span id="crumb"></span>
+<h1><span class="modes"><span id="m-angles" class="on" onclick="setMode('angles')">angles</span>
+    · <span id="m-mgmt" onclick="setMode('mgmt')">sessions</span></span>
+    · <span id="crumb"></span>
     <span id="stat" style="float:right"></span></h1>
 <div id="tabs"></div><div id="panel"><div class="empty">loading…</div></div>
 <div id="focus"></div>
@@ -437,7 +503,73 @@ function folders(){
 function goRoot(){ sid=null; render(); }
 function pickFolder(cwd){ folder=cwd; sid=null; render(); }
 async function pickSession(id){ sid=id; render(); await renderFocus(true); }
+let mode="angles", mgmtRows=null, mgmtErr=null, mgmtAt=0;
+function setMode(m){ mode=m; sid=null;
+  document.getElementById("m-angles").classList.toggle("on", m==="angles");
+  document.getElementById("m-mgmt").classList.toggle("on", m==="mgmt");
+  if(m==="mgmt") refreshMgmt(true); else render(); }
+async function refreshMgmt(force){
+  if(!force && Date.now()-mgmtAt<30000){ renderMgmt(); return; }
+  mgmtAt=Date.now();
+  document.getElementById("crumb").textContent="session management";
+  try{
+    const r=await fetch("/api/mgmt"); const d=await r.json();
+    if(d.error){ mgmtErr=d.error; mgmtRows=null; }
+    else { mgmtRows=d.sessions; mgmtErr=null; }
+  }catch(e){ mgmtErr=String(e); }
+  renderMgmt();
+}
+function fmtDelta(d){
+  if(!d) return "";
+  if(d.class==="none") return "none";
+  if(d.class==="unknown") return "unknown"+(d.note?` (${d.note})`:"");
+  const body=`${d.records}rec ${d.prompts}p ${d.tool_calls}t`;
+  if(d.class==="real")
+    return `REAL ${body}${d.signals&&d.signals[0]? " · "+d.signals[0]:""}`;
+  return {confirmation_only:"confirm-only",
+          auto_compaction_only:"compaction-only"}[d.class]+` ${body}`;
+}
+function renderMgmt(){
+  if(mode!=="mgmt") return;
+  document.getElementById("tabs").innerHTML="";
+  document.getElementById("focus").classList.remove("open");
+  const panel=document.getElementById("panel");
+  if(mgmtErr){ panel.innerHTML=`<div class="empty">archive unavailable — ${esc(mgmtErr)}</div>`; return; }
+  if(!mgmtRows){ panel.innerHTML='<div class="empty">loading…</div>'; return; }
+  const trs=mgmtRows.map(s=>{
+    const vcls="v-"+s.verdict.replace("-delta","delta").replace("?","q");
+    const wantDelta=s.verdict==="OPEN-delta";
+    const state=(s.state||"—")+(s.reason?"/"+s.reason:"");
+    return `<tr class="row" onclick="showDigest('${s.session_id}',${wantDelta})">
+      <td class="${vcls}">${esc(s.verdict)}</td>
+      <td title="${esc(s.session_id)}">${s.session_id.slice(0,8)}</td>
+      <td>${esc(s.project_name||"?")}</td>
+      <td>${esc(s.git_branch||"—")}</td>
+      <td>${ts(s.last_ts)}</td>
+      <td class="num">${age(s.idle_s)}</td>
+      <td class="num">${s.message_count||0}</td>
+      <td title="${esc(s.kmcp_target||"")}">${esc(state)}</td>
+      <td class="${s.delta&&s.delta.class==="real"?"v-OPENdelta":""}"
+          title="${esc((s.delta&&s.delta.signals||[]).join("\n"))}">${esc(fmtDelta(s.delta))}</td>
+      </tr>`;
+  }).join("");
+  panel.innerHTML=`<table><thead><tr><th>verdict</th><th>session</th>
+    <th>project</th><th>branch</th><th>last activity</th><th>idle</th>
+    <th>msgs</th><th>summary</th><th>delta after summary</th></tr></thead>
+    <tbody>${trs}</tbody></table>
+    <div style="color:var(--dim);padding:6px 2px;font-size:12px">
+      last activity = max(messages.ts) from the archive (never file mtime) ·
+      click a row for its digest (delta digest when OPEN-delta)</div>`;
+}
+async function showDigest(id,delta){
+  const q=delta?"delta=1":"head=30&tail=80";
+  document.getElementById("dbody").textContent="loading digest…";
+  document.getElementById("detail").style.display="block";
+  const r=await fetch(`/api/digest/${id}?${q}`);
+  document.getElementById("dbody").textContent=await r.text();
+}
 function render(){
+  if(mode==="mgmt"){ renderMgmt(); return; }
   const fs=folders();
   const tabs=document.getElementById("tabs"),
         panel=document.getElementById("panel"),
@@ -537,6 +669,9 @@ async function renderFocus(scroll){
 }
 async function tick(){
   try{
+    if(mode==="mgmt"){ await refreshMgmt(false);
+      document.getElementById("stat").textContent=new Date().toLocaleTimeString();
+      return; }
     const r=await fetch("/api/sessions"); const txt=await r.text();
     document.getElementById("stat").textContent=new Date().toLocaleTimeString();
     if(txt!==lastJson){ lastJson=txt; rows=JSON.parse(txt); render(); }

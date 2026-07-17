@@ -20,6 +20,7 @@ from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_k
 from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
 from .sync import SessionSync
 from . import angles as angles_mod
+from . import session_mgmt as mgmt
 from . import summarize as ph4
 from . import usage as ug
 
@@ -499,6 +500,74 @@ def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str, p
                f"-> {row['kmcp_application']}:{row['kmcp_path']}")
 
 
+def _fmt_idle(s: int | None) -> str:
+    if s is None:
+        return "?"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d{(s % 86400) // 3600}h"
+
+
+def _fmt_delta(d: dict | None) -> str:
+    if d is None:
+        return ""
+    k = d["class"]
+    if k == "none":
+        return "none"
+    if k == "unknown":
+        return f"unknown ({d.get('note', '')})"
+    body = f"{d['records']}rec {d['prompts']}p {d['tool_calls']}t"
+    if k == "real":
+        sig = d["signals"][0] if d["signals"] else ""
+        return f"REAL {body}  {sig}"
+    return {"confirmation_only": "confirm-only",
+            "auto_compaction_only": "compaction-only"}.get(k, k) + f" {body}"
+
+
+def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
+                     live_min: int, with_delta: bool, as_json: bool) -> None:
+    """The session-management lens: open-thread inventory + delta verdicts."""
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None  # watermark kmcp-fallback degrades to unknown
+    rows = mgmt.inventory(ctx.obj["dsn"], resolved_kmcp,
+                          window_days=window_days, live_min=live_min,
+                          with_delta=with_delta)
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps(rows, indent=2, default=str))
+        return
+    if not rows:
+        click.echo(f"No main sessions active in the last {window_days}d.")
+        return
+    hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'PROJECT':<20.20} {'BRANCH':<22.22} "
+           f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5}  {'SUMMARY':<12} DELTA")
+    click.echo(hdr)
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[r["verdict"]] = counts.get(r["verdict"], 0) + 1
+        state = r["state"] or "—"
+        if r["reason"]:
+            state += f"/{r['reason']}"
+        last = (r["last_ts"].astimezone().strftime("%m-%d %H:%M")
+                if r["last_ts"] else "?")
+        color = {"LIVE": "green", "OPEN-delta": "red",
+                 "OPEN": "yellow", "OPEN?": "yellow"}.get(r["verdict"])
+        verdict = click.style(f"{r['verdict']:<10}", fg=color) if color \
+            else f"{r['verdict']:<10}"
+        click.echo(f"{verdict} {r['session_id'][:8]:<8} "
+                   f"{str(r['project_name'] or ''):<20.20} "
+                   f"{str(r['git_branch'] or '—'):<22.22} {last:<12} "
+                   f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5}  "
+                   f"{state:<12} {_fmt_delta(r['delta'])}")
+    tally = " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
+    click.echo(f"\n{len(rows)} sessions ({tally})  ·  "
+               "delta detail: csd angles digest <id> --delta")
+
+
 @main.command()
 @click.argument("spec", nargs=-1)
 @click.option("--session", "session_id", default=None,
@@ -510,21 +579,56 @@ def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str, p
 @click.option("--ollama-url", default=angles_mod.DEFAULT_OLLAMA_URL,
               help="Ollama endpoint (env CSD_OLLAMA_URL).")
 @click.option("--kmcp-dsn", default=None,
-              help="Knowledge DB DSN for the knowledge angle (default: archive DSN with db=knowledge).")
+              help="Knowledge DB DSN for the knowledge angle / delta watermark "
+                   "(default: archive DSN with db=knowledge).")
 @click.option("--no-probes", is_flag=True,
               help="Deterministic angles only — skip LLM probes and retrieval.")
+@click.option("--window-days", type=int, default=mgmt.WINDOW_DAYS_DEFAULT,
+              help=f"(sessions) Inventory window in days; 0 = all "
+                   f"(default {mgmt.WINDOW_DAYS_DEFAULT}).")
+@click.option("--live-min", type=int, default=mgmt.LIVE_MIN_DEFAULT,
+              help=f"(sessions) Minutes since last message under which a session "
+                   f"is LIVE (default {mgmt.LIVE_MIN_DEFAULT}).")
+@click.option("--no-delta", is_flag=True,
+              help="(sessions) Skip delta-after-summary detection (no transcript reads).")
+@click.option("--json", "as_json", is_flag=True,
+              help="(sessions) Emit the raw inventory as JSON.")
+@click.option("--delta", "delta_mode", is_flag=True,
+              help="(digest) Render only the post-summary-watermark tail.")
+@click.option("--head", type=int, default=None,
+              help=f"(digest) First N records to keep (default {mgmt.DIGEST_HEAD_DEFAULT} "
+                   "when neither --full nor --delta).")
+@click.option("--tail", type=int, default=None,
+              help=f"(digest) Last N records to keep (default {mgmt.DIGEST_TAIL_DEFAULT}).")
+@click.option("--full", "full_digest", is_flag=True,
+              help="(digest) No head/tail window — the whole transcript (can be huge).")
+@click.option("--result-head", type=int, default=200,
+              help="(digest) Chars of each tool_result to keep (default 200).")
+@click.option("--full-inputs", is_flag=True,
+              help="(digest) Verbatim tool_use inputs instead of one-field hints.")
 @click.pass_context
 def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
            turn: int, model: str, ollama_url: str, kmcp_dsn: str | None,
-           no_probes: bool) -> None:
+           no_probes: bool, window_days: int, live_min: int, no_delta: bool,
+           as_json: bool, delta_mode: bool, head: int | None, tail: int | None,
+           full_digest: bool, result_head: int, full_inputs: bool) -> None:
     """Pull-based turn mining: one-line ID-addressable headlines for one turn.
 
     Fire right after an agent response lands (e.g. `! csd angles` inside a
     Claude Code session). SPEC is either an angle subset (`csd angles
-    files,errors,knowledge`) or `show ID` to print the persisted detail behind
-    a headline (`csd angles show F1`). No SPEC runs every angle. Reads the
-    turn straight from the live session JSONL; nothing is written to kmcp —
-    curation happens in the operator's next message.
+    files,errors,knowledge`) or one of the keyword forms:
+
+    \b
+      csd angles show ID          detail behind a mined headline
+      csd angles sessions         session-management lens: open-thread
+                                  inventory + delta-after-summary verdicts
+      csd angles digest REF       per-session digest (REF = session id or
+                                  unique prefix; --delta for the post-summary
+                                  tail, --head/--tail/--full for windowing)
+
+    No SPEC runs every angle on the latest turn. Reads transcripts / archive
+    read-only; nothing is written to kmcp — curation happens in the
+    operator's next message.
 
     Design: claudecode:design/turn-angles-context-cockpit
     """
@@ -533,6 +637,28 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
             click.echo("usage: csd angles show ID", err=True)
             sys.exit(2)
         click.echo(angles_mod.show_item(spec[1]))
+        return
+    if spec and spec[0] == "sessions":
+        _angles_sessions(ctx, kmcp_dsn, window_days, live_min,
+                         with_delta=not no_delta, as_json=as_json)
+        return
+    if spec and spec[0] == "digest":
+        if len(spec) < 2:
+            click.echo("usage: csd angles digest SESSION_REF "
+                       "[--delta|--head N|--tail N|--full]", err=True)
+            sys.exit(2)
+        try:
+            resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+        except Exception:
+            resolved_kmcp = None
+        try:
+            click.echo(mgmt.digest_for(
+                spec[1], dsn=ctx.obj["dsn"], kmcp_dsn=resolved_kmcp,
+                delta=delta_mode, head=head, tail=tail, full=full_digest,
+                result_head=result_head, full_inputs=full_inputs), nl=False)
+        except ValueError as exc:
+            click.echo(f"digest: {exc}", err=True)
+            sys.exit(1)
         return
     wanted = None
     if spec:
@@ -589,7 +715,8 @@ def angles_serve(ctx: click.Context, host: str, port: int, window: int,
     except Exception:
         resolved_kmcp = None
     serve(host=host, port=port, window_s=window, model=model,
-          base_url=ollama_url, kmcp_dsn=resolved_kmcp, no_probes=no_probes)
+          base_url=ollama_url, kmcp_dsn=resolved_kmcp, no_probes=no_probes,
+          csd_dsn=ctx.obj["dsn"])
 
 
 @main.command(name="dsn")

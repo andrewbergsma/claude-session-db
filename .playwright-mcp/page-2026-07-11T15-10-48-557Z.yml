@@ -1,0 +1,230 @@
+- generic [active] [ref=e1]:
+  - navigation [ref=e2]:
+    - generic [ref=e3]:
+      - heading "kmcp · session console" [level=1] [ref=e4]
+      - generic [ref=e5]:
+        - text: 40 sessions · 12 projects
+        - generic [ref=e20] [cursor=pointer]: archived (0)
+    - generic [ref=e21]:
+      - generic [ref=e22]: console-angles-merge
+      - generic [ref=e23] [cursor=pointer]:
+        - generic "running" [ref=e24]
+        - generic [ref=e25]:
+          - generic [ref=e26]: Review angles-serve dashboard PR
+          - generic [ref=e27]: 9faac404 · worktree-console-angles-merge · 0s
+      - generic [ref=e28] [cursor=pointer]:
+        - generic "running" [ref=e29]
+        - generic [ref=e30]:
+          - generic [ref=e31]: Link KMCP entries from second HTML file
+          - generic [ref=e32]: 370171ad · worktree-console-angles-merge · 10s
+      - generic [ref=e33]: p6-saas-rebase
+      - generic [ref=e34] [cursor=pointer]:
+        - generic "awaiting" [ref=e35]
+        - generic [ref=e36]:
+          - generic [ref=e37]: Add multiple color schemes for kmcp
+          - generic [ref=e38]: 9ddc19b9 · claude/knowledge-mcp-saas-JdxO5 · 11s
+      - generic [ref=e39]: knowledge
+      - generic [ref=e40] [cursor=pointer]:
+        - generic "awaiting" [ref=e41]
+        - generic [ref=e42]:
+          - generic [ref=e43]: Investigate automatic bidirectional edge creation
+          - generic [ref=e44]: 844bcb22 · main · 16s
+      - generic [ref=e45] [cursor=pointer]:
+        - generic "awaiting" [ref=e46]
+        - generic [ref=e47]:
+          - generic [ref=e48]: App agents dashboard specification
+          - generic [ref=e49]: 42e1bed0 · main · 5m
+      - generic [ref=e50]: paths-lazy-expand
+      - generic [ref=e51] [cursor=pointer]:
+        - generic "awaiting" [ref=e52]
+        - generic [ref=e53]:
+          - generic [ref=e54]: Check if path navigation page was saved
+          - generic [ref=e55]: a84547de · worktree-paths-lazy-expand · 3m
+      - generic [ref=e56]: controltech
+      - generic [ref=e57] [cursor=pointer]:
+        - generic "awaiting" [ref=e58]
+        - generic [ref=e59]:
+          - generic [ref=e60]: Locate file paths
+          - generic [ref=e61]: 258b4a70 · fix/minter-exclude-pipe-straps · 3m
+      - generic [ref=e62] [cursor=pointer]:
+        - generic "awaiting" [ref=e63]
+        - generic [ref=e64]:
+          - generic [ref=e65]: Dispatch subagent to session summary
+          - generic [ref=e66]: f7552a7f · fix/minter-exclude-pipe-straps · 6m
+      - generic [ref=e67] [cursor=pointer]:
+        - generic "awaiting" [ref=e68]
+        - generic [ref=e69]:
+          - generic [ref=e70]: Fill cable taglist naming gaps
+          - generic [ref=e71]: 2f4e7e48 · fix/minter-exclude-pipe-straps · 8m
+      - generic [ref=e72] [cursor=pointer]:
+        - generic "awaiting" [ref=e73]
+        - generic [ref=e74]:
+          - generic [ref=e75]: Fill cable CSV service fields
+          - generic [ref=e76]: cae6f9b0 · fix/minter-exclude-pipe-straps · 11m
+      - generic [ref=e77] [cursor=pointer]:
+        - generic "awaiting" [ref=e78]
+        - generic [ref=e79]:
+          - generic [ref=e80]: Set up contention experiment for leveling priority
+          - generic [ref=e81]: ce09fff9 · fix/minter-exclude-pipe-straps · 15m
+      - generic [ref=e82] [cursor=pointer]:
+        - generic "awaiting" [ref=e83]
+        - generic [ref=e84]:
+          - generic [ref=e85]: Check boom contract KMCP ingestion
+          - generic [ref=e86]: c82d92ad · fix/minter-exclude-pipe-straps · 16m
+      - generic [ref=e87] [cursor=pointer]:
+        - generic "awaiting" [ref=e88]
+        - generic [ref=e89]:
+          - generic [ref=e90]: 46d128d5-ee7
+          - generic [ref=e91]: 46d128d5 · fix/minter-exclude-pipe-straps · 16m
+      - generic [ref=e92] [cursor=pointer]:
+        - generic "idle" [ref=e93]
+        - generic [ref=e94]:
+          - generic [ref=e95]: 5f66c69d-82a
+          - generic [ref=e96]: 5f66c69d · fix/minter-exclude-pipe-straps · 16m
+      - generic [ref=e97] [cursor=pointer]:
+        - generic "awaiting" [ref=e98]
+        - generic [ref=e99]:
+          - generic [ref=e100]: Create KMCP entries for geolocation equipment data
+          - generic [ref=e101]: 38ebdd21 · fix/minter-exclude-pipe-straps · 17m
+      - generic [ref=e102] [cursor=pointer]:
+        - generic "awaiting" [ref=e103]
+        - generic [ref=e104]:
+          - generic [ref=e105]: Read doc retitle vision sweep
+          - generic [ref=e106]: 0c252737 · fix/minter-exclude-pipe-straps · 27m
+      - generic [ref=e107] [cursor=pointer]:
+        - generic "awaiting" [ref=e108]
+        - generic [ref=e109]:
+          - generic [ref=e110]: Save boom and shermco subcontract items as activityExpense
+          - generic [ref=e111]: 0d708031 · fix/minter-exclude-pipe-straps · 27m
+      - generic [ref=e112] [cursor=pointer]:
+        - generic "awaiting" [ref=e113]
+        - generic [ref=e114]:
+          - generic [ref=e115]: Proceed with established order
+          - generic [ref=e116]: 26e50532 · fix/minter-exclude-pipe-straps · 45m
+      - generic [ref=e117] [cursor=pointer]:
+        - generic "awaiting" [ref=e118]
+        - generic [ref=e119]:
+          - generic [ref=e120]: Document KMCP underground work details
+          - generic [ref=e121]: f90fe98f · fix/minter-exclude-pipe-straps · 45m
+      - generic [ref=e122] [cursor=pointer]:
+        - generic "awaiting" [ref=e123]
+        - generic [ref=e124]:
+          - generic [ref=e125]: cc612b3c-85f
+          - generic [ref=e126]: cc612b3c · fix/minter-exclude-pipe-straps · 45m
+      - generic [ref=e127] [cursor=pointer]:
+        - generic "awaiting" [ref=e128]
+        - generic [ref=e129]:
+          - generic [ref=e130]: Analyze session efficiency improvements
+          - generic [ref=e131]: 73731fd1 · fix/minter-exclude-pipe-straps · 45m
+      - generic [ref=e132] [cursor=pointer]:
+        - generic "awaiting" [ref=e133]
+        - generic [ref=e134]:
+          - generic [ref=e135]: Create P6 schedule with activity-per-work-type setup
+          - generic [ref=e136]: d264a169 · fix/minter-exclude-pipe-straps · 1.3h
+      - generic [ref=e137] [cursor=pointer]:
+        - generic "awaiting" [ref=e138]
+        - generic [ref=e139]:
+          - generic [ref=e140]: Enhance region-reader with drawing type validation
+          - generic [ref=e141]: 87f81a88 · fix/minter-exclude-pipe-straps · 1.3h
+      - generic [ref=e142] [cursor=pointer]:
+        - generic "awaiting" [ref=e143]
+        - generic [ref=e144]:
+          - generic [ref=e145]: Consolidate NRUTT_L4_WP knowledge and simplify relationships
+          - generic [ref=e146]: 2276571f · fix/minter-exclude-pipe-straps · 13.1h
+      - generic [ref=e147] [cursor=pointer]:
+        - generic "awaiting" [ref=e148]
+        - generic [ref=e149]:
+          - generic [ref=e150]: Make drawing references clickable links
+          - generic [ref=e151]: ddb402cd · fix/minter-exclude-pipe-straps · 13.6h
+      - generic [ref=e152] [cursor=pointer]:
+        - generic "awaiting" [ref=e153]
+        - generic [ref=e154]:
+          - generic [ref=e155]: Create P6 commodity schedule with manpower loading
+          - generic [ref=e156]: 678171ac · fix/minter-exclude-pipe-straps · 13.8h
+      - generic [ref=e157] [cursor=pointer]:
+        - generic "awaiting" [ref=e158]
+        - generic [ref=e159]:
+          - generic [ref=e160]: Calibrate PPI HTML geospatial offset
+          - generic [ref=e161]: efb07583 · fix/minter-exclude-pipe-straps · 14.0h
+      - generic [ref=e162] [cursor=pointer]:
+        - generic "awaiting" [ref=e163]
+        - generic [ref=e164]:
+          - generic [ref=e165]: Debug grid select tool OCR discrepancies
+          - generic [ref=e166]: 0d4c765d · fix/minter-exclude-pipe-straps · 14.0h
+      - generic [ref=e167] [cursor=pointer]:
+        - generic "awaiting" [ref=e168]
+        - generic [ref=e169]:
+          - generic [ref=e170]: Check heat trace isometrics OCR data in nrutt
+          - generic [ref=e171]: 16a9f25e · fix/minter-exclude-pipe-straps · 15.5h
+      - generic [ref=e172] [cursor=pointer]:
+        - generic "stale" [ref=e173]
+        - generic [ref=e174]:
+          - generic [ref=e175]: Search and replace monokon to monikon in kmcp
+          - generic [ref=e176]: 1a02e255 · fix/minter-exclude-pipe-straps · 15.5h
+      - generic [ref=e177]: doc-navigator-filetype-and-pdf-reader
+      - generic [ref=e178] [cursor=pointer]:
+        - generic "awaiting" [ref=e179]
+        - generic [ref=e180]:
+          - generic [ref=e181]: Distinguish file types in document navigator
+          - generic [ref=e182]: dc51987e · worktree-doc-navigator-filetype-and-pdf-reader · 18m
+      - generic [ref=e183]: p6agent
+      - generic [ref=e184] [cursor=pointer]:
+        - generic "awaiting" [ref=e185]
+        - generic [ref=e186]:
+          - generic [ref=e187]: Document P6 EPPM keyboard shortcuts and tips
+          - generic [ref=e188]: 8d77e2f7 · chore/p6-db-server-aliases · 22m
+      - generic [ref=e189]: infrastructure
+      - generic [ref=e190] [cursor=pointer]:
+        - generic "stale" [ref=e191]
+        - generic [ref=e192]:
+          - generic [ref=e193]: Verify NVMe data migration to storage
+          - generic [ref=e194]: 5bf5f1fa · main · 27m
+      - generic [ref=e195] [cursor=pointer]:
+        - generic "awaiting" [ref=e196]
+        - generic [ref=e197]:
+          - generic [ref=e198]: Setup TrueNAS shares for SDNR coordinator
+          - generic [ref=e199]: a801bffb · main · 45m
+      - generic [ref=e200] [cursor=pointer]:
+        - generic "awaiting" [ref=e201]
+        - generic [ref=e202]:
+          - generic [ref=e203]: Dispatch subagent for session summaries
+          - generic [ref=e204]: da06362e · main · 45m
+      - generic [ref=e205] [cursor=pointer]:
+        - generic "awaiting" [ref=e206]
+        - generic [ref=e207]:
+          - generic [ref=e208]: Check SDNR agent and KMCP configuration
+          - generic [ref=e209]: 8d074066 · main · 45m
+      - generic [ref=e210]: reservations
+      - generic [ref=e211] [cursor=pointer]:
+        - generic "awaiting" [ref=e212]
+        - generic [ref=e213]:
+          - generic [ref=e214]: Detailed project code review
+          - generic [ref=e215]: acf0e2cf · HEAD · 27m
+      - generic [ref=e216]: p6eppm_api
+      - generic [ref=e217] [cursor=pointer]:
+        - generic "awaiting" [ref=e218]
+        - generic [ref=e219]:
+          - generic [ref=e220]: Store subcontractor contract values and line items
+          - generic [ref=e221]: 831d9e35 · chore/p6-db-server-aliases · 27m
+      - generic [ref=e222]: wood
+      - generic [ref=e223] [cursor=pointer]:
+        - generic "stale" [ref=e224]
+        - generic [ref=e225]:
+          - generic [ref=e226]: Convert image to CSV format
+          - generic [ref=e227]: c67ab7ca · HEAD · 45m
+      - generic [ref=e228]: keyboard
+      - generic [ref=e229] [cursor=pointer]:
+        - generic "awaiting" [ref=e230]
+        - generic [ref=e231]:
+          - generic [ref=e232]: Swap F5 and F6 on lower right key layer
+          - generic [ref=e233]: d51b347f · main · 57m
+  - main [ref=e6]:
+    - heading "select a session" [level=2] [ref=e8]
+    - generic [ref=e9]: pick a session on the left
+    - generic [ref=e12]:
+      - textbox "answer this session… (fork if it's running)" [disabled] [ref=e13]
+      - button "Answer" [disabled] [ref=e14]
+      - button "Fork" [disabled] [ref=e15]
+  - complementary [ref=e16]:
+    - heading "Read detail" [level=3] [ref=e17]
+    - generic [ref=e18]: Click a 📖 read in the transcript to inspect what this session consumed from the base — mode, size, sections, and a link into /browse.

@@ -1,0 +1,837 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kmcp — session console</title>
+<style>
+  :root {
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
+    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#6e7a87;
+    --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+    --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
+    --mode-section:#3fb950; --mode-batch:#39c5cf;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --rail-w:320px;
+  }
+  * { box-sizing:border-box; margin:0; }
+  html,body { height:100%; }
+  body {
+    background:var(--bg); color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:grid; grid-template-columns:270px minmax(0,1fr) var(--rail-w);
+    grid-template-rows:100vh; height:100vh; overflow:hidden;
+  }
+  @media (max-width:1100px){ body{ grid-template-columns:230px minmax(0,1fr); } #rail,#railgrip{ display:none; } }
+
+  /* drag handle straddling the left edge of the right rail */
+  #railgrip { position:fixed; top:0; bottom:0; right:var(--rail-w); width:9px;
+              margin-right:-4px; cursor:col-resize; z-index:30; }
+  #railgrip::after { content:""; position:absolute; top:0; bottom:0; left:4px; width:1px;
+                     background:transparent; transition:background .12s; }
+  #railgrip:hover::after, #railgrip.drag::after { background:var(--accent); width:2px; }
+  body.raildrag { user-select:none; cursor:col-resize; }
+  #nav, #main, #rail { min-height:0; }
+
+  /* ---- left: projects + sessions ---- */
+  #nav { background:var(--surface); border-right:1px solid var(--border);
+         overflow-y:auto; }
+  #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
+              border-bottom:1px solid var(--border); z-index:2; }
+  #nav .top h1 { font-size:13px; font-weight:600; letter-spacing:.3px; }
+  #nav .top .sub { color:var(--muted); font-size:11px; margin-top:2px; }
+  .proj { color:var(--ink2); font-size:10.5px; font-weight:700; text-transform:uppercase;
+          letter-spacing:.7px; padding:12px 14px 4px; }
+  .sess { display:flex; gap:8px; align-items:baseline; padding:7px 14px; cursor:pointer;
+          border-left:2px solid transparent; }
+  .sess:hover { background:var(--surface2); }
+  .sess.active { background:var(--surface2); border-left-color:var(--accent); }
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px; }
+  .dot.running { background:var(--warn); box-shadow:0 0 5px var(--warn); }
+  .dot.awaiting { background:var(--good); box-shadow:0 0 5px var(--good); }
+  .dot.stale,.dot.idle { background:var(--muted); }
+  .sess .meta { min-width:0; flex:1; }
+  .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+  /* ---- center: chat ---- */
+  #main { display:flex; flex-direction:column; min-width:0; }
+  #chdr { padding:12px 20px; border-bottom:1px solid var(--border); background:var(--surface);
+          display:flex; flex-direction:column; gap:5px; }
+  #chdr .row1 { display:flex; align-items:center; gap:10px; }
+  #chdr h2 { font-size:15px; font-weight:600; min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+  #chdr .chips { display:flex; gap:6px; flex-wrap:wrap; }
+  .chip { font-size:11px; font-family:var(--mono); color:var(--ink2);
+          background:var(--surface2); border:1px solid var(--border);
+          border-radius:5px; padding:2px 8px; white-space:nowrap; }
+  .chip b { color:var(--ink); font-weight:600; }
+  .chip.sid { color:var(--accent); }
+  .chip.br { color:var(--purple); }
+
+  #stream { flex:1; overflow-y:auto; padding:16px 20px 8px; }
+  .ev { display:flex; gap:10px; margin:2px 0; }
+  .ev .gutter { min-width:44px; text-align:right; color:var(--muted);
+                font:11px/1.6 var(--mono); flex:none; padding-top:2px; }
+  .ev .b { min-width:0; flex:1; }
+
+  .turn { border-radius:8px; padding:9px 13px; }
+  .turn.user { background:var(--surface2); border:1px solid var(--border); }
+  .turn.assistant { background:transparent; }
+  .who { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+         letter-spacing:.5px; margin-bottom:3px; }
+  .turn.user .who { color:var(--accent); }
+  .turn.assistant .who { color:var(--ink2); }
+  .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
+  .turn.assistant .txt { color:var(--ink); }
+  .subtools { margin-top:6px; }
+  .trow { font:11px var(--mono); margin:2px 0; }
+  .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
+  .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  .tlabel { color:var(--ink2); word-break:break-word; }
+  .tsize { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
+  .terr { color:var(--warn); font-size:9.5px; text-transform:uppercase;
+          border:1px solid var(--warn); border-radius:3px; padding:0 3px; }
+  .tdet { color:var(--muted); padding:1px 0 2px 18px; white-space:pre-wrap;
+          word-break:break-word; opacity:.85;
+          display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+          overflow:hidden; }
+
+  /* inline kmcp read marker */
+  .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
+          border-radius:6px; border:1px solid transparent; font-size:12.5px; }
+  .read:hover { background:var(--surface2); border-color:var(--border); }
+  .read.sel { background:var(--surface2); border-color:var(--accent); }
+  .read .ic { flex:none; }
+  .read .pth { font-family:var(--mono); font-size:12px; white-space:nowrap;
+               overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+  .read .pth .app { color:var(--ink2); }
+  .read.sub .pth::before { content:"⤷sub "; color:var(--purple); }
+  .badge { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.4px; border:1px solid; border-radius:4px; padding:1px 5px;
+           flex:none; }
+  .badge.full{color:var(--mode-full);border-color:var(--mode-full);}
+  .badge.summary{color:var(--mode-summary);border-color:var(--mode-summary);}
+  .badge.sections,.badge.section{color:var(--mode-sections);border-color:var(--mode-sections);}
+  .badge.batch{color:var(--mode-batch);border-color:var(--mode-batch);}
+  .read .sz { color:var(--muted); font:11px var(--mono); flex:none; }
+  .search { display:flex; align-items:center; gap:8px; padding:3px 10px;
+            color:var(--ink2); font-size:12px; }
+  .search .q { font-family:var(--mono); font-size:11.5px; color:var(--ink2);
+               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
+  .toolev { padding:2px 10px; color:var(--muted); font:11px var(--mono); }
+
+  /* AskUserQuestion choice card */
+  .turn.choice { background:var(--surface2); border:1px solid var(--border); }
+  .turn.choice .who { color:var(--purple); }
+  .cq + .cq { margin-top:10px; padding-top:10px; border-top:1px solid var(--border); }
+  .cq-q { font-size:13.5px; margin-bottom:7px; display:flex; gap:8px;
+          align-items:baseline; flex-wrap:wrap; }
+  .ctag { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+          letter-spacing:.5px; border:1px solid; border-radius:4px; padding:1px 5px; flex:none; }
+  .ctag.hdr { color:var(--purple); border-color:var(--purple); }
+  .ctag.pend { color:var(--warn); border-color:var(--warn); }
+  .copt { display:flex; gap:8px; align-items:baseline; padding:6px 10px;
+          border:1px solid var(--border); border-radius:6px; margin-bottom:5px;
+          background:var(--surface); }
+  .copt.sel { border-color:var(--good); background:rgba(63,185,80,.09); }
+  .copt .lbl { font-weight:600; font-size:12.5px; color:var(--ink); flex:none; }
+  .copt.sel .lbl { color:var(--good); }
+  .copt .desc { color:var(--muted); font-size:11.5px; min-width:0; }
+  .copt .tick { color:var(--good); font-weight:700; margin-left:auto; flex:none; }
+
+  /* compose */
+  #compose { border-top:1px solid var(--border); padding:12px 20px; background:var(--surface);
+             display:flex; gap:8px; align-items:center; }
+  #compose input { flex:1; background:var(--bg); border:1px solid var(--border);
+                   border-radius:8px; color:var(--ink); padding:10px 14px;
+                   font:13px var(--mono); outline:none; }
+  #compose input:focus { border-color:var(--accent); }
+  #compose button { border:1px solid var(--border); border-radius:8px; cursor:pointer;
+                    font-size:13px; font-weight:600; padding:10px 16px;
+                    background:var(--surface2); color:var(--ink); }
+  #compose button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #compose button:disabled { opacity:.4; cursor:not-allowed; }
+  #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
+             min-height:14px; background:var(--surface); }
+
+  /* ---- right: read detail rail ---- */
+  #rail { background:var(--surface); border-left:1px solid var(--border);
+          overflow-y:auto; padding:14px 16px; }
+  #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
+             color:var(--ink2); margin-bottom:12px; }
+  .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
+  .acts { display:flex; gap:6px; align-items:center; margin-top:9px; flex-wrap:wrap; }
+  .act { font:11px var(--mono); padding:4px 9px; border-radius:5px; cursor:pointer;
+         background:var(--surface); color:var(--ink2);
+         border:1px solid var(--border); }
+  .act:hover:not(:disabled) { color:var(--ink); border-color:var(--muted); }
+  .act:disabled { opacity:.38; cursor:not-allowed; }
+  .act.sm { font-size:10px; padding:3px 7px; }
+  .act.primary { color:var(--purple); border-color:var(--purple); }
+  .actmsg { font:10.5px var(--mono); color:var(--muted); margin-left:4px; }
+  .actmsg.bad { color:var(--warn); }
+  .navtog { float:right; cursor:pointer; color:var(--muted); text-decoration:underline; }
+  .navtog:hover { color:var(--purple); }
+  .tag { font:8.5px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+         color:var(--warn); border:1px solid var(--warn); border-radius:3px;
+         padding:0 3px; vertical-align:middle; }
+  .curate { display:flex; gap:5px; flex-wrap:wrap; margin:8px 0; }
+  .cur-row { display:flex; gap:8px; align-items:center; font-size:11.5px; margin:4px 0; }
+  .cur-row code { font:11px var(--mono); word-break:break-all; }
+  .cur-row select { font:11px var(--mono); background:var(--bg); color:var(--ink);
+                    border:1px solid var(--border); border-radius:4px; padding:2px 4px; }
+  .cur-ok  { font:10.5px var(--mono); color:var(--mode-full); margin:6px 0; }
+  .cur-err { font:10.5px var(--mono); color:var(--warn); margin:6px 0;
+             word-break:break-word; }
+  .cur-warn{ font-size:11.5px; line-height:1.5; color:var(--warn); margin:6px 0;
+             border-left:2px solid var(--warn); padding-left:7px; }
+  #angles { margin-top:22px; }
+  .ang-g { margin-bottom:10px; }
+  .ang-h { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.6px; color:var(--muted); margin-bottom:3px; }
+  .ang-i { font-size:12.5px; line-height:1.45; padding:3px 0; cursor:pointer;
+           display:flex; gap:7px; align-items:baseline; }
+  .ang-i:hover { color:var(--purple); }
+  .ang-id { font:10px var(--mono); font-weight:700; color:var(--muted);
+            flex:0 0 auto; }
+  .ang-i:hover .ang-id { color:var(--purple); }
+  .ang-head { font-size:13px; margin:4px 0 8px; }
+  .ang-detail { font:11.5px/1.5 var(--mono); white-space:pre-wrap;
+                word-break:break-word; max-height:46vh; overflow-y:auto;
+                background:var(--bg); border:1px solid var(--border);
+                border-radius:5px; padding:8px; }
+  .rl-path { font:13px var(--mono); word-break:break-all; margin-bottom:2px; }
+  .rl-app { color:var(--ink2); }
+  .kv { display:flex; justify-content:space-between; gap:10px; padding:7px 0;
+        border-bottom:1px solid var(--border); font-size:12.5px; }
+  .kv .k { color:var(--muted); font:11px var(--mono); text-transform:uppercase;
+           letter-spacing:.4px; }
+  .kv .v { font-family:var(--mono); text-align:right; word-break:break-word; }
+  .rl-open { display:block; margin-top:16px; text-align:center; text-decoration:none;
+             background:var(--surface2); border:1px solid var(--border); border-radius:8px;
+             color:var(--ink); padding:9px; font-size:12.5px; }
+  .rl-open:hover { border-color:var(--accent); color:var(--accent); }
+  .rl-back { display:inline-flex; align-items:center; gap:5px; font:11px var(--mono);
+             color:var(--ink2); background:var(--surface2); border:1px solid var(--border);
+             border-radius:6px; padding:3px 10px; cursor:pointer; margin-bottom:12px; }
+  .rl-back:hover { border-color:var(--accent); color:var(--accent); }
+  .rl-secs { margin-top:12px; }
+  .rl-secs .s { display:inline-block; font:11px var(--mono); color:var(--mode-sections);
+                border:1px solid var(--mode-sections); border-radius:4px;
+                padding:1px 6px; margin:0 4px 4px 0; }
+  #summary { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }
+
+  /* first-class search rows + rail hit list */
+  .read.search .ic { filter:none; }
+  .read.search .pth .app { color:var(--purple); }
+  .badge.srf { color:var(--purple); border-color:var(--purple); }
+  .rl-tag { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+            letter-spacing:.6px; color:var(--mode-full); margin-bottom:6px; }
+  .rl-tag.srf { color:var(--purple); }
+  .rl-hits { margin-top:14px; }
+  .rl-hits-h { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+               color:var(--muted); margin-bottom:8px; }
+  .hit { display:block; text-decoration:none; padding:6px 8px; border:1px solid var(--border);
+         border-radius:6px; margin-bottom:6px; background:var(--surface2); }
+  .hit:hover { border-color:var(--purple); }
+  .hit-t { display:block; font-size:12px; color:var(--ink); white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis; }
+  .hit-p { display:block; font:10.5px var(--mono); color:var(--muted); white-space:nowrap;
+           overflow:hidden; text-overflow:ellipsis; }
+
+  .empty { color:var(--muted); padding:24px; font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+  <nav id="nav">
+    <div class="top">
+      <h1>kmcp · session console</h1>
+      <div class="sub" id="navsub">loading…</div>
+    </div>
+    <div id="navlist"></div>
+  </nav>
+
+  <main id="main">
+    <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
+    <div id="stream"><div class="empty">pick a session on the left</div></div>
+    <div id="cstatus"></div>
+    <div id="compose">
+      <input id="cin" placeholder="answer this session… (fork if it's running)" disabled
+             onkeydown="if(event.key==='Enter')send(false)">
+      <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
+      <button id="bfork" disabled onclick="send(true)">Fork</button>
+    </div>
+  </main>
+
+  <aside id="rail">
+    <h3>Read detail</h3>
+    <div id="raildetail" class="rl-empty">
+      Click a <b>📖 read</b> in the transcript to inspect what this session
+      consumed from the base — mode, size, sections, and a link into /browse.
+    </div>
+    <div id="angles"></div>
+    <div id="summary"></div>
+  </aside>
+  <div id="railgrip" title="Drag to resize · double-click to reset"></div>
+
+<script>
+const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
+
+/* ---------- resizable right rail (drag the grip on its left edge) ---------- */
+(function(){
+  const KEY = "csd.consoleRailW", MIN = 240, MAX = 760, DEF = 320;
+  const root = document.documentElement;
+  const setW = w => root.style.setProperty("--rail-w",
+                     Math.max(MIN, Math.min(MAX, w)) + "px");
+  const saved = parseInt(localStorage.getItem(KEY), 10);
+  if(saved) setW(saved);
+  const grip = document.getElementById("railgrip");
+  let dragging = false;
+  grip.addEventListener("pointerdown", e => {
+    dragging = true; grip.classList.add("drag");
+    document.body.classList.add("raildrag");
+    grip.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  grip.addEventListener("pointermove", e => {
+    if(dragging) setW(window.innerWidth - e.clientX);
+  });
+  const end = () => {
+    if(!dragging) return;
+    dragging = false; grip.classList.remove("drag");
+    document.body.classList.remove("raildrag");
+    localStorage.setItem(KEY,
+      parseInt(getComputedStyle(root).getPropertyValue("--rail-w"), 10));
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => { setW(DEF); localStorage.setItem(KEY, DEF); });
+})();
+
+/* Escape also dismisses an open rail detail — as long as you're not typing. */
+document.addEventListener("keydown", e => {
+  const box = document.getElementById("raildetail");
+  if(e.key === "Escape" && box && !box.classList.contains("rl-empty") &&
+     !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || ""))
+    clearRail();
+});
+let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
+/* While an answer we dispatched is running, we track it so #cstatus reflects
+   the LIVE run (elapsed timer + completion) instead of freezing on "running". */
+let awaitReply = null, replyTicker = null;
+
+function esc(x){ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function rel(ts){ const s=Math.max(0,(Date.now()-new Date(ts).getTime())/1000);
+  if(s<60)return Math.floor(s)+"s"; if(s<3600)return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; }
+function clock(ts){ if(!ts)return""; const d=new Date(ts);
+  return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}); }
+function kb(n){ if(n==null)return "—"; if(n<1024)return n+" ch"; return (n/1024).toFixed(1)+" kB"; }
+
+/* ---------- nav ---------- */
+let showArchived = false;
+
+async function loadNav(){
+  let d;
+  try { d = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
+  catch(e){ return; }
+  const list = document.getElementById("navlist");
+  const byProj = {};
+  for(const s of d.sessions){ (byProj[s.project_label||s.project] ??= []).push(s); }
+  let html = "";
+  for(const [proj, ss] of Object.entries(byProj)){
+    html += `<div class="proj">${esc(proj)}</div>`;
+    for(const s of ss){
+      const busy = d.summarizing?.[s.session_id] === "running";
+      html += `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
+        <span class="dot ${s.state}" title="${s.state}"></span>
+        <span class="meta">
+          <div class="ttl">${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+          <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}</div>
+        </span></div>`;
+    }
+  }
+  list.innerHTML = html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+  document.getElementById("navsub").innerHTML =
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${Object.keys(byProj).length} projects
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+}
+
+function toggleArchived(){ showArchived = !showArchived; loadNav(); }
+
+/* ---------- session detail ---------- */
+async function openSession(id){
+  curId = id; selIdx = null; pinnedBottom = true;
+  clearAwait(); document.getElementById("cstatus").textContent = "";
+  document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
+  await refreshSession(true);
+  loadNav();
+}
+
+async function refreshSession(scrollBottom){
+  if(!curId) return;
+  let s; try { s = await (await fetch("/api/session?id="+curId)).json(); } catch(e){ return; }
+  if(s.error) return;
+  curSession = s;
+  renderHeader(s); renderStream(s); renderAngles(s); renderSummary(s);
+  const st = document.getElementById("stream");
+  if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
+  syncReplyStatus(s);
+}
+
+/* ---------- live status for a dispatched answer ---------- */
+function clearAwait(){ awaitReply = null; clearInterval(replyTicker); replyTicker = null; }
+
+function startAwait(){
+  awaitReply = { t0: Date.now(), baseEvents: curSession.events.length, sid: curId };
+  clearInterval(replyTicker);
+  replyTicker = setInterval(tickRunning, 1000);
+  tickRunning();
+}
+
+/* 1s ticker so the operator sees the turn is alive (poll is only every 3s). */
+function tickRunning(){
+  if(!awaitReply){ clearInterval(replyTicker); replyTicker = null; return; }
+  const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
+  document.getElementById("cstatus").textContent =
+    `⏳ headless turn running — ${secs}s · Esc-safe, keep this session open`;
+}
+
+/* On each poll: if the run we spawned is no longer live, resolve the status
+   from whether a new assistant turn actually landed. */
+function syncReplyStatus(s){
+  if(!awaitReply || awaitReply.sid !== curId) return;
+  const live = s.stoppable || s.state === "running";
+  if(live) return;                              // still running — ticker keeps counting
+  if(s.events.length <= awaitReply.baseEvents &&
+     Date.now() - awaitReply.t0 < 4000) return; // give the run a beat to start writing
+  const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
+  const last = s.events[s.events.length - 1] || {};
+  const landed = s.events.length > awaitReply.baseEvents && last.kind === "assistant";
+  clearAwait();
+  const st = document.getElementById("cstatus");
+  st.textContent = landed ? `✓ reply received (${secs}s)`
+                          : `⚠ turn ended (${secs}s) — no reply appended`;
+  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")) st.textContent = ""; }, 8000);
+}
+
+function renderHeader(s){
+  const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
+  const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
+  const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
+  document.getElementById("chdr").innerHTML = `
+    <div class="row1">
+      <span class="dot ${s.state}" title="${s.state}"></span>
+      <h2 title="${esc(s.title)}">${esc(s.title)}</h2>
+    </div>
+    <div class="chips">
+      <span class="chip sid">${esc(s.session_id)}</span>
+      <span class="chip">📁 <b>${esc(folder)}</b></span>
+      ${s.branch?`<span class="chip br">⎇ ${esc(s.branch)}</span>`:""}
+      ${model}${ctx}
+      <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
+      <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
+      <span class="chip">${s.state}</span>
+      ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
+      ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
+    </div>
+    <div class="acts">
+      <button class="act" ${s.stoppable?"":"disabled"} onclick="act('stop')"
+        title="${s.stoppable
+          ? "SIGINT the run this console spawned (same signal as Esc)"
+          : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
+      <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
+      <button class="act" onclick="act('summarize')"
+        title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
+      <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <span id="actmsg" class="actmsg"></span>
+    </div>`;
+  const running = s.state==="running";
+  document.getElementById("cin").disabled = false;
+  document.getElementById("cin").placeholder = running
+    ? "session is running — Fork to speak into a copy" : "answer this session…";
+  document.getElementById("bans").disabled = running;
+  document.getElementById("bfork").disabled = false;
+}
+
+function readRow(e, idx){
+  const mode = e.mode||"read";
+  const secs = e.sections?.length ? `<span class="sz">[${esc(e.sections.join(", "))}]</span>` : "";
+  // A batch get_entries reads as its targets: first ref + "(+N)", not "(batch)".
+  let pth, cnt = "";
+  if(e.targets?.length){
+    const first = e.targets[0], more = e.targets.length - 1;
+    pth = `${esc(first)}${more>0?` <span class="app">(+${more})</span>`:""}`;
+  } else {
+    pth = `<span class="app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}`;
+    if(e.count) cnt = `<span class="sz">×${e.count}</span>`;
+  }
+  const tip = e.targets?.length ? ` title="${esc(e.targets.join("\n"))}"` : "";
+  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})"${tip}>
+    <span class="ic">📖</span>
+    <span class="pth">${pth}</span>
+    ${cnt}<span class="badge ${mode}">${mode}</span>${secs}
+    <span class="sz">${kb(e.chars)}</span>
+  </div>`;
+}
+
+function searchRow(e, idx){
+  const n = e.result?.total;
+  const got = e.result?.hits?.length;
+  return `<div class="read search ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})">
+    <span class="ic">🔍</span>
+    <span class="pth"><span class="app">${esc(e.tool)}:</span> ${esc(e.query)}</span>
+    ${n!=null?`<span class="badge srf">${n.toLocaleString()} hits</span>`:""}
+    ${got?`<span class="sz">▸${got}</span>`:""}
+    <span class="sz">${kb(e.chars)}</span>
+  </div>`;
+}
+
+function choiceCard(e){
+  const qs = (e.questions||[]).map(q=>{
+    // multiSelect answer payload is the selected labels joined by ", " inside one
+    // "Q"="A" pair (verified across real transcripts). Match a label as a whole
+    // comma-delimited token so labels containing a comma still resolve.
+    const sel = q.selected!=null ? String(q.selected) : null;
+    const norm = s => "," + s.replace(/,\s*/g, ",") + ",";
+    const isSel = lbl => sel!=null && (sel===lbl || norm(sel).includes(norm(lbl)));
+    const opts = (q.options||[]).map(o=>`
+      <div class="copt ${isSel(o.label)?"sel":""}">
+        <span class="lbl">${esc(o.label)}</span>
+        ${o.description?`<span class="desc">${esc(o.description)}</span>`:""}
+        ${isSel(o.label)?`<span class="tick">✓</span>`:""}
+      </div>`).join("");
+    const matched = (q.options||[]).some(o=>isSel(o.label));
+    const custom = (q.selected!=null && !matched) ? `
+      <div class="copt sel"><span class="lbl">${esc(q.selected)}</span>
+      <span class="desc">(custom answer)</span><span class="tick">✓</span></div>` : "";
+    const hdr = q.header?`<span class="ctag hdr">${esc(q.header)}${q.multi?" · multi":""}</span>`:"";
+    const pend = q.selected==null?`<span class="ctag pend">awaiting choice</span>`:"";
+    return `<div class="cq"><div class="cq-q">${hdr}<span>${esc(q.question)}</span>${pend}</div>${opts}${custom}</div>`;
+  }).join("");
+  return `<div class="turn choice"><div class="who">choice · AskUserQuestion</div>${qs}</div>`;
+}
+
+/* Render each non-kmcp tool_use as one readable line: a verb (the command, the
+   skill, the subagent + description, the file), an optional peek, and the
+   result size with an error flag. Legacy string-only tools still render. */
+const TOOL_GLYPH = {Bash:"$", Write:"✎", Edit:"✎", Read:"📄", Skill:"◆",
+                    Agent:"⇲", Task:"⇲", SendMessage:"→", ToolSearch:"⚿"};
+function toolRow(t){
+  if(typeof t === "string") return `<div class="trow"><span class="tlabel">⚙ ${esc(t.replace(/^mcp__.+__/,""))}</span></div>`;
+  const glyph = TOOL_GLYPH[t.name] || "⚙";
+  const size = t.chars!=null ? `<span class="tsize">${kb(t.chars)}</span>` : "";
+  const err = t.is_error ? `<span class="terr">error</span>` : "";
+  const det = t.detail ? `<div class="tdet">${esc(t.detail)}</div>` : "";
+  return `<div class="trow"><div class="tline"><span class="tg">${glyph}</span>
+    <span class="tlabel">${esc(t.label||t.name)}</span>${err}${size}</div>${det}</div>`;
+}
+function toolRows(tools){ return (tools||[]).map(toolRow).join(""); }
+
+function renderStream(s){
+  let html = "";
+  s.events.forEach((e, i) => {
+    const g = `<span class="gutter">${clock(e.ts)}</span>`;
+    if(e.kind==="user")
+      html += `<div class="ev">${g}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+    else if(e.kind==="assistant"){
+      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools)}</div>` : "";
+      html += `<div class="ev">${g}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+    } else if(e.kind==="read")
+      html += `<div class="ev">${g}<div class="b">${readRow(e, i)}</div></div>`;
+    else if(e.kind==="search")
+      html += `<div class="ev">${g}<div class="b">${searchRow(e, i)}</div></div>`;
+    else if(e.kind==="tool")
+      html += `<div class="ev">${g}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
+    else if(e.kind==="choice")
+      html += `<div class="ev">${g}<div class="b">${choiceCard(e)}</div></div>`;
+  });
+  const st = document.getElementById("stream");
+  st.onscroll = () => { pinnedBottom = st.scrollHeight - st.scrollTop - st.clientHeight < 40; };
+  st.innerHTML = html || `<div class="empty">empty transcript</div>`;
+}
+
+function selectEvent(idx){
+  selIdx = idx;
+  renderStream(curSession);
+  const e = curSession.events[idx];
+  const rail = document.getElementById("raildetail");
+  rail.className = "";
+  rail.innerHTML = e.kind === "search" ? searchDetail(e) : readDetail(e);
+}
+
+/* Dismiss whatever detail is showing and restore the rail's default view, so
+   the Session kmcp usage panel is back at the top. */
+const RAIL_PLACEHOLDER =
+  `Click a <b>📖 read</b> in the transcript to inspect what this session
+   consumed from the base — mode, size, sections, and a link into /browse.`;
+const RAIL_BACK = `<button class="rl-back" onclick="clearRail()">← back to session</button>`;
+
+function clearRail(){
+  selIdx = null;
+  if(curSession) renderStream(curSession);
+  const box = document.getElementById("raildetail");
+  box.className = "rl-empty";
+  box.innerHTML = RAIL_PLACEHOLDER;
+  document.getElementById("rail").scrollTop = 0;
+}
+
+function readDetail(e){
+  const href = BROWSE_BASE + encodeURIComponent(e.app||"") + "/" + (e.path||"");
+  const secs = e.sections?.length
+    ? `<div class="rl-secs">${e.sections.map(x=>`<span class="s">${esc(x)}</span>`).join("")}</div>` : "";
+  return `
+    ${RAIL_BACK}
+    <div class="rl-tag">📖 consumed</div>
+    <div class="rl-path"><span class="rl-app">${esc(e.app||"?")}:</span>${esc(e.path||"(batch)")}</div>
+    <div class="kv"><span class="k">mode</span><span class="v"><span class="badge ${e.mode||"read"}">${e.mode||"read"}</span></span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${e.chars!=null?e.chars.toLocaleString()+" chars":"—"}</span></div>
+    <div class="kv"><span class="k">~tokens</span><span class="v">${e.chars!=null?"≈"+Math.round(e.chars/4).toLocaleString():"—"}</span></div>
+    <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
+    <div class="kv"><span class="k">entity</span><span class="v">${esc(e.etype||"—")}</span></div>
+    <div class="kv"><span class="k">via</span><span class="v">mcp${e.sub?" · subagent":""}</span></div>
+    <div class="kv"><span class="k">at</span><span class="v">${clock(e.ts)}</span></div>
+    ${secs}
+    <a class="rl-open" href="${href}" target="_blank">open in /browse ↗</a>`;
+}
+
+function searchDetail(e){
+  const r = e.result || {};
+  const tc = r.type_counts && Object.keys(r.type_counts).length
+    ? `<div class="rl-secs">${Object.entries(r.type_counts).sort((a,b)=>b[1]-a[1])
+        .map(([t,n])=>`<span class="s">${esc(t)} ${n}</span>`).join("")}</div>` : "";
+  const hits = (r.hits||[]).map(h=>{
+    const href = BROWSE_BASE + encodeURIComponent(h.app||"") + "/" + (h.path||"");
+    return `<a class="hit" href="${href}" target="_blank" title="open in /browse">
+      <span class="hit-t">${esc(h.title||h.path||"")}</span>
+      <span class="hit-p">${esc(h.app||"")}:${esc(h.path||"")}${h.score!=null?" · "+h.score:""}</span></a>`;
+  }).join("");
+  return `
+    ${RAIL_BACK}
+    <div class="rl-tag srf">🔍 surfaced</div>
+    <div class="rl-path">${esc(e.query)}</div>
+    <div class="kv"><span class="k">tool</span><span class="v">${esc(e.tool)}</span></div>
+    <div class="kv"><span class="k">total hits</span><span class="v">${r.total!=null?r.total.toLocaleString():"—"}</span></div>
+    <div class="kv"><span class="k">returned</span><span class="v">${(r.hits||[]).length}</span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${e.chars!=null?e.chars.toLocaleString()+" chars":"—"}</span></div>
+    <div class="kv"><span class="k">at</span><span class="v">${clock(e.ts)}</span></div>
+    ${tc}
+    ${hits ? `<div class="rl-hits"><div class="rl-hits-h">surfaced entries — offered, not consumed</div>${hits}</div>` : ""}`;
+}
+
+/* ---------- session actions: stop / archive / summarize ---------- */
+function actmsg(text, bad){
+  const el = document.getElementById("actmsg");
+  if(!el) return;
+  el.textContent = text || "";
+  el.className = "actmsg" + (bad ? " bad" : "");
+}
+
+async function post(url, body){
+  const r = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"},
+                             body: JSON.stringify(body)});
+  return [r.ok, await r.json()];
+}
+
+async function act(kind){
+  if(!curSession) return;
+  const s = curSession;
+  if(kind === "summarize" && !confirm(
+      "Summarize this session independently, then archive it?\n\n" +
+      "This spawns a SEPARATE off-session Claude run that digests the transcript " +
+      "from disk and writes to kmcp — it never resumes or touches this session. " +
+      "The session is archived immediately."))
+    return;
+  const body = {session_id: s.session_id, cwd: s.cwd};
+  if(kind === "archive") body.archived = !s.archived;
+  actmsg(kind + "…");
+  const [ok, d] = await post("/api/" + kind, body);
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(kind === "stop" ? "stopped" :
+         kind === "archive" ? (body.archived ? "archived" : "unarchived") :
+         "archived · independent summary running off-session");
+  await refreshSession(false); loadNav();
+}
+
+async function mine(){
+  if(!curSession) return;
+  actmsg("mining…");
+  const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
+  if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
+  actmsg("mined"); await refreshSession(false);
+}
+
+/* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
+const ANGLE_GLYPH = {direction:"→", events:"◆", files:"F", kmcp:"W", commands:"$",
+                     git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
+
+function renderAngles(s){
+  const el = document.getElementById("angles");
+  const r = s.rail;
+  if(!r || !r.angles.length){
+    el.innerHTML = `<h3>Turn angles</h3>
+      <div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
+      to keep the latest turn's angles warm.</div>`;
+    return;
+  }
+  const age = r.mined_age_s==null ? "" :
+    `<span class="k" style="float:right">mined ${rel(Date.now()-r.mined_age_s*1000)}</span>`;
+  const groups = r.angles.map(g=>`
+    <div class="ang-g">
+      <div class="ang-h">${esc(ANGLE_GLYPH[g.angle]||"·")} ${esc(g.angle)}</div>
+      ${g.items.map(i=>`<div class="ang-i" onclick="showAngle('${esc(i.id)}')">
+        <span class="ang-id">${esc(i.id)}</span> ${esc(i.headline)}</div>`).join("")}
+    </div>`).join("");
+  el.innerHTML = `<h3>Turn angles ${age}</h3>${groups}`;
+}
+
+async function showAngle(itemId){
+  const box = document.getElementById("raildetail");
+  box.classList.remove("rl-empty");
+  box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">loading…</div>`;
+  let d;
+  try { d = await (await fetch(`/api/detail?id=${curId}&item=${itemId}`)).json(); }
+  catch(e){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">unavailable</div>`; return; }
+  if(d.error){ box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">${esc(d.error)}</div>`; return; }
+  const detail = d.detail ?? d;
+  box.innerHTML = `${RAIL_BACK}<h4>${esc(itemId)} · ${esc(d.angle||"")}</h4>
+    <div class="ang-head">${esc(d.headline||"")}</div>
+    <div class="curate">
+      <button class="act sm" onclick="curate('${itemId}','track')" title="Create a kmcp event">track → event</button>
+      <button class="act sm" onclick="curate('${itemId}','record')" title="Create a kmcp lesson">record → lesson</button>
+      <button class="act sm" onclick="curate('${itemId}','task')" title="Create a kmcp task">task → task</button>
+      <button class="act sm" onclick="ctx('${itemId}','load')" title="Reference it in your next message">load</button>
+      <button class="act sm" onclick="ctx('${itemId}','drop')" title="Tell the session to stop carrying it">drop</button>
+    </div>
+    <div id="curatebox"></div>
+    <pre class="ang-detail">${esc(typeof detail==="string"?detail:JSON.stringify(detail,null,2))}</pre>`;
+}
+
+/* load / drop are CONTEXT ops: they steer the next message, they don't write.
+   This is the design's "the operator's next message IS the curation". */
+function ctx(itemId, verb){
+  const inp = document.getElementById("cin");
+  const item = (curSession?.rail?.angles || [])
+    .flatMap(g => g.items).find(i => i.id === itemId);
+  const what = item ? `${itemId} (${item.headline})` : itemId;
+  const phrase = verb === "load" ? `Load ${what} into context.`
+                                 : `Drop ${what} from context; stop re-injecting it.`;
+  inp.value = (inp.value ? inp.value.trimEnd() + " " : "") + phrase;
+  inp.focus();
+}
+
+/* Curation is two-phase: draft (dry_run) → review → confirm. A small model's
+   headline never reaches the corpus unreviewed. */
+async function curate(itemId, action, fields){
+  const box = document.getElementById("curatebox");
+  box.innerHTML = `<div class="k">composing draft…</div>`;
+  const [ok, d] = await post("/api/angles/curate",
+    {session_id: curId, item_id: itemId, action, fields: fields || {}});
+  if(!d.draft){ box.innerHTML = `<div class="cur-err">${esc(d.error||"failed")}</div>`; return; }
+
+  const apps = d.applications || [];
+  const warn = d.app_status === "matched" || d.app_status === "explicit" ? "" :
+    `<div class="cur-warn">The session cwd (<code>${esc(d.cwd||"unknown")}</code>) names no
+     live kmcp app, so <b>${esc(d.draft.application)}</b> is a guess. Pick the target below —
+     a confirmed write is refused until you do.</div>`;
+  const dry = JSON.stringify(d.dry_run||{});
+  const bad = dry.includes('"error"') || dry.includes("Missing") || dry.includes("Unfilled");
+
+  box.innerHTML = `
+    ${warn}
+    <div class="cur-row"><span class="k">app</span>
+      <select id="curapp">${apps.map(a=>`<option ${a===d.draft.application?"selected":""}>${esc(a)}</option>`).join("")}</select>
+    </div>
+    <div class="cur-row"><span class="k">path</span><code>${esc(d.draft.path)}</code></div>
+    ${bad?`<div class="cur-err">validation: ${esc(dry.slice(0,300))}</div>`:
+          `<div class="cur-ok">dry run OK — nothing written yet</div>`}
+    <div class="curate">
+      <button class="act sm primary" onclick="curateConfirm('${itemId}','${action}')">Write to kmcp</button>
+      <button class="act sm" onclick="document.getElementById('curatebox').innerHTML=''">Cancel</button>
+    </div>`;
+}
+
+async function curateConfirm(itemId, action){
+  const box = document.getElementById("curatebox");
+  const app = document.getElementById("curapp")?.value;
+  box.innerHTML = `<div class="k">writing…</div>`;
+  const [ok, d] = await post("/api/angles/curate",
+    {session_id: curId, item_id: itemId, action, confirm: true,
+     fields: app ? {application: app} : {}});
+  if(!d.ok){ box.innerHTML = `<div class="cur-err">${esc(d.error||"write failed")}</div>`; return; }
+  const p = `${d.draft.application}:${d.draft.path}`;
+  box.innerHTML = `<div class="cur-ok">written + verified → <code>${esc(p)}</code></div>`;
+}
+
+function renderSummary(s){
+  const reads = s.events.filter(e=>e.kind==="read");
+  const searches = s.events.filter(e=>e.kind==="search");
+  const byMode = {}; let total = 0;
+  reads.forEach(e=>{ byMode[e.mode]=(byMode[e.mode]||0)+1; total += e.chars||0; });
+  const srfBytes = searches.reduce((a,e)=>a+(e.chars||0),0);
+  const modes = Object.entries(byMode).map(([m,n])=>`<span class="badge ${m}">${m} ${n}</span>`).join(" ");
+  const el = document.getElementById("summary");
+  if(!reads.length && !searches.length){ el.innerHTML=""; return; }
+  // Roll the consumed reads up to unique entries so each one is a link into
+  // /browse — the aggregate counts say how much context was loaded, this says
+  // *which* entries (a re-read of the same entry folds in as ×n).
+  const seen = new Map();
+  reads.forEach(e=>{
+    const key = `${e.app||"?"}:${e.path||"("+e.tool+")"}`;
+    const g = seen.get(key) || {app:e.app, path:e.path, tool:e.tool,
+                                mode:e.mode, n:0, chars:0};
+    g.n++; g.chars += e.chars||0;
+    seen.set(key, g);
+  });
+  const entries = [...seen.values()].map(g=>{
+    const sub = `<span class="badge ${g.mode||"read"}">${esc(g.mode||"read")}</span>`
+              + ` ${kb(g.chars)}${g.n>1?" · ×"+g.n:""}`;
+    if(g.path){
+      const href = BROWSE_BASE + encodeURIComponent(g.app||"") + "/" + g.path;
+      return `<a class="hit" href="${esc(href)}" target="_blank" title="open in /browse">
+        <span class="hit-t">${esc(g.path)}</span>
+        <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></a>`;
+    }
+    // A pathless read (get_entries batch) has no single entry to link.
+    return `<div class="hit" style="cursor:default">
+      <span class="hit-t">${esc(g.tool)} · batch</span>
+      <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></div>`;
+  }).join("");
+  el.innerHTML = `
+    <h3>Session kmcp usage</h3>
+    <div class="kv"><span class="k">📖 consumed</span><span class="v">${reads.length} · ${kb(total)}</span></div>
+    <div class="kv"><span class="k">🔍 surfaced</span><span class="v">${searches.length} · ${kb(srfBytes)}</span></div>
+    <div class="kv"><span class="k">≈ tokens read</span><span class="v">≈${Math.round(total/4/1000)}k</span></div>
+    ${modes?`<div style="margin-top:8px">${modes}</div>`:""}
+    ${entries?`<div class="rl-hits"><div class="rl-hits-h">consumed entries — linked into /browse</div>${entries}</div>`:""}`;
+}
+
+/* ---------- answer / fork ---------- */
+async function send(isFork){
+  const inp = document.getElementById("cin"); const text = inp.value.trim();
+  if(!text || !curSession) return;
+  const st = document.getElementById("cstatus");
+  st.textContent = isFork ? "forking…" : "answering…";
+  try {
+    const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });
+    const d = await r.json();
+    st.textContent = d.error ? "✗ "+d.error
+      : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
+      : d.action==="fork" ? "⑂ forked from end (headless)"
+      : "✓ answer sent — headless turn running";
+    if(!d.error){
+      inp.value = "";
+      // A plain answer resumes THIS session's file, so we can track it live.
+      // Forks write a new session file — leave their one-shot status as-is.
+      if(d.action === "answer"){ startAwait(); refreshSession(false); }
+    }
+  } catch(e){ st.textContent = "✗ "+e; }
+}
+
+loadNav(); setInterval(loadNav, 5000);
+setInterval(()=>refreshSession(false), 3000);
+</script>
+</body>
+</html>

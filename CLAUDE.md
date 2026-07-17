@@ -43,7 +43,9 @@ csd angles              # Pull-based turn mining: ID-addressable headlines for o
 csd angles show ID      # Print the persisted detail behind a headline
 csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
 csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
+csd angles-watch        # Headless miner: keep the angles state dir warm (serves nothing)
 csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session (+ sessions tab)
+csd console             # Reply-capable session console (127.0.0.1:4462)
 csd backfill-subagents  # One-shot: child session rows for already-ingested sidechains
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
@@ -107,6 +109,78 @@ detail persists under the state dir (`csd angles show F1`). Curation is the
 operator's next message ("track E1, load K1, task D1") — nothing is written to
 kmcp by the command itself. Doctrine: pull not push; extraction is code, models
 only judge. A failed probe degrades to `(unavailable)`, never blocks the pull.
+
+### One engine, one surface
+
+Three commands, one seam — **the state dir**. Nothing serves what it mines.
+
+- `csd angles` — the operator's synchronous pull for one turn.
+- `csd angles-watch` (`angles_watch.py`) — the same miner, headless and
+  ambient. Watches every live transcript; mines a session's latest turn once
+  its JSONL **settles** (`(mtime_ns, size)` signature unchanged and quiet for
+  `DEBOUNCE_S`), so a turn is never mined mid-write. A **single worker** drains
+  the job queue, so N live sessions cannot stampede the local Ollama. It writes
+  to `$CSD_STATE_DIR/angles/<sid>.json` and serves nothing.
+- `csd console` (`console/`) — the reply-capable surface, and the only web UI.
+
+The console is **Direction A**: it renders a session's own transcript (chat
+turns, kmcp reads joined to their `tool_result` by `tool_use_id`) plus the angle
+headlines it reads *off disk*. Answer resumes the session (`claude -p --resume`,
+refused if the session wrote within 15s — the two-writer guard); Fork branches
+it, and a point fork writes a **new** session file rather than mutating the
+original.
+
+### Console actions
+
+- **Stop** — SIGINT → SIGTERM → SIGKILL to the process group of a run *the
+  console spawned*. It cannot reach anything else, and the button is disabled
+  with that reason. Claude Code opens a transcript, appends, and closes (no
+  process holds it open), and an interactive `claude` carries no session id in
+  argv — so an arbitrary live session **cannot be mapped to a pid**.
+  `claude -p --resume` never attaches to a running session either; it spawns a
+  new process that appends to the same file. That is what the two-writer guard
+  is guarding.
+- **Archive** — an index entry in `$CSD_STATE_DIR/console/archived.json`
+  (atomic replace), never a mutation of `~/.claude/projects`. Archived sessions
+  drop out of the sidebar, stay retrievable by id, ignore the 72h cutoff, and
+  return on unarchive. Nothing is destructive.
+- **Summarize + archive** — runs `/session-summary` **independently, off-session**:
+  a throwaway `claude -p` process (no `--resume`) is handed the session UUID as
+  the skill argument, so the skill digests the transcript from disk
+  (`session_digest.py`) and writes the changelog + lessons to kmcp **without ever
+  resuming or appending to the session**. Because nothing writes back, the 15s
+  two-writer guard is gone and the archive is decoupled — the session is archived
+  the moment the summary is dispatched (its outcome is tracked in `SUMMARIZING`
+  for visibility, not as an archive gate).
+- **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
+  usable without `csd angles-watch` running.
+
+### Curation — the span action-vocabulary
+
+`track → event`, `record → lesson`, `task → task` deposit kmcp writes;
+`load` / `drop` are context ops that compose the operator's *next message*
+(the design's "the operator's next message IS the curation") and write nothing.
+
+Writes are **two-phase**: compose a draft, validate with `import_entries`
+`dry_run`, show it, write only on explicit confirm. A small model's headline
+never reaches the corpus unreviewed. Two further guards:
+
+- The entry document is passed as **JSON**, which is valid YAML 1.2 — sidestepping
+  the `import_entries` YAML footguns wholesale (unquoted `#` truncation, bare
+  timestamps coerced to datetime, angle-bracket placeholder rejection).
+- Application inference **proposes, never decides**. The cwd basename is a guess
+  (`final-taglists` is not a kmcp app); it is validated against the live
+  `list_applications`. A confirmed write is *refused* when the app was a
+  fallback or when kmcp is unreachable — otherwise the entry lands silently in
+  the wrong corpus, or invents a junk application out of a directory name.
+
+The kmcp reads-rail counts the `knowledge-cli call <tool>` Bash shim as a read,
+not just `mcp__*__<tool>` — a session that took the fallback loaded just as much
+context and must not vanish from the rail.
+
+Superseded: `angles-serve` / `angles_web.py`, a read-only LAN dashboard that
+duplicated the session list and reads-rail beside the console. Its watcher is
+now `angles_watch.py`; its UI is gone.
 
 ## Session management (`csd angles sessions` / `csd angles digest`)
 
@@ -215,6 +289,10 @@ and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 - `postgres.py` — `SessionArchive`: schema DDL, JSONB escape-hatch columns,
   batched upserts (idempotent by uuid / per-source_file clear), analytic views.
 - `sync.py` — `SessionSync`: glob+mtime incremental sync engine.
+- `angles.py` — turn extraction + the ANGLES extractors/probes; the state dir.
+- `angles_watch.py` — headless ambient miner (settle-detect + single worker).
+- `console/` — reply-capable session console (stdlib HTTP, `server.py` +
+  `index.html`); reads transcripts and the angles state dir, nothing else.
 - `cli.py` — Click CLI.
 - `scripts/audit_jsonl.py` — Phase-0 field-frequency re-audit (regenerates DATA_MODEL.md).
 

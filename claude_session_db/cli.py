@@ -717,6 +717,44 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
         sys.exit(1)
 
 
+@main.command(name="angles-watch")
+@click.option("--window", type=int, default=1800,
+              help="Transcript mtime window in seconds to count a session live (default 1800).")
+@click.option("--model", default=angles_mod.DEFAULT_MODEL,
+              help=f"Probe model (default {angles_mod.DEFAULT_MODEL}; env CSD_ANGLES_MODEL).")
+@click.option("--ollama-url", default=angles_mod.DEFAULT_OLLAMA_URL,
+              help="Ollama endpoint (env CSD_OLLAMA_URL).")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for the knowledge angle (default: archive DSN with db=knowledge).")
+@click.option("--no-probes", is_flag=True,
+              help="Deterministic angles only — skip LLM probes and retrieval.")
+@click.pass_context
+def angles_watch(ctx: click.Context, window: int, model: str, ollama_url: str,
+                 kmcp_dsn: str | None, no_probes: bool) -> None:
+    """Headless miner: keep the angles state dir warm for every live session.
+
+    Watches every live transcript under ~/.claude/projects and re-mines a
+    session's latest turn whenever its JSONL settles (~8s debounce), writing
+    headlines + detail to the angles state dir. Mining runs through a
+    single-worker queue so concurrent sessions never stampede Ollama.
+
+    Serves nothing. Readers pick the results up off disk: `csd angles show ID`,
+    or the session console's angle rail.
+
+    Design: claudecode:design/turn-angles-context-cockpit (ambient surface).
+    """
+    from .angles_watch import run_watch
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None
+    try:
+        run_watch(window_s=window, model=model, base_url=ollama_url,
+                  kmcp_dsn=resolved_kmcp, no_probes=no_probes)
+    except KeyboardInterrupt:
+        click.echo("angles-watch: stopped", err=True)
+
+
 @main.command(name="angles-serve")
 @click.option("--host", default="0.0.0.0", help="Bind address (default 0.0.0.0 — LAN).")
 @click.option("--port", type=int, default=8791, help="Port (default 8791).")
@@ -752,6 +790,53 @@ def angles_serve(ctx: click.Context, host: str, port: int, window: int,
     serve(host=host, port=port, window_s=window, model=model,
           base_url=ollama_url, kmcp_dsn=resolved_kmcp, no_probes=no_probes,
           csd_dsn=ctx.obj["dsn"])
+
+
+@main.command(name="console")
+@click.option("--host", default="127.0.0.1",
+              help="Bind address (default 127.0.0.1; use 0.0.0.0 for LAN).")
+@click.option("--port", type=int, default=4462, help="Port (default 4462).")
+@click.option("--token", default=None,
+              help="Shared secret for non-loopback binds (env CSD_CONSOLE_TOKEN; "
+                   "generated if unset).")
+@click.option("--no-auth", is_flag=True,
+              help="Serve a non-loopback bind with NO auth. This exposes "
+                   "unauthenticated code execution — see the command help.")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for angle curation writes "
+                   "(default: archive DSN with db=knowledge).")
+@click.pass_context
+def console(ctx: click.Context, host: str, port: int, token: str | None,
+            no_auth: bool, kmcp_dsn: str | None) -> None:
+    """Reply-capable session console: chat + kmcp reads + angle rail.
+
+    Renders each session's transcript as a chronological event stream with the
+    kmcp context it loaded inline, plus the latest turn's angle headlines read
+    off the state dir (run `csd angles-watch` to keep them fresh). Answer
+    resumes the session; Fork branches it at a chosen message.
+
+    SECURITY. This is not a read-only surface: `/api/answer` and `/api/fork`
+    spawn `claude -p --resume` with caller-supplied text in a caller-supplied
+    cwd, and the transcripts it serves are verbatim. On 127.0.0.1 that is fine.
+    On any other bind a token is REQUIRED (auto-generated and printed at start;
+    pin it with CSD_CONSOLE_TOKEN) — because without one, anyone who can reach
+    the port can run code as you. `--no-auth` opts out; it is never the default,
+    and the port should still never leave a trusted LAN.
+
+    Design: claudecode:design/turn-angles-context-cockpit (conversation surface).
+    """
+    from .console.server import serve
+
+    if no_auth and host != "127.0.0.1":
+        click.confirm(
+            f"--no-auth on {host}:{port} exposes unauthenticated code execution "
+            "to every host on the network. Proceed?", abort=True)
+    try:
+        resolved_kmcp = resolve_kmcp_dsn(ctx.obj["dsn"], kmcp_dsn)
+    except Exception:
+        resolved_kmcp = None
+    serve(host=host, port=port, token=token, no_auth=no_auth,
+          kmcp_dsn=resolved_kmcp)
 
 
 @main.command(name="dsn")

@@ -74,7 +74,9 @@ csd recent 10
 | `csd angles show ID` | Print the persisted detail behind a headline |
 | `csd angles sessions` | Session-management lens: open-thread inventory + delta-after-summary verdicts |
 | `csd angles digest REF` | Per-session digest (`--delta` for the post-summary tail, `--head/--tail/--full`) |
+| `csd angles-watch` | Headless miner: keep the angles state dir warm (serves nothing) |
 | `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session, drill into subagents |
+| `csd console` | Reply-capable session console: chat + kmcp reads + angle rail (127.0.0.1:4462) |
 | `csd backfill-subagents` | One-shot: materialize child session rows for already-ingested sidechains |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |

@@ -836,7 +836,7 @@ def console(ctx: click.Context, host: str, port: int, token: str | None,
     except Exception:
         resolved_kmcp = None
     serve(host=host, port=port, token=token, no_auth=no_auth,
-          kmcp_dsn=resolved_kmcp)
+          kmcp_dsn=resolved_kmcp, csd_dsn=ctx.obj["dsn"])
 
 
 @main.command(name="dsn")

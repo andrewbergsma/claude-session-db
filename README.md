@@ -72,8 +72,12 @@ csd recent 10
 | `csd mark-summarized` | Stamp a session's summary watermark after a verified write |
 | `csd angles` | Pull-based turn mining: ID-addressable headlines for one turn |
 | `csd angles show ID` | Print the persisted detail behind a headline |
+| `csd angles sessions` | Session-management lens: open-thread inventory + delta-after-summary verdicts |
+| `csd angles digest REF` | Per-session digest (`--delta` for the post-summary tail, `--head/--tail/--full`) |
 | `csd angles-watch` | Headless miner: keep the angles state dir warm (serves nothing) |
+| `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session, drill into subagents |
 | `csd console` | Reply-capable session console: chat + kmcp reads + angle rail (127.0.0.1:4462) |
+| `csd backfill-subagents` | One-shot: materialize child session rows for already-ingested sidechains |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |
 
@@ -92,10 +96,46 @@ On top sit **analytic views**, ready to `SELECT` from:
 | `v_error_by_class` · `v_error_recovery` | Where things fail, and how they recover |
 | `v_tool_usage` | Tool-call frequency and cost |
 | `v_compaction` | Context-compaction events and pre-token counts |
+| `v_agent_children` | One row per subagent spawn — type, status, tokens, child session link |
 
 ```bash
 csd views        # full list, live from the database
 ```
+
+## 🧭 Session management (`csd angles sessions`)
+
+The open-thread inventory: one row per recent main session with its **true**
+last activity — `max(messages.ts)` from the archive, never transcript mtime
+(bulk file touches produce clusters of identical mtimes that make mtime lie) —
+plus message count, summary classification, and an
+**OPEN / OPEN-delta / LIVE / CLOSED** verdict (LIVE = last message within
+~15 min).
+
+For summarized sessions it also runs **delta-after-summary detection**: the
+transcript tail after the summary watermark (`leaf_uuid_at_summary` →
+`message_count_at_summary` → the kmcp entry's `created_at`, first resolvable
+wins) is classified deterministically as `none` / `confirmation_only` /
+`auto_compaction_only` / **`real`** — real deltas (file mutations, kmcp
+writes, git mutations, substantive prompts, or heavy tail narration) flip the
+verdict to `OPEN-delta`: the summary missed work and the session needs
+re-capture. Post-summary tails have carried whole findings the summaries
+never saw; this is the lens that catches them.
+
+```bash
+csd angles sessions                  # last 7 days, with delta detection
+csd angles sessions --window-days 0 --json   # everything, machine-readable
+csd angles digest d77cf821 --delta   # only what the summary has NOT seen
+csd angles digest 926684e7           # head/tail-windowed digest (7MB-safe)
+```
+
+Transcript resolution is **worktree-aware**: `sessions.file_path` from the
+archive is tried first (it points into `--claude-worktrees-*` project dirs a
+base-dir lookup would miss), falling back to a glob across
+`~/.claude/projects/*/<id>.jsonl`. Everything is read-only over the archive,
+the knowledge DB, and the transcripts; an unreachable DB or missing
+transcript degrades that row to `unknown` instead of failing the lens.
+`csd angles-serve` exposes the same lens as a **sessions** tab
+(`/api/mgmt`, `/api/digest/<sid>?delta=1`), with row-click digests.
 
 ## 🏗️ Architecture
 

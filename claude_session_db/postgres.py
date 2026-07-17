@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 5  # + summary_state pre-LLM gate table & v_unsummarized view
+SCHEMA_VERSION = 7  # + subagent visibility: own_* aggregates, v_agent_children
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -144,6 +144,31 @@ CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_modified ON sessions(modified_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_subagent ON sessions(is_subagent);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_agent_id ON sessions(agent_id) WHERE agent_id IS NOT NULL;
+
+-- Migration (idempotent, guarded): own_* aggregate columns. On MAIN sessions
+-- the unprefixed aggregate columns keep their historical ROLL-UP meaning
+-- (sidechain messages share the parent session_id, so they were always
+-- included); own_* carries the main-chain-only counts. Guarded by a catalog
+-- check so the ACCESS EXCLUSIVE ALTER fires exactly once (DDL off the hot
+-- path — see lesson csd-sweep-idle-in-transaction-lock-convoy).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sessions'
+          AND column_name = 'own_message_count'
+    ) THEN
+        ALTER TABLE sessions
+            ADD COLUMN own_total_input_tokens          BIGINT DEFAULT 0,
+            ADD COLUMN own_total_output_tokens         BIGINT DEFAULT 0,
+            ADD COLUMN own_total_cache_read_tokens     BIGINT DEFAULT 0,
+            ADD COLUMN own_total_cache_creation_tokens BIGINT DEFAULT 0,
+            ADD COLUMN own_message_count  INTEGER DEFAULT 0,
+            ADD COLUMN own_tool_use_count INTEGER DEFAULT 0,
+            ADD COLUMN own_error_count    INTEGER DEFAULT 0;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS messages (
     uuid        TEXT PRIMARY KEY,
@@ -214,6 +239,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_source_file ON messages(source_file);
 CREATE INDEX IF NOT EXISTS idx_messages_attr_skill ON messages(attribution_skill);
 CREATE INDEX IF NOT EXISTS idx_messages_attr_mcp ON messages(attribution_mcp_server);
 CREATE INDEX IF NOT EXISTS idx_messages_src_tool_asst ON messages(source_tool_assistant_uuid);
+-- Partial: ~40% of messages are sidechain rows carrying agent_id; per-agent
+-- probes (child aggregates, EXISTS checks) seq-scanned without this.
+CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(agent_id) WHERE agent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS content_blocks (
     block_id    BIGSERIAL PRIMARY KEY,
@@ -360,6 +388,25 @@ CREATE TABLE IF NOT EXISTS pr_links (
 CREATE INDEX IF NOT EXISTS idx_pr_session ON pr_links(session_id);
 CREATE INDEX IF NOT EXISTS idx_pr_source_file ON pr_links(source_file);
 
+-- Background-task outputs swept from the volatile /private/tmp scratchpad
+-- (wiped on reboot — this sweep is the only durable copy). Stored verbatim,
+-- keyed (session_id, task filename); idempotent by file mtime; bounded (large
+-- files kept to a head + truncation note). Symlinked .output files that
+-- resolve into ~/.claude/projects are skipped at sweep time: their content IS
+-- a subagent transcript already archived losslessly.
+CREATE TABLE IF NOT EXISTS task_outputs (
+    session_id    TEXT NOT NULL,
+    task_name     TEXT NOT NULL,
+    content       TEXT,
+    char_count    INTEGER,
+    truncated     BOOLEAN DEFAULT false,
+    file_size     BIGINT,
+    file_mtime_ns BIGINT,
+    source_path   TEXT,
+    captured_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, task_name)
+);
+
 -- Agent lifecycle (started / result) — keyed by content hash `key`
 CREATE TABLE IF NOT EXISTS agent_tasks (
     key         TEXT PRIMARY KEY,
@@ -462,7 +509,11 @@ END $$;
 
 VIEWS_SQL = """
 -- Session overview
-CREATE OR REPLACE VIEW v_session_overview AS
+-- DROP first: the column list grew (own_* / subagent columns), which CREATE OR
+-- REPLACE cannot reconcile against an older definition. CASCADE takes the
+-- dependent v_unsummarized with it — recreated at the bottom of this script.
+DROP VIEW IF EXISTS v_session_overview CASCADE;
+CREATE VIEW v_session_overview AS
 SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        COALESCE(s.custom_title, s.ai_title) AS title,
        s.first_prompt, s.is_subagent, s.agent_name,
@@ -470,10 +521,52 @@ SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        s.total_input_tokens, s.total_output_tokens,
        s.total_cache_read_tokens, s.total_cache_creation_tokens,
        s.user_prompt_count, s.tool_use_count, s.error_count, s.compact_count,
-       s.duration_seconds, s.cc_version
+       s.duration_seconds, s.cc_version,
+       -- own_* = main-chain only (unprefixed aggregates on mains roll children up)
+       s.parent_session_id, s.agent_id,
+       s.own_message_count, s.own_tool_use_count, s.own_error_count,
+       s.own_total_input_tokens, s.own_total_output_tokens,
+       s.own_total_cache_read_tokens, s.own_total_cache_creation_tokens
 FROM sessions s
 LEFT JOIN projects p ON s.project_id = p.project_id
 ORDER BY s.modified_at DESC NULLS LAST;
+
+-- One row per Agent SPAWN in the archived ledger: the Agent tool_use joined to
+-- its tool_result (tool_use_result JSONB is the harness's own record of the
+-- child — agentId, agentType, status, totals), joined to the child session row.
+-- Status is the ledger's, never the agent's self-report. message_uuid anchors
+-- the spawn in the parent conversation; child_session_key ("<parent>:<agent>")
+-- addresses the child session row / focus view. The lateral prefers the child
+-- whose parent matches the spawning session (covers session-forked parents
+-- where the sidechain was archived under the resumed session id).
+CREATE OR REPLACE VIEW v_agent_children AS
+SELECT cb.session_id                   AS parent_session_id,
+       cb.message_uuid,
+       m.ts                            AS spawned_at,
+       cb.tool_use_id,
+       tr.tool_use_result->>'agentId'  AS agent_id,
+       coalesce(tr.tool_use_result->>'agentType',
+                cb.tool_input->>'subagent_type')     AS agent_type,
+       cb.tool_input->>'description'   AS description,
+       (cb.tool_input->>'run_in_background')::boolean AS run_in_background,
+       cb.tool_input->>'model'         AS model,
+       tr.tool_use_result->>'status'   AS status,
+       (tr.tool_use_result->>'totalTokens')::bigint       AS total_tokens,
+       (tr.tool_use_result->>'totalDurationMs')::bigint   AS total_duration_ms,
+       (tr.tool_use_result->>'totalToolUseCount')::bigint AS total_tool_use_count,
+       tr.tool_use_result->>'resolvedModel' AS resolved_model,
+       child.session_id                AS child_session_key
+FROM content_blocks cb
+JOIN tool_results tr ON tr.tool_use_id = cb.tool_use_id
+LEFT JOIN messages m ON m.uuid = cb.message_uuid
+LEFT JOIN LATERAL (
+    SELECT s.session_id FROM sessions s
+    WHERE s.is_subagent AND s.agent_id = tr.tool_use_result->>'agentId'
+    ORDER BY (s.parent_session_id = cb.session_id) DESC
+    LIMIT 1
+) child ON true
+WHERE cb.block_type = 'tool_use' AND cb.tool_name = 'Agent'
+  AND tr.tool_use_result ? 'agentId';
 
 -- Token usage by model
 CREATE OR REPLACE VIEW v_token_usage_by_model AS
@@ -606,7 +699,9 @@ SELECT p.project_name, p.decoded_path,
        sum(s.total_output_tokens) AS total_output_tokens,
        sum(s.tool_use_count) AS total_tool_uses
 FROM projects p
-LEFT JOIN sessions s ON p.project_id = s.project_id
+-- child rows excluded: parents already roll their children up, so counting
+-- both would double the per-project token totals.
+LEFT JOIN sessions s ON p.project_id = s.project_id AND NOT s.is_subagent
 GROUP BY p.project_id, p.project_name, p.decoded_path
 ORDER BY last_activity DESC NULLS LAST;
 
@@ -891,29 +986,44 @@ class SessionArchive:
         conn.commit()
         return pid
 
-    def upsert_session(self, data: dict) -> None:
-        """Insert/update a session row. Only non-None values overwrite existing."""
-        conn = self.connect()
-        cols = [
-            "session_id", "project_id", "file_path", "is_subagent", "parent_session_id",
-            "agent_id", "ai_title", "custom_title", "first_prompt", "last_prompt",
-            "last_prompt_leaf_uuid", "permission_mode", "mode", "bridge_session_id",
-            "agent_name", "git_branch", "cwd", "cc_version", "entrypoint",
-            "created_at", "modified_at", "message_count",
-        ]
-        vals = [scrub(data.get(c)) for c in cols]
+    _SESSION_COLS = [
+        "session_id", "project_id", "file_path", "is_subagent", "parent_session_id",
+        "agent_id", "ai_title", "custom_title", "first_prompt", "last_prompt",
+        "last_prompt_leaf_uuid", "permission_mode", "mode", "bridge_session_id",
+        "agent_name", "git_branch", "cwd", "cc_version", "entrypoint",
+        "created_at", "modified_at", "message_count",
+    ]
+
+    def _session_upsert_sql(self) -> str:
+        cols = self._SESSION_COLS
         # COALESCE(EXCLUDED.col, sessions.col) so a later file lacking a field
         # doesn't wipe a value an earlier file set.
         updates = ", ".join(
             f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})" for c in cols if c != "session_id"
         )
         placeholders = ", ".join(["%s"] * len(cols))
+        return (f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT (session_id) DO UPDATE SET {updates}")
+
+    def upsert_session(self, data: dict) -> None:
+        """Insert/update a session row. Only non-None values overwrite existing."""
+        conn = self.connect()
+        vals = [scrub(data.get(c)) for c in self._SESSION_COLS]
         with conn.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT (session_id) DO UPDATE SET {updates}",
-                vals,
-            )
+            cur.execute(self._session_upsert_sql(), vals)
+        conn.commit()
+
+    def upsert_sessions(self, rows: list[dict]) -> None:
+        """Batched session upsert (same COALESCE semantics as upsert_session).
+        One executemany (psycopg3 pipelines it) — used by the subagent backfill
+        so ~8K child rows don't cost 8K round-trips."""
+        if not rows:
+            return
+        conn = self.connect()
+        sql = self._session_upsert_sql()
+        with conn.cursor() as cur:
+            cur.executemany(sql, [[scrub(r.get(c)) for c in self._SESSION_COLS]
+                                  for r in rows])
         conn.commit()
 
     # -- batched inserts ----------------------------------------------------
@@ -976,6 +1086,41 @@ class SessionArchive:
         cols = ["key", "agent_id", "started", "result", "source_file"]
         self._batch_insert("agent_tasks", cols, rows, {"result"}, conflict="key",
                            conflict_update=["agent_id", "started", "result", "source_file"])
+
+    def get_task_output_mtimes(self, session_id: str) -> dict[str, int]:
+        """task_name -> file_mtime_ns already captured for a session (the
+        idempotence check for the /private/tmp task-output sweep)."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT task_name, file_mtime_ns FROM task_outputs "
+                        "WHERE session_id = %s", (session_id,))
+            rows = cur.fetchall()
+        conn.commit()  # release the read snapshot promptly (see query())
+        return {r[0]: r[1] for r in rows}
+
+    def upsert_task_output(self, row: dict) -> None:
+        """Capture one background-task .output file (verbatim, keyed
+        session_id + task filename; latest mtime wins)."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO task_outputs
+                   (session_id, task_name, content, char_count, truncated,
+                    file_size, file_mtime_ns, source_path, captured_at)
+                   VALUES (%(session_id)s, %(task_name)s, %(content)s,
+                           %(char_count)s, %(truncated)s, %(file_size)s,
+                           %(file_mtime_ns)s, %(source_path)s, now())
+                   ON CONFLICT (session_id, task_name) DO UPDATE SET
+                     content = EXCLUDED.content,
+                     char_count = EXCLUDED.char_count,
+                     truncated = EXCLUDED.truncated,
+                     file_size = EXCLUDED.file_size,
+                     file_mtime_ns = EXCLUDED.file_mtime_ns,
+                     source_path = EXCLUDED.source_path,
+                     captured_at = now()""",
+                {k: scrub(v) for k, v in row.items()},
+            )
+        conn.commit()
 
     def insert_file_history(self, snapshot_row: dict, backups: list[dict]) -> None:
         """Insert one snapshot + its backups (needs the generated snapshot_id)."""
@@ -1051,6 +1196,18 @@ class SessionArchive:
         always defined by its messages); siblings LEFT JOIN in, so a session whose
         source rows have gone away is authoritatively reset to 0 rather than left
         stale.
+
+        Subagent semantics (two statements):
+        - MAIN sessions: the unprefixed columns keep their historical ROLL-UP
+          meaning (children included — sidechain rows share the parent
+          session_id); own_* carries main-chain-only counts. Exception:
+          user_prompt_count is main-chain-only — counting the ~1 sidechain seed
+          prompt per agent as a "user prompt" was a defect that distorted the
+          reconcile gate's empty/trivial heuristics.
+        - CHILD sessions (session_id "<parent>:<agent>"): never match
+          messages.session_id, so the first UPDATE can't touch them; the second
+          statement fills them from messages keyed (session_id, agent_id) —
+          for a child, total_* == own_*.
         """
         conn = self.connect()
         with conn.cursor() as cur:
@@ -1062,17 +1219,29 @@ class SessionArchive:
                         coalesce(sum(output_tokens),0) AS output_tokens,
                         coalesce(sum(cache_read_tokens),0) AS cache_read_tokens,
                         coalesce(sum(cache_creation_tokens),0) AS cache_creation_tokens,
-                        count(*) FILTER (WHERE role='user' AND message_type='prompt' AND NOT is_meta) AS user_prompt_count,
-                        count(*) AS message_count
+                        count(*) FILTER (WHERE role='user' AND message_type='prompt'
+                                         AND NOT is_meta AND NOT is_sidechain) AS user_prompt_count,
+                        count(*) AS message_count,
+                        coalesce(sum(input_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_input_tokens,
+                        coalesce(sum(output_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_output_tokens,
+                        coalesce(sum(cache_read_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_cache_read_tokens,
+                        coalesce(sum(cache_creation_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_cache_creation_tokens,
+                        count(*) FILTER (WHERE NOT is_sidechain) AS own_message_count
                     FROM messages GROUP BY session_id
                 ),
                 tu AS (
-                    SELECT session_id, count(*) AS cnt FROM content_blocks
-                    WHERE block_type='tool_use' GROUP BY session_id
+                    SELECT cb.session_id, count(*) AS cnt,
+                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    FROM content_blocks cb
+                    LEFT JOIN messages m ON m.uuid = cb.message_uuid
+                    WHERE cb.block_type='tool_use' GROUP BY cb.session_id
                 ),
                 err AS (
-                    SELECT session_id, count(*) AS cnt FROM tool_results
-                    WHERE is_error GROUP BY session_id
+                    SELECT tr.session_id, count(*) AS cnt,
+                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    FROM tool_results tr
+                    LEFT JOIN messages m ON m.uuid = tr.message_uuid
+                    WHERE tr.is_error GROUP BY tr.session_id
                 ),
                 sysev AS (
                     SELECT session_id,
@@ -1085,8 +1254,13 @@ class SessionArchive:
                         msg.input_tokens, msg.output_tokens,
                         msg.cache_read_tokens, msg.cache_creation_tokens,
                         msg.user_prompt_count, msg.message_count,
+                        msg.own_input_tokens, msg.own_output_tokens,
+                        msg.own_cache_read_tokens, msg.own_cache_creation_tokens,
+                        msg.own_message_count,
                         coalesce(tu.cnt, 0) AS tool_use_count,
+                        coalesce(tu.own_cnt, 0) AS own_tool_use_count,
                         coalesce(err.cnt, 0) AS error_count,
+                        coalesce(err.own_cnt, 0) AS own_error_count,
                         coalesce(sysev.compacts, 0) AS compact_count,
                         sysev.duration_s AS duration_seconds  -- NULL when no turn_duration events (unknown != 0)
                     FROM msg
@@ -1104,9 +1278,68 @@ class SessionArchive:
                     tool_use_count = agg.tool_use_count,
                     error_count = agg.error_count,
                     compact_count = agg.compact_count,
-                    duration_seconds = agg.duration_seconds
+                    duration_seconds = agg.duration_seconds,
+                    own_total_input_tokens = agg.own_input_tokens,
+                    own_total_output_tokens = agg.own_output_tokens,
+                    own_total_cache_read_tokens = agg.own_cache_read_tokens,
+                    own_total_cache_creation_tokens = agg.own_cache_creation_tokens,
+                    own_message_count = agg.own_message_count,
+                    own_tool_use_count = agg.own_tool_use_count,
+                    own_error_count = agg.own_error_count
                 FROM agg
                 WHERE s.session_id = agg.session_id
+                """
+            )
+            cur.execute(
+                """
+                WITH cm AS (
+                    SELECT session_id AS parent, agent_id,
+                        coalesce(sum(input_tokens),0) AS input_tokens,
+                        coalesce(sum(output_tokens),0) AS output_tokens,
+                        coalesce(sum(cache_read_tokens),0) AS cache_read_tokens,
+                        coalesce(sum(cache_creation_tokens),0) AS cache_creation_tokens,
+                        count(*) FILTER (WHERE role='user' AND message_type='prompt'
+                                         AND NOT is_meta) AS user_prompt_count,
+                        count(*) AS message_count
+                    FROM messages
+                    WHERE agent_id IS NOT NULL
+                    GROUP BY 1, 2
+                ),
+                ct AS (
+                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    FROM content_blocks cb
+                    JOIN messages m ON m.uuid = cb.message_uuid
+                    WHERE cb.block_type='tool_use' AND m.agent_id IS NOT NULL
+                    GROUP BY 1, 2
+                ),
+                ce AS (
+                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    FROM tool_results tr
+                    JOIN messages m ON m.uuid = tr.message_uuid
+                    WHERE tr.is_error AND m.agent_id IS NOT NULL
+                    GROUP BY 1, 2
+                )
+                UPDATE sessions s SET
+                    total_input_tokens = cm.input_tokens,
+                    total_output_tokens = cm.output_tokens,
+                    total_cache_read_tokens = cm.cache_read_tokens,
+                    total_cache_creation_tokens = cm.cache_creation_tokens,
+                    user_prompt_count = cm.user_prompt_count,
+                    message_count = cm.message_count,
+                    tool_use_count = coalesce(ct.cnt, 0),
+                    error_count = coalesce(ce.cnt, 0),
+                    own_total_input_tokens = cm.input_tokens,
+                    own_total_output_tokens = cm.output_tokens,
+                    own_total_cache_read_tokens = cm.cache_read_tokens,
+                    own_total_cache_creation_tokens = cm.cache_creation_tokens,
+                    own_message_count = cm.message_count,
+                    own_tool_use_count = coalesce(ct.cnt, 0),
+                    own_error_count = coalesce(ce.cnt, 0)
+                FROM cm
+                LEFT JOIN ct ON ct.parent = cm.parent AND ct.agent_id = cm.agent_id
+                LEFT JOIN ce ON ce.parent = cm.parent AND ce.agent_id = cm.agent_id
+                WHERE s.is_subagent
+                  AND s.parent_session_id = cm.parent AND s.agent_id = cm.agent_id
                 """
             )
         conn.commit()
@@ -1143,7 +1376,8 @@ class SessionArchive:
         """
         tables = ["projects", "sessions", "messages", "content_blocks", "tool_results",
                   "attachments", "system_events", "file_history", "file_backups",
-                  "queue_operations", "pr_links", "agent_tasks", "sync_state"]
+                  "queue_operations", "pr_links", "agent_tasks", "task_outputs",
+                  "sync_state"]
         stats: dict[str, Any] = {}
         conn = self.connect()
         with conn.cursor() as cur:

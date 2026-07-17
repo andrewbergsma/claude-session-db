@@ -1,9 +1,10 @@
 """Subagent and external tool result discovery.
 
-Discovers sidechain JSONL files and external tool result files
-within session directories.
+Discovers sidechain JSONL files, their meta.json sidecars, and external tool
+result files within session directories.
 """
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -13,7 +14,7 @@ from typing import Optional
 class SubagentInfo:
     """Discovered subagent file."""
 
-    agent_id: str  # 7-char ID (e.g., "a582ac1")
+    agent_id: str  # 17-hex ID (e.g., "a0ae7c4c583360944")
     file_path: Path  # Full path to agent-{id}.jsonl
 
 
@@ -26,10 +27,26 @@ class ExternalToolResult:
     content: Optional[str] = None  # Loaded lazily
 
 
+def read_agent_meta(agent_jsonl: Path) -> dict:
+    """Read the sidecar next to an agent-<id>.jsonl transcript.
+
+    Each sidechain file has an adjacent `agent-<id>.meta.json` carrying
+    {"agentType", "description", "toolUseId", "spawnDepth"[, "parentAgentId"]}.
+    Returns {} when absent or unparsable (older sessions lack the sidecar).
+    """
+    meta_path = agent_jsonl.with_name(agent_jsonl.stem + ".meta.json")
+    try:
+        data = json.loads(meta_path.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def discover_subagents(session_dir: Path) -> list[SubagentInfo]:
     """Find all subagent JSONL files for a session.
 
-    Subagent files live in {session-dir}/subagents/agent-{7-char-id}.jsonl.
+    Subagent files live in {session-dir}/subagents/agent-{17-hex-id}.jsonl
+    (workflow agents nest at subagents/workflows/wf_*/agent-*.jsonl).
     """
     subagent_dir = session_dir / "subagents"
     if not subagent_dir.exists():

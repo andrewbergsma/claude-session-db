@@ -53,11 +53,36 @@ def input_hint(inp):
     return ""
 
 
-def render(session_path, result_head: int = 200, full_inputs: bool = False) -> str:
+def _parse_iso(s):
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+_ELIDED = object()  # sentinel injected between head and tail windows
+
+
+def render(session_path, result_head: int = 200, full_inputs: bool = False,
+           head=None, tail=None, since=None, note: str = "") -> str:
     """Digest one session JSONL into compact text (the CLI body, importable —
-    the phase-4 summarizer calls this in-process instead of a subprocess)."""
+    the phase-4 summarizer calls this in-process instead of a subprocess).
+
+    Windowing (all optional; full digest when omitted):
+      since — aware datetime: keep only records with timestamp AFTER it (the
+              "delta digest" — everything a prior summary has not seen).
+      head/tail — record counts: keep the first `head` + last `tail` selected
+              records, eliding the middle (full digests of 7MB+ transcripts
+              are unreadable and unpayable in context).
+    Tool-result labels are mapped over the WHOLE file first, so results in the
+    kept window still resolve names from elided/filtered tool_use records.
+    """
     p = Path(session_path).expanduser()
     recs = load(p)
+    total = len(recs)
 
     # Map tool_use_id -> (name, hint) so we can label results.
     tu = {}
@@ -70,12 +95,31 @@ def render(session_path, result_head: int = 200, full_inputs: bool = False) -> s
     first_ts = next((o.get("timestamp") for o in recs if o.get("timestamp")), "?")
     last_ts = next((o.get("timestamp") for o in reversed(recs) if o.get("timestamp")), "?")
 
+    if since is not None:
+        recs = [o for o in recs
+                if (ts := _parse_iso(o.get("timestamp"))) is not None and ts > since]
+    selected = len(recs)
+    if (head is not None or tail is not None) and selected > (head or 0) + (tail or 0):
+        elided = selected - (head or 0) - (tail or 0)
+        recs = (recs[:head or 0] + [(_ELIDED, elided)]
+                + (recs[-tail:] if tail else []))
+
     out = []
     out.append(f"SESSION DIGEST  ·  {p.name}")
-    out.append(f"span: {first_ts} -> {last_ts}   ({len(recs)} records)")
+    out.append(f"span: {first_ts} -> {last_ts}   ({total} records)")
+    if note:
+        out.append(note)
+    if since is not None:
+        out.append(f"window: {selected} of {total} records after "
+                   f"{since.isoformat()}")
     out.append("=" * 72)
+    if since is not None and selected == 0:
+        out.append("(no records after the watermark)")
 
     for o in recs:
+        if isinstance(o, tuple) and o[0] is _ELIDED:
+            out.append(f"\n⋯ ⋯ ⋯  (+{o[1]} records elided — head/tail window)  ⋯ ⋯ ⋯")
+            continue
         if o.get("isSidechain"):
             continue
         typ = o.get("type")
@@ -122,8 +166,16 @@ def main():
                     help="Keep tool_use inputs VERBATIM instead of a one-field hint. "
                          "Actions (create_entry/create_relationship/Edit args) live in tool inputs; "
                          "hinting them loses 'what was done' recall. Costs more tokens than the hint.")
+    ap.add_argument("--head", type=int, default=None,
+                    help="Keep only the first N selected records (with --tail, elides the middle).")
+    ap.add_argument("--tail", type=int, default=None,
+                    help="Keep only the last N selected records.")
+    ap.add_argument("--since", default=None,
+                    help="ISO timestamp: keep only records strictly after it (delta digest).")
     args = ap.parse_args()
-    sys.stdout.write(render(args.session, args.result_head, args.full_inputs))
+    sys.stdout.write(render(args.session, args.result_head, args.full_inputs,
+                            head=args.head, tail=args.tail,
+                            since=_parse_iso(args.since)))
 
 
 if __name__ == "__main__":

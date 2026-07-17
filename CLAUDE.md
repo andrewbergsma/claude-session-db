@@ -41,8 +41,12 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
+csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
+csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
 csd angles-watch        # Headless miner: keep the angles state dir warm (serves nothing)
+csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session (+ sessions tab)
 csd console             # Reply-capable session console (127.0.0.1:4462)
+csd backfill-subagents  # One-shot: child session rows for already-ingested sidechains
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
 csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)
@@ -177,6 +181,60 @@ context and must not vanish from the rail.
 Superseded: `angles-serve` / `angles_web.py`, a read-only LAN dashboard that
 duplicated the session list and reads-rail beside the console. Its watcher is
 now `angles_watch.py`; its UI is gone.
+
+## Session management (`csd angles sessions` / `csd angles digest`)
+
+The open-thread inventory (`session_mgmt.py`): one row per recent main
+session with TRUE last activity = `max(messages.ts)` — NEVER transcript mtime
+(bulk file touches create clusters of identical mtimes; mtime only ever lies
+toward "more recent", so `sessions.modified_at` is used solely as a superset
+window filter). Columns: short id, project, branch, last activity, msgs,
+summary_state classification, verdict LIVE (last msg ≤ ~15 min) / OPEN /
+OPEN-delta / CLOSED.
+
+**Delta-after-summary**: for summarized sessions, the transcript tail after
+the summary watermark (resolution order: `leaf_uuid_at_summary` →
+`message_count_at_summary` → kmcp session entry `created_at` from the
+knowledge DB) is classified deterministically (code, no LLM): `none` /
+`confirmation_only` (short confirm prompts, light chatter) /
+`auto_compaction_only` (isCompactSummary + command wrappers) / `real`
+(file/kmcp/git mutations, substantive prompts, ≥8 tool calls, or ≥2000 chars
+of tail narration) → verdict `OPEN-delta`, needs re-capture. `csd angles
+digest REF --delta` renders exactly that tail; plain digests default to a
+head 40 / tail 120 record window (`--full` to disable) since full transcripts
+reach 7.7MB. Transcript resolution is worktree-aware: `sessions.file_path`
+first, then glob `~/.claude/projects/*/<id>.jsonl`.
+
+Doctrine (same as reconcile.py): truth from the ledger not the narrator;
+source never mutated (read-only over archive + knowledge DB + transcripts,
+no new state tables, no kmcp writes); DB/transcript failures degrade a row to
+`unknown`, never crash the lens. `csd angles-serve` exposes the lens as a
+"sessions" tab (`/api/mgmt`, `/api/digest/<sid>`), polled at 30s.
+
+## Subagent (sidechain) visibility
+
+Every sidechain file also upserts a **child session row** keyed
+`<parent_session_id>:<agent_id>` (`is_subagent=true`; agentType/description
+from the adjacent `agent-<id>.meta.json` sidecar; seed prompt as
+`first_prompt`). Sidechain **messages stay under the parent session_id** —
+source is never re-shaped. Aggregate semantics: on MAIN sessions the unprefixed
+aggregate columns are **ROLL-UP** (children included, as they always were);
+`own_*` columns carry main-chain-only counts; `user_prompt_count` is
+main-chain-only (sidechain seed prompts no longer inflate it). Child rows carry
+their own aggregates (`total_* == own_*`). `v_agent_children` is the spawn
+ledger: one row per Agent tool_use ⨝ tool_result (`tool_use_result` carries
+agentId/agentType/status/totals — the harness's record, never agent
+self-report) with a `child_session_key` link. Navigation: `csd angles` accepts
+`<parent>:<agent_id>` or a bare 17-hex agent id as `--session`; the `agents`
+angle (prefix A) headlines each Agent/SendMessage/TaskStop in a turn; the web
+focus view links Agent chips to child focus views (back-link jumps to the
+spawning message), the sessions tab shows an `agents n (running/failed)` badge,
+and live background children appear as collapsed child rows on the board.
+Volatile background-task outputs
+(`/private/tmp/claude-*/<proj>/<sid>/tasks/*.output`) are swept verbatim into
+`task_outputs` at sync time (idempotent by mtime, 5MB bound) — the archive is
+their only durable copy. `csd backfill-subagents` is the one-shot backfill for
+pre-existing archives.
 
 ## Sweep reliability & recovery
 

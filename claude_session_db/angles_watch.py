@@ -28,6 +28,7 @@ import time
 from typing import Optional
 
 from . import angles as A
+from . import tldr
 
 SCAN_INTERVAL_S = 5           # transcript poll cadence
 DEBOUNCE_S = 8                # file must be quiet this long before mining
@@ -98,6 +99,14 @@ class AngleWatcher(threading.Thread):
                              kmcp_dsn=self.kmcp_dsn, no_probes=self.no_probes)
                 self.mined_sig[sid] = sig
                 self.status[sid] = "ok"
+                # Same settle moment = a full turn just landed: refresh the
+                # session tldr too (async on tldr's own worker; cache-keyed
+                # by turn, so an unchanged turn is a no-op).
+                if not self.no_probes:
+                    try:
+                        tldr.request(sid, A.find_session_jsonl("", sid))
+                    except Exception:  # noqa: BLE001 — tldr is best-effort
+                        pass
             except Exception as exc:  # noqa: BLE001 — one bad session ≠ dead worker
                 self.status[sid] = f"{type(exc).__name__}: {exc}"
             finally:

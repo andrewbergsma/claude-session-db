@@ -64,7 +64,15 @@ class AngleWatcher(threading.Thread):
 
     def _scan_once(self) -> None:
         now = time.time()
-        for p in A.PROJECTS_DIR.glob("*/*.jsonl"):
+        # Main transcripts + live sidechains (a running background child gets
+        # its own mined store under the child key '<parent>:<agent_id>' — the
+        # same address the archive and the console use).
+        candidates = ((p, p.stem) for p in A.PROJECTS_DIR.glob("*/*.jsonl"))
+        sub = ((p, A.subagent_key(p)) for p in A.PROJECTS_DIR.glob(
+            "*/*/subagents/**/agent-*.jsonl"))
+        for p, sid in (*candidates, *sub):
+            if not sid:
+                continue
             try:
                 st = p.stat()
             except OSError:
@@ -73,7 +81,6 @@ class AngleWatcher(threading.Thread):
                 continue
             if now - st.st_mtime < DEBOUNCE_S:
                 continue  # still being written; next scan will see it settled
-            sid = p.stem
             sig = (st.st_mtime_ns, st.st_size)
             if self.mined_sig.get(sid) == sig or sid in self.queued:
                 continue

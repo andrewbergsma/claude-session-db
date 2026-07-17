@@ -44,8 +44,7 @@ csd angles show ID      # Print the persisted detail behind a headline
 csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
 csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
 csd angles-watch        # Headless miner: keep the angles state dir warm (serves nothing)
-csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session (+ sessions tab)
-csd console             # Reply-capable session console (127.0.0.1:4462)
+csd console             # THE web UI: reply-capable session console (127.0.0.1:4462; token auth on LAN binds)
 csd backfill-subagents  # One-shot: child session rows for already-ingested sidechains
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
@@ -178,9 +177,15 @@ The kmcp reads-rail counts the `knowledge-cli call <tool>` Bash shim as a read,
 not just `mcp__*__<tool>` — a session that took the fallback loaded just as much
 context and must not vanish from the rail.
 
-Superseded: `angles-serve` / `angles_web.py`, a read-only LAN dashboard that
-duplicated the session list and reads-rail beside the console. Its watcher is
-now `angles_watch.py`; its UI is gone.
+Superseded and REMOVED (2026-07-17): `angles-serve` / `angles_web.py`, a
+read-only LAN dashboard that duplicated the session list and reads-rail beside
+the console. Its watcher lives on as `angles_watch.py`; its gems — the
+session-management "sessions" tab and the subagent drill-down — were ported
+into the console (threads overlay, Agent-row child links); its UI is gone.
+The console is the single web surface: `csd console` binds 127.0.0.1:4462 by
+default, and any non-loopback bind (e.g. `--host 0.0.0.0 --port 8791` for the
+LAN) requires token auth (`CSD_CONSOLE_TOKEN`, auto-generated if unset;
+`?token=` once, then a cookie).
 
 ## Session management (`csd angles sessions` / `csd angles digest`)
 
@@ -208,8 +213,8 @@ first, then glob `~/.claude/projects/*/<id>.jsonl`.
 Doctrine (same as reconcile.py): truth from the ledger not the narrator;
 source never mutated (read-only over archive + knowledge DB + transcripts,
 no new state tables, no kmcp writes); DB/transcript failures degrade a row to
-`unknown`, never crash the lens. `csd angles-serve` exposes the lens as a
-"sessions" tab (`/api/mgmt`, `/api/digest/<sid>`), polled at 30s.
+`unknown`, never crash the lens. The session console exposes the lens as its
+"threads" overlay (`/api/mgmt`, `/api/digest?id=<sid>`), polled at 30s.
 
 ## Subagent (sidechain) visibility
 
@@ -226,10 +231,12 @@ ledger: one row per Agent tool_use ⨝ tool_result (`tool_use_result` carries
 agentId/agentType/status/totals — the harness's record, never agent
 self-report) with a `child_session_key` link. Navigation: `csd angles` accepts
 `<parent>:<agent_id>` or a bare 17-hex agent id as `--session`; the `agents`
-angle (prefix A) headlines each Agent/SendMessage/TaskStop in a turn; the web
-focus view links Agent chips to child focus views (back-link jumps to the
-spawning message), the sessions tab shows an `agents n (running/failed)` badge,
-and live background children appear as collapsed child rows on the board.
+angle (prefix A) headlines each Agent/SendMessage/TaskStop in a turn; the
+console serves child transcripts at `/api/session?id=<parent>:<agent_id>`
+(Agent tool rows link to the child view; the child header back-links to the
+spawning message), its threads overlay shows an `agents n (running/failed)`
+badge per session, its nav rows carry a total/live sidechain glance, and
+`angles-watch` mines live sidechains under their child keys.
 Volatile background-task outputs
 (`/private/tmp/claude-*/<proj>/<sid>/tasks/*.output`) are swept verbatim into
 `task_outputs` at sync time (idempotent by mtime, 5MB bound) — the archive is

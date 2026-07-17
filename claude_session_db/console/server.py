@@ -68,7 +68,7 @@ SKIP_USER_PREFIXES = ("<bash-", "<task-notification>", "<command-", "<local-comm
 ANGLES_DIR = Path(os.environ.get(
     "CSD_STATE_DIR", str(Path.home() / ".local" / "state" / "claude-session-db")
 )) / "angles"
-ANGLE_ORDER = ["direction", "events", "files", "kmcp", "commands",
+ANGLE_ORDER = ["direction", "events", "agents", "files", "kmcp", "commands",
                "git", "errors", "knowledge", "metrics"]
 
 
@@ -530,12 +530,81 @@ def discover_sessions(archived=False):
         if s:
             s["archived"] = p.stem in idx
             s["stoppable"] = stoppable(p.stem)
+            s["agents"] = _agents_glance(p)
             out.append(s)
     return out
 
 
 def find_session(sid: str):
+    """Main-session uuid -> <proj>/<uuid>.jsonl; child key '<parent>:<agent>'
+    -> the subagents/**/agent-<id>.jsonl sidechain file (same address the
+    archive's is_subagent rows and v_agent_children use)."""
+    if ":" in sid:
+        parent, aid = sid.split(":", 1)
+        return next(PROJECTS.glob(f"*/{parent}/subagents/**/agent-{aid}.jsonl"),
+                    None)
     return next(PROJECTS.glob(f"*/{sid}.jsonl"), None)
+
+
+# ----------------------------------------------------------------------------
+# subagent navigation — Agent chip -> child focus view, spawn-anchor back-link
+#
+# The wiring mirrors the archive's spawn ledger (v_agent_children): the harness
+# writes a toolUseResult carrier (agentId/agentType/status) on the user record
+# that carries the Agent tool_result. Joining tool_use_id -> carrier maps each
+# Agent chip to its child session key '<parent>:<agentId>'; the carrier's
+# sourceToolAssistantUuid/parentUuid is the spawn anchor for the back-link.
+# ----------------------------------------------------------------------------
+def _agent_result_map(records):
+    """tool_use_id -> {agent_id, agent_type, status} from record-level
+    toolUseResult carriers (the harness's own record of each Agent spawn)."""
+    out = {}
+    for rec in records:
+        tur = rec.get("toolUseResult")
+        if rec.get("type") != "user" or not isinstance(tur, dict) \
+                or not tur.get("agentId"):
+            continue
+        for b in (rec.get("message") or {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_result" \
+                    and b.get("tool_use_id"):
+                out[b["tool_use_id"]] = {
+                    "agent_id": tur.get("agentId"),
+                    "agent_type": tur.get("agentType", ""),
+                    "status": tur.get("status", ""),
+                }
+    return out
+
+
+def _spawn_anchor(parent_records, agent_id):
+    """uuid of the parent message to jump to for a child's back-link: the
+    assistant message carrying the Agent tool_use, via the result carrier."""
+    for rec in parent_records:
+        tur = rec.get("toolUseResult")
+        if rec.get("type") == "user" and isinstance(tur, dict) \
+                and tur.get("agentId") == agent_id:
+            return rec.get("sourceToolAssistantUuid") or rec.get("parentUuid")
+    return None
+
+
+AGENT_LIVE_S = 300   # sidechain mtime within this = agent still running
+
+
+def _agents_glance(path: Path):
+    """Cheap per-session subagent census for the nav list: {total, live} from
+    the session's subagents/ dir (live = sidechain written recently)."""
+    d = path.parent / path.stem / "subagents"
+    if not d.is_dir():
+        return None
+    now = time.time()
+    total = live = 0
+    for f in d.glob("**/agent-*.jsonl"):
+        total += 1
+        try:
+            if now - f.stat().st_mtime < AGENT_LIVE_S:
+                live += 1
+        except OSError:
+            pass
+    return {"total": total, "live": live} if total else None
 
 
 def build_session(sid: str):
@@ -543,7 +612,15 @@ def build_session(sid: str):
     if path is None:
         return None
     records, truncated = all_records(path)
+    is_child = ":" in sid
+    if is_child:
+        # Every record in a sidechain file is sidechain; lift the flag so the
+        # main-chain rendering path (state, turns, tools) applies unchanged.
+        for r in records:
+            r.pop("isSidechain", None)
     rmap = _result_map(records)
+    agent_spawns = _agent_result_map(records)
+    base_sid = sid.split(":", 1)[0]
 
     events = []
     cwd = branch = model = None
@@ -641,11 +718,18 @@ def build_session(sid: str):
                     elif base is None and name:
                         label, detail = _tool_summary(name, inp)
                         res = rmap.get(tid) or {}
-                        other_tools.append({
+                        row = {
                             "name": name, "label": label, "detail": detail,
                             "chars": res.get("chars"),
                             "is_error": res.get("is_error", False),
-                        })
+                        }
+                        spawn = agent_spawns.get(tid)
+                        if name in ("Agent", "Task") and spawn \
+                                and spawn.get("agent_id"):
+                            # The chip becomes a link to the child focus view.
+                            row["child"] = f"{base_sid}:{spawn['agent_id']}"
+                            row["status"] = spawn.get("status", "")
+                        other_tools.append(row)
             text = "\n".join(tp for tp in text_parts if tp).strip()
             if text:
                 events.append({"kind": "assistant", "ts": ts, "uuid": uid,
@@ -672,7 +756,7 @@ def build_session(sid: str):
                       + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0))
 
-    return {
+    out = {
         "session_id": sid,
         "project": str(path.parent.name),
         "cwd": cwd, "branch": branch, "title": title.strip(),
@@ -687,6 +771,26 @@ def build_session(sid: str):
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
     }
+    if is_child:
+        from ..subagent import read_agent_meta
+        parent, aid = sid.split(":", 1)
+        meta = read_agent_meta(path)
+        anchor = None
+        ppath = find_session(parent)
+        if ppath is not None:
+            try:
+                anchor = _spawn_anchor(all_records(ppath)[0], aid)
+            except OSError:
+                pass
+        out["subagent"] = {
+            "parent_session_id": parent,
+            "agent_id": aid,
+            "agent_type": meta.get("agentType", ""),
+            "description": meta.get("description", ""),
+            "spawn_depth": meta.get("spawnDepth"),
+            "anchor_uuid": anchor,
+        }
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -1025,6 +1129,66 @@ def summarize_session(sid: str, cwd: str) -> dict:
 
 
 # ----------------------------------------------------------------------------
+# session-management lens — open-thread inventory + delta-after-summary digests
+#
+# The console face of session_mgmt.py (the same lens `csd angles sessions` /
+# `csd angles digest` print): one row per recent main session with TRUE last
+# activity = max(messages.ts) from the archive, verdicts LIVE / OPEN /
+# OPEN-delta / CLOSED, agent-spawn badges from v_agent_children, and the
+# deterministic delta-after-summary classification. Read-only over the archive
+# + knowledge DB; an unreachable archive degrades to {"error": ...}, never 500.
+# ----------------------------------------------------------------------------
+CSD_DSN = None             # archive DSN, set by serve()
+
+
+def mgmt_payload(window_days: int, live_min: int):
+    if not CSD_DSN:
+        return {"error": "no archive DSN configured (set DATABASE_URL / "
+                         "CSD_DATABASE_URL, or pass --dsn to csd console)"}
+    from .. import session_mgmt as mgmt
+    try:
+        rows = mgmt.inventory(CSD_DSN, KMCP_DSN, window_days=window_days,
+                              live_min=live_min, with_delta=True)
+    except Exception as exc:  # noqa: BLE001 — degrade, don't die
+        return {"error": f"{type(exc).__name__}: {exc}"}
+    out = []
+    for r in rows:
+        out.append({
+            "session_id": r["session_id"],
+            "project_name": r["project_name"],
+            "cwd": r["cwd"],
+            "git_branch": r["git_branch"],
+            "message_count": r["message_count"],
+            "last_ts": r["last_ts"].isoformat() if r["last_ts"] else None,
+            "idle_s": r["idle_s"],
+            "state": r["state"],
+            "reason": r["reason"],
+            "kmcp_target": (f"{r['kmcp_application']}:{r['kmcp_path']}"
+                            if r["kmcp_application"] else None),
+            "agents": {"total": r.get("agents_total", 0),
+                       "running": r.get("agents_running", 0),
+                       "failed": r.get("agents_failed", 0)},
+            "delta": r["delta"],
+            "verdict": r["verdict"],
+        })
+    return {"sessions": out}
+
+
+def digest_payload(sid: str, delta: bool, head, tail, full: bool):
+    """(text, http_code) — the per-session digest, delta mode = the
+    post-summary tail only."""
+    from .. import session_mgmt as mgmt
+    try:
+        return mgmt.digest_for(sid, dsn=CSD_DSN, kmcp_dsn=KMCP_DSN,
+                               delta=delta, head=head, tail=tail,
+                               full=full), 200
+    except ValueError as exc:
+        return f"digest: {exc}", 404
+    except Exception as exc:  # noqa: BLE001
+        return f"digest: {type(exc).__name__}: {exc}", 500
+
+
+# ----------------------------------------------------------------------------
 # auth
 #
 # The console is NOT a read-only surface: /api/answer and /api/fork spawn
@@ -1124,6 +1288,32 @@ class Handler(SimpleHTTPRequestHandler):
             d = angle_detail(sid, item)
             return self._json(d) if d else self._json(
                 {"error": f"{item} not mined for {sid}"}, 404)
+        if u.path == "/api/mgmt":
+            q = parse_qs(u.query)
+            try:
+                return self._json(mgmt_payload(
+                    int((q.get("days") or ["7"])[0]),
+                    int((q.get("live_min") or ["15"])[0])))
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/digest":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            text, code = digest_payload(
+                sid,
+                delta=(q.get("delta") or ["0"])[0] == "1",
+                head=int(q["head"][0]) if "head" in q else None,
+                tail=int(q["tail"][0]) if "tail" in q else None,
+                full=(q.get("full") or ["0"])[0] == "1")
+            body = text.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         return super().do_GET()
 
     def do_POST(self):
@@ -1151,6 +1341,10 @@ class Handler(SimpleHTTPRequestHandler):
                                            body.get("reason", "")))
 
         if route == "/api/summarize":
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions are not summarized "
+                              "on their own — summarize the parent"}, 400)
             r = summarize_session(sid, cwd)
             return self._json(r, 200 if r["ok"] else 409)
 
@@ -1169,6 +1363,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"ok": False, "error": str(e)[:400]}, 500)
 
         # --- endpoints that send a message ----------------------------------
+        if ":" in sid:
+            return self._json(
+                {"error": "child (subagent) sessions are read-only — "
+                          "answer or fork the parent session instead"}, 400)
         text = (body.get("text") or "").strip()
         if not text:
             return self._json({"error": "text required"}, 400)
@@ -1199,11 +1397,13 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json({"error": "unknown endpoint"}, 404)
 
 
-def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None):
+def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
+          csd_dsn=None):
     """Bind and serve. Non-loopback binds are authenticated unless no_auth."""
-    global TOKEN, KMCP_DSN
+    global TOKEN, KMCP_DSN, CSD_DSN
 
     KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
+    CSD_DSN = csd_dsn or os.environ.get("CSD_DATABASE_URL")
 
     if _loopback(host) or no_auth:
         TOKEN = None

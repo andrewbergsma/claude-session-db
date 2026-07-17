@@ -242,6 +242,60 @@
            overflow:hidden; text-overflow:ellipsis; }
 
   .empty { color:var(--muted); padding:24px; font-size:13px; text-align:center; }
+
+  /* ---- subagent navigation (agent chips, child header, nav badges) ---- */
+  .agentlink { color:var(--purple); cursor:pointer; }
+  .agentlink:hover { text-decoration:underline; }
+  .abadge { color:var(--purple); }
+  .abadge .alive { color:var(--good); font-weight:700; }
+  .subhdr { display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+            font:11.5px var(--mono); color:var(--ink2); }
+  .subhdr .back { color:var(--accent); cursor:pointer; border:1px solid var(--border);
+                  border-radius:6px; padding:2px 9px; background:var(--surface2); }
+  .subhdr .back:hover { border-color:var(--accent); }
+  .anchor-flash { outline:1px solid var(--accent); border-radius:8px;
+                  transition:outline-color 1.2s; }
+
+  /* ---- threads overlay (session-management lens) ---- */
+  #mgmtbtn { position:fixed; left:12px; bottom:12px; z-index:40;
+             font:12px var(--mono); color:var(--ink2); background:var(--surface2);
+             border:1px solid var(--border); border-radius:8px; padding:6px 12px;
+             cursor:pointer; }
+  #mgmtbtn:hover { color:var(--ink); border-color:var(--accent); }
+  #mgmt { position:fixed; inset:0; background:var(--bg); z-index:50; display:none;
+          flex-direction:column; padding:16px 20px; overflow:hidden; }
+  #mgmt.open { display:flex; }
+  #mgmt .mh { display:flex; align-items:baseline; gap:12px; margin-bottom:10px; }
+  #mgmt .mh h2 { font-size:15px; font-weight:600; }
+  #mgmt .mh .note { color:var(--muted); font-size:11.5px; }
+  #mgmt .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
+                 font:12px var(--mono); }
+  #mgmt .mh .x:hover { color:var(--ink); }
+  #mgmtbody { flex:1; overflow:auto; min-height:0; }
+  #mgmtbody table { border-collapse:collapse; width:100%; font:12.5px var(--mono); }
+  #mgmtbody th { color:var(--muted); text-align:left; font-weight:normal;
+                 padding:4px 10px; border-bottom:1px solid var(--border);
+                 white-space:nowrap; position:sticky; top:0; background:var(--bg); }
+  #mgmtbody td { padding:5px 10px; border-bottom:1px solid var(--border);
+                 white-space:nowrap; max-width:300px; overflow:hidden;
+                 text-overflow:ellipsis; }
+  #mgmtbody tr.row { cursor:pointer; }
+  #mgmtbody tr.row:hover td { background:var(--surface2); }
+  #mgmtbody td.num { text-align:right; }
+  .v-LIVE { color:var(--good); } .v-OPEN { color:var(--warn); }
+  .v-OPENdelta { color:var(--bad); font-weight:700; }
+  .v-OPENq { color:var(--warn); } .v-CLOSED { color:var(--muted); }
+  #mgmtdigest { display:none; flex:1; min-height:0; flex-direction:column;
+                margin-top:10px; }
+  #mgmtdigest.open { display:flex; }
+  #mgmtdigest .dh { display:flex; gap:10px; align-items:baseline;
+                    font:11.5px var(--mono); color:var(--ink2); margin-bottom:6px; }
+  #mgmtdigest .dh .x { cursor:pointer; color:var(--muted); }
+  #mgmtdigest .dh .x:hover { color:var(--ink); }
+  #mgmtdigest pre { flex:1; overflow:auto; background:var(--surface);
+                    border:1px solid var(--border); border-radius:8px;
+                    padding:10px 12px; font:11.5px/1.5 var(--mono);
+                    white-space:pre-wrap; word-break:break-word; }
 </style>
 </head>
 <body>
@@ -275,6 +329,23 @@
     <div id="summary"></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
+
+  <!-- threads overlay: the session-management lens (open-thread inventory) -->
+  <button id="mgmtbtn" onclick="openMgmt()" title="Open-thread inventory: verdicts, agents, delta-after-summary">⊞ threads</button>
+  <div id="mgmt">
+    <div class="mh">
+      <h2>open threads</h2>
+      <span class="note">last activity = max(messages.ts) from the archive (never file mtime) ·
+        click a row for its digest (delta digest when OPEN-delta) · id opens the session</span>
+      <span class="x" onclick="closeMgmt()">✕ close (Esc)</span>
+    </div>
+    <div id="mgmtbody"><div class="empty">loading…</div></div>
+    <div id="mgmtdigest">
+      <div class="dh"><span id="mgmtdigesttitle"></span>
+        <span class="x" onclick="closeMgmtDigest()">✕ close digest</span></div>
+      <pre id="mgmtdigestpre"></pre>
+    </div>
+  </div>
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
@@ -347,7 +418,7 @@ async function loadNav(){
         <span class="dot ${s.state}" title="${s.state}"></span>
         <span class="meta">
           <div class="ttl">${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
-          <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}</div>
+          <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}${s.agents?` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>`:""}</div>
         </span></div>`;
     }
   }
@@ -419,11 +490,21 @@ function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
   const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
+  const sub = s.subagent;
+  const subhdr = sub ? `<div class="subhdr">
+      <span class="back" onclick="openParent('${esc(sub.parent_session_id)}','${esc(sub.anchor_uuid||"")}')"
+        title="back to the spawning message in the parent session">← parent ${esc(sub.parent_session_id.slice(0,8))}</span>
+      <b>⇲ ${esc(sub.agent_type||"agent")}</b>
+      ${sub.description?`<span>· ${esc(sub.description)}</span>`:""}
+      ${sub.spawn_depth!=null?`<span>· depth ${sub.spawn_depth}</span>`:""}
+      <span>· agent ${esc((sub.agent_id||"").slice(0,8))}</span>
+    </div>` : "";
   document.getElementById("chdr").innerHTML = `
     <div class="row1">
       <span class="dot ${s.state}" title="${s.state}"></span>
       <h2 title="${esc(s.title)}">${esc(s.title)}</h2>
     </div>
+    ${subhdr}
     <div class="chips">
       <span class="chip sid">${esc(s.session_id)}</span>
       <span class="chip">📁 <b>${esc(folder)}</b></span>
@@ -447,6 +528,16 @@ function renderHeader(s){
       <span id="actmsg" class="actmsg"></span>
     </div>`;
   const running = s.state==="running";
+  if(sub){
+    // Child (subagent) transcripts are read-only: there is no session to
+    // resume — answers and forks belong to the parent.
+    document.getElementById("cin").disabled = true;
+    document.getElementById("cin").placeholder =
+      "subagent transcript — read-only; answer the parent session";
+    document.getElementById("bans").disabled = true;
+    document.getElementById("bfork").disabled = true;
+    return;
+  }
   document.getElementById("cin").disabled = false;
   document.getElementById("cin").placeholder = running
     ? "session is running — Fork to speak into a copy" : "answer this session…";
@@ -523,28 +614,35 @@ function toolRow(t){
   const size = t.chars!=null ? `<span class="tsize">${kb(t.chars)}</span>` : "";
   const err = t.is_error ? `<span class="terr">error</span>` : "";
   const det = t.detail ? `<div class="tdet">${esc(t.detail)}</div>` : "";
+  // An Agent spawn with an archived sidechain links to the child focus view.
+  const label = t.child
+    ? `<span class="tlabel agentlink" onclick="openSession('${esc(t.child)}')"
+         title="open subagent transcript">${esc(t.label||t.name)}${t.status?` · ${esc(t.status)}`:""} ↗</span>`
+    : `<span class="tlabel">${esc(t.label||t.name)}</span>`;
   return `<div class="trow"><div class="tline"><span class="tg">${glyph}</span>
-    <span class="tlabel">${esc(t.label||t.name)}</span>${err}${size}</div>${det}</div>`;
+    ${label}${err}${size}</div>${det}</div>`;
 }
 function toolRows(tools){ return (tools||[]).map(toolRow).join(""); }
 
 function renderStream(s){
   let html = "";
   s.events.forEach((e, i) => {
-    const g = `<span class="gutter">${clock(e.ts)}</span>`;
+    // The uuid id anchors spawn back-links (child header -> parent message).
+    const w = `<div class="ev"${e.uuid?` id="ev-${esc(e.uuid)}"`:""}>` +
+              `<span class="gutter">${clock(e.ts)}</span>`;
     if(e.kind==="user")
-      html += `<div class="ev">${g}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+      html += `${w}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
       const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools)}</div>` : "";
-      html += `<div class="ev">${g}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+      html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
-      html += `<div class="ev">${g}<div class="b">${readRow(e, i)}</div></div>`;
+      html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
-      html += `<div class="ev">${g}<div class="b">${searchRow(e, i)}</div></div>`;
+      html += `${w}<div class="b">${searchRow(e, i)}</div></div>`;
     else if(e.kind==="tool")
-      html += `<div class="ev">${g}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
+      html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
     else if(e.kind==="choice")
-      html += `<div class="ev">${g}<div class="b">${choiceCard(e)}</div></div>`;
+      html += `${w}<div class="b">${choiceCard(e)}</div></div>`;
   });
   const st = document.getElementById("stream");
   st.onscroll = () => { pinnedBottom = st.scrollHeight - st.scrollTop - st.clientHeight < 40; };
@@ -662,8 +760,8 @@ async function mine(){
 }
 
 /* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
-const ANGLE_GLYPH = {direction:"→", events:"◆", files:"F", kmcp:"W", commands:"$",
-                     git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
+const ANGLE_GLYPH = {direction:"→", events:"◆", agents:"⇲", files:"F", kmcp:"W",
+                     commands:"$", git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
 
 function renderAngles(s){
   const el = document.getElementById("angles");
@@ -829,6 +927,121 @@ async function send(isFork){
     }
   } catch(e){ st.textContent = "✗ "+e; }
 }
+
+/* ---------- subagent back-link: parent session @ the spawning message ------ */
+async function openParent(parentId, anchorUuid){
+  await openSession(parentId);
+  if(!anchorUuid) return;
+  const el = document.getElementById("ev-" + anchorUuid);
+  if(!el) return;
+  el.scrollIntoView({block:"center"});
+  el.classList.add("anchor-flash");
+  setTimeout(()=>el.classList.remove("anchor-flash"), 2500);
+}
+
+/* ---------- threads overlay: the session-management lens -------------------
+   The console face of `csd angles sessions` (session_mgmt.py): one row per
+   recent main session, TRUE last activity from the archive, verdicts
+   LIVE / OPEN / OPEN-delta / CLOSED, agents badges from v_agent_children,
+   and delta-after-summary digests. Self-contained: own overlay, own poll. */
+let mgmtOpen = false, mgmtAt = 0, mgmtRows = null, mgmtErr = null;
+
+function openMgmt(){ mgmtOpen = true;
+  document.getElementById("mgmt").classList.add("open"); refreshMgmt(true); }
+function closeMgmt(){ mgmtOpen = false; closeMgmtDigest();
+  document.getElementById("mgmt").classList.remove("open"); }
+function closeMgmtDigest(){
+  document.getElementById("mgmtdigest").classList.remove("open");
+  document.getElementById("mgmtdigestpre").textContent = ""; }
+
+document.addEventListener("keydown", e => {
+  if(e.key !== "Escape" || !mgmtOpen) return;
+  if(document.getElementById("mgmtdigest").classList.contains("open"))
+    closeMgmtDigest();
+  else closeMgmt();
+});
+
+async function refreshMgmt(force){
+  if(!mgmtOpen) return;
+  if(!force && Date.now() - mgmtAt < 30000){ renderMgmt(); return; }
+  mgmtAt = Date.now();
+  try {
+    const d = await (await fetch("/api/mgmt")).json();
+    if(d.error){ mgmtErr = d.error; mgmtRows = null; }
+    else { mgmtRows = d.sessions; mgmtErr = null; }
+  } catch(e){ mgmtErr = String(e); }
+  renderMgmt();
+}
+
+function fmtDelta(d){
+  if(!d) return "";
+  if(d.class === "none") return "none";
+  if(d.class === "unknown") return "unknown" + (d.note ? ` (${d.note})` : "");
+  const body = `${d.records}rec ${d.prompts}p ${d.tool_calls}t`;
+  if(d.class === "real")
+    return `REAL ${body}${d.signals && d.signals[0] ? " · " + d.signals[0] : ""}`;
+  return {confirmation_only:"confirm-only",
+          auto_compaction_only:"compaction-only"}[d.class] + ` ${body}`;
+}
+
+function agentsBadge(a){
+  if(!a || !a.total) return "";
+  let t = String(a.total);
+  if(a.running) t += ` <span class="v-OPEN">${a.running}r</span>`;
+  if(a.failed) t += ` <span class="v-OPENdelta">${a.failed}f</span>`;
+  return t;
+}
+
+function mgmtClock(t){ if(!t) return "?"; const d = new Date(t);
+  return d.toLocaleDateString(undefined,{month:"short",day:"numeric"}) + " " +
+         d.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"}); }
+function mgmtAge(s){ if(s==null) return "?";
+  return s<60 ? s+"s" : s<3600 ? Math.round(s/60)+"m" : Math.round(s/3600)+"h"; }
+
+function renderMgmt(){
+  const body = document.getElementById("mgmtbody");
+  if(mgmtErr){ body.innerHTML = `<div class="empty">archive unavailable — ${esc(mgmtErr)}</div>`; return; }
+  if(!mgmtRows){ body.innerHTML = `<div class="empty">loading…</div>`; return; }
+  const trs = mgmtRows.map(s => {
+    const vcls = "v-" + s.verdict.replace("-delta","delta").replace("?","q");
+    const wantDelta = s.verdict === "OPEN-delta";
+    const state = (s.state || "—") + (s.reason ? "/" + s.reason : "");
+    return `<tr class="row" onclick="showMgmtDigest('${s.session_id}',${wantDelta})">
+      <td class="${vcls}">${esc(s.verdict)}</td>
+      <td title="${esc(s.session_id)}"><span class="agentlink"
+        onclick="event.stopPropagation();closeMgmt();openSession('${s.session_id}')">${s.session_id.slice(0,8)}</span></td>
+      <td>${esc(s.project_name || "?")}</td>
+      <td>${esc(s.git_branch || "—")}</td>
+      <td>${mgmtClock(s.last_ts)}</td>
+      <td class="num">${mgmtAge(s.idle_s)}</td>
+      <td class="num">${s.message_count || 0}</td>
+      <td>${agentsBadge(s.agents)}</td>
+      <td title="${esc(s.kmcp_target || "")}">${esc(state)}</td>
+      <td class="${s.delta && s.delta.class === "real" ? "v-OPENdelta" : ""}"
+          title="${esc((s.delta && s.delta.signals || []).join("\n"))}">${esc(fmtDelta(s.delta))}</td>
+      </tr>`;
+  }).join("");
+  body.innerHTML = `<table><thead><tr><th>verdict</th><th>session</th>
+    <th>project</th><th>branch</th><th>last activity</th><th>idle</th>
+    <th>msgs</th><th>agents</th><th>summary</th><th>delta after summary</th></tr></thead>
+    <tbody>${trs}</tbody></table>`;
+}
+
+async function showMgmtDigest(id, delta){
+  const q = delta ? "delta=1" : "head=30&tail=80";
+  document.getElementById("mgmtdigesttitle").textContent =
+    `digest · ${id.slice(0,8)}${delta ? " · delta after summary" : ""}`;
+  document.getElementById("mgmtdigestpre").textContent = "loading digest…";
+  document.getElementById("mgmtdigest").classList.add("open");
+  try {
+    const r = await fetch(`/api/digest?id=${id}&${q}`);
+    document.getElementById("mgmtdigestpre").textContent = await r.text();
+  } catch(e){
+    document.getElementById("mgmtdigestpre").textContent = "digest unavailable: " + e;
+  }
+}
+
+setInterval(()=>refreshMgmt(false), 30000);
 
 loadNav(); setInterval(loadNav, 5000);
 setInterval(()=>refreshSession(false), 3000);

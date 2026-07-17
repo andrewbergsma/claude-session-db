@@ -25,6 +25,7 @@ Endpoints
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
+  POST /api/priority               {session_id, priority: low|med|high|critical|null}
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
@@ -210,6 +211,46 @@ def set_archived(sid: str, archived: bool, reason: str = "") -> dict:
         tmp.write_text(json.dumps(idx, indent=1))
         tmp.replace(ARCHIVE_FILE)          # atomic; never a half-written index
     return {"ok": True, "session_id": sid, "archived": archived}
+
+
+# ----------------------------------------------------------------------------
+# priority — operator triage flag, console state only
+#
+# A small JSON keyed by session id in the console state dir, exactly like the
+# archive index: never a mutation of ~/.claude/projects. The sidebar groups
+# sessions by this flag (critical first); unprioritized sessions fall into a
+# default bucket. Clearing a priority removes the key.
+# ----------------------------------------------------------------------------
+PRIORITY_FILE = CONSOLE_STATE / "priority.json"
+_PRIORITY_LOCK = threading.Lock()
+PRIORITIES = ("low", "med", "high", "critical")
+
+
+def _read_priority() -> dict:
+    try:
+        return json.loads(PRIORITY_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _priority_of(idx: dict, sid: str):
+    v = idx.get(sid)
+    return v.get("priority") if isinstance(v, dict) else v
+
+
+def set_priority(sid: str, priority) -> dict:
+    with _PRIORITY_LOCK:
+        idx = _read_priority()
+        if priority:
+            idx[sid] = {"priority": priority,
+                        "set_at": datetime.now(timezone.utc).isoformat()}
+        else:
+            idx.pop(sid, None)
+        CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
+        tmp = PRIORITY_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(idx, indent=1))
+        tmp.replace(PRIORITY_FILE)         # atomic; never a half-written index
+    return {"ok": True, "session_id": sid, "priority": priority or None}
 
 
 # ----------------------------------------------------------------------------
@@ -465,12 +506,55 @@ def _state(records, mtime_age):
     return st
 
 
+# Whole-file facts for the nav (first timestamp, message-record count) are
+# re-derived only when the transcript changes: keyed by (mtime_ns, size).
+_NAV_STATS: dict[str, tuple] = {}
+
+
+def _nav_stats(path: Path):
+    """{started_at, msg_count} scanned from the full file, signature-cached.
+
+    msg_count is a byte-level count of user/assistant records (tool-result
+    user records included) — a nav-grade magnitude, not an event-stream count.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return {"started_at": None, "msg_count": None}
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _NAV_STATS.get(str(path))
+    if hit and hit[0] == sig:
+        return hit[1]
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {"started_at": None, "msg_count": None}
+    msg_count = (data.count(b'"type":"user"') + data.count(b'"type": "user"')
+                 + data.count(b'"type":"assistant"')
+                 + data.count(b'"type": "assistant"'))
+    started = None
+    for ln in data[:65536].split(b"\n"):
+        if not ln.strip():
+            continue
+        try:
+            r = json.loads(ln)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(r, dict) and r.get("timestamp"):
+            started = r["timestamp"]
+            break
+    stats = {"started_at": started, "msg_count": msg_count}
+    _NAV_STATS[str(path)] = (sig, stats)
+    return stats
+
+
 def summarize_nav(path: Path):
     recs = tail_records(path, NAV_TAIL_BYTES)
     if not recs:
         return None
     title = cwd = branch = None
     last_user = None
+    usage = None
     for r in recs:
         t = r.get("type")
         if t == "ai-title":
@@ -484,10 +568,20 @@ def summarize_nav(path: Path):
                 txt = _text_of((r.get("message") or {}).get("content"))
                 if _is_real_user_turn(r, txt):
                     last_user = txt
+            elif t == "assistant":
+                u = (r.get("message") or {}).get("usage")
+                if isinstance(u, dict):
+                    usage = u
     mtime_age = time.time() - path.stat().st_mtime
     if not title:
         title = (last_user[:70] + "…") if last_user else path.stem[:12]
     label = (cwd or str(path.parent.name)).rstrip("/").split("/")[-1]
+    ctx_tokens = None
+    if usage:
+        ctx_tokens = (usage.get("input_tokens", 0)
+                      + usage.get("cache_read_input_tokens", 0)
+                      + usage.get("cache_creation_input_tokens", 0))
+    stats = _nav_stats(path)
     return {
         "session_id": path.stem,
         "project": str(path.parent.name),
@@ -496,6 +590,9 @@ def summarize_nav(path: Path):
         "state": _state(recs, mtime_age),
         "mtime": path.stat().st_mtime,
         "mtime_age_s": round(mtime_age),
+        "started_at": stats["started_at"],
+        "msg_count": stats["msg_count"],
+        "ctx_tokens": ctx_tokens,
     }
 
 
@@ -521,6 +618,7 @@ def discover_sessions(archived=False):
         if m >= cutoff or archived:
             cands.append((m, p))
     cands.sort(reverse=True)
+    pri = _read_priority()
     out = []
     for _, p in cands[:MAX_NAV_SESSIONS]:
         try:
@@ -531,6 +629,7 @@ def discover_sessions(archived=False):
             s["archived"] = p.stem in idx
             s["stoppable"] = stoppable(p.stem)
             s["agents"] = _agents_glance(p)
+            s["priority"] = _priority_of(pri, p.stem)
             out.append(s)
     return out
 
@@ -770,6 +869,7 @@ def build_session(sid: str):
         "rail": angle_rail(sid),
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
+        "priority": _priority_of(_read_priority(), sid),
     }
     if is_child:
         from ..subagent import read_agent_meta
@@ -1339,6 +1439,14 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/archive":
             return self._json(set_archived(sid, bool(body.get("archived", True)),
                                            body.get("reason", "")))
+
+        if route == "/api/priority":
+            pr = body.get("priority") or None
+            if pr is not None and pr not in PRIORITIES:
+                return self._json(
+                    {"error": f"priority must be one of {list(PRIORITIES)} "
+                              "or null to clear"}, 400)
+            return self._json(set_priority(sid, pr))
 
         if route == "/api/summarize":
             if ":" in sid:

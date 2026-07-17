@@ -533,8 +533,8 @@ def _nav_stats(path: Path):
                  + data.count(b'"type":"assistant"')
                  + data.count(b'"type": "assistant"'))
     started = None
-    for ln in data[:65536].split(b"\n"):
-        if not ln.strip():
+    for ln in data.split(b"\n"):
+        if b'"timestamp"' not in ln:
             continue
         try:
             r = json.loads(ln)

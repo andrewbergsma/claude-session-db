@@ -531,6 +531,18 @@ def _fmt_idle(s: int | None) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def _fmt_agents(r: dict) -> str:
+    n = r.get("agents_total") or 0
+    if not n:
+        return ""
+    out = str(n)
+    if r.get("agents_running"):
+        out += f"·{r['agents_running']}run"
+    if r.get("agents_failed"):
+        out += f"·{r['agents_failed']}fail"
+    return out
+
+
 def _fmt_delta(d: dict | None) -> str:
     if d is None:
         return ""
@@ -565,7 +577,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         click.echo(f"No main sessions active in the last {window_days}d.")
         return
     hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'PROJECT':<20.20} {'BRANCH':<22.22} "
-           f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5}  {'SUMMARY':<12} DELTA")
+           f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5} {'AGENTS':>8}  "
+           f"{'SUMMARY':<12} DELTA")
     click.echo(hdr)
     counts: dict[str, int] = {}
     for r in rows:
@@ -582,7 +595,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         click.echo(f"{verdict} {r['session_id'][:8]:<8} "
                    f"{str(r['project_name'] or ''):<20.20} "
                    f"{str(r['git_branch'] or '—'):<22.22} {last:<12} "
-                   f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5}  "
+                   f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5} "
+                   f"{_fmt_agents(r):>8}  "
                    f"{state:<12} {_fmt_delta(r['delta'])}")
     tally = " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
     click.echo(f"\n{len(rows)} sessions ({tally})  ·  "

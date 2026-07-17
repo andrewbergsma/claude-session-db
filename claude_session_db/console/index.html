@@ -12,17 +12,17 @@
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-    --rail-w:320px;
+    --rail-w:320px; --nav-w:270px;
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
   body {
     background:var(--bg); color:var(--ink);
     font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
-    display:grid; grid-template-columns:270px minmax(0,1fr) var(--rail-w);
+    display:grid; grid-template-columns:var(--nav-w) minmax(0,1fr) var(--rail-w);
     grid-template-rows:100vh; height:100vh; overflow:hidden;
   }
-  @media (max-width:1100px){ body{ grid-template-columns:230px minmax(0,1fr); } #rail,#railgrip{ display:none; } }
+  @media (max-width:1100px){ body{ grid-template-columns:var(--nav-w) minmax(0,1fr); } #rail,#railgrip{ display:none; } }
 
   /* drag handle straddling the left edge of the right rail */
   #railgrip { position:fixed; top:0; bottom:0; right:var(--rail-w); width:9px;
@@ -30,6 +30,13 @@
   #railgrip::after { content:""; position:absolute; top:0; bottom:0; left:4px; width:1px;
                      background:transparent; transition:background .12s; }
   #railgrip:hover::after, #railgrip.drag::after { background:var(--accent); width:2px; }
+  /* same handle on the right edge of the left sidebar */
+  #navgrip { position:fixed; top:0; bottom:0; left:var(--nav-w); width:9px;
+             margin-left:-4px; cursor:col-resize; z-index:30; }
+  #navgrip::after { content:""; position:absolute; top:0; bottom:0; left:4px; width:1px;
+                    background:transparent; transition:background .12s; }
+  #navgrip:hover::after, #navgrip.drag::after { background:var(--accent); width:2px; }
+  body.navmin #navgrip { display:none; }
   body.raildrag { user-select:none; cursor:col-resize; }
   #nav, #main, #rail { min-height:0; }
 
@@ -38,10 +45,34 @@
          overflow-y:auto; }
   #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
               border-bottom:1px solid var(--border); z-index:2; }
-  #nav .top h1 { font-size:13px; font-weight:600; letter-spacing:.3px; }
+  #nav .top .toprow { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+  #nav .top h1 { font-size:13px; font-weight:600; letter-spacing:.3px; white-space:nowrap;
+                 overflow:hidden; text-overflow:ellipsis; }
   #nav .top .sub { color:var(--muted); font-size:11px; margin-top:2px; }
-  .proj { color:var(--ink2); font-size:10.5px; font-weight:700; text-transform:uppercase;
-          letter-spacing:.7px; padding:12px 14px 4px; }
+  .navbtn { cursor:pointer; color:var(--muted); font:13px var(--mono); flex:none;
+            padding:1px 5px; border-radius:4px; }
+  .navbtn:hover { color:var(--ink); background:var(--surface2); }
+  body.navmin #nav .top { padding:12px 0 8px; border-bottom:none; text-align:center; }
+  body.navmin #nav .top .toprow { justify-content:center; }
+  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist { display:none; }
+  .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
+  .sec { display:flex; align-items:center; gap:4px; padding:11px 14px 3px; cursor:pointer;
+         font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.7px;
+         user-select:none; }
+  .sec .n, .proj .n { color:var(--muted); font-weight:400; margin-left:auto; }
+  .sec.pri-critical { color:var(--bad); }
+  .sec.pri-high { color:var(--warn); }
+  .sec.pri-med { color:var(--accent); }
+  .sec.pri-normal { color:var(--ink2); }
+  .sec.pri-low { color:var(--muted); }
+  .proj { display:flex; align-items:center; gap:4px; color:var(--ink2); font-size:10.5px;
+          font-weight:700; text-transform:uppercase; letter-spacing:.7px;
+          padding:10px 14px 3px; cursor:pointer; user-select:none; }
+  .prig { flex:none; font-size:10px; margin-right:4px; }
+  .prig.p-critical { color:var(--bad); }
+  .prig.p-high { color:var(--warn); }
+  .prig.p-med { color:var(--accent); }
+  .prig.p-low { color:var(--muted); }
   .sess { display:flex; gap:8px; align-items:baseline; padding:7px 14px; cursor:pointer;
           border-left:2px solid transparent; }
   .sess:hover { background:var(--surface2); }
@@ -54,6 +85,15 @@
   .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* context-size gauge: three bars, filled count = size bucket */
+  .ctx { flex:none; display:inline-flex; align-items:flex-end; gap:2px; height:11px;
+         align-self:center; }
+  .ctx i { width:3px; background:var(--border); border-radius:1px; display:block; }
+  .ctx i:nth-child(1){ height:4px; } .ctx i:nth-child(2){ height:7px; }
+  .ctx i:nth-child(3){ height:11px; }
+  .ctx.c1 i:nth-child(1){ background:var(--good); }
+  .ctx.c2 i:nth-child(-n+2){ background:var(--warn); }
+  .ctx.c3 i{ background:var(--bad); }
 
   /* ---- center: chat ---- */
   #main { display:flex; flex-direction:column; min-width:0; }
@@ -170,6 +210,14 @@
   .act:disabled { opacity:.38; cursor:not-allowed; }
   .act.sm { font-size:10px; padding:3px 7px; }
   .act.primary { color:var(--purple); border-color:var(--purple); }
+  .pris { display:inline-flex; gap:4px; align-items:center; }
+  .pris .k-pri { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+                 color:var(--muted); margin:0 2px 0 6px; }
+  .pribtn.p-critical { color:var(--bad); }
+  .pribtn.p-high { color:var(--warn); }
+  .pribtn.p-med { color:var(--accent); }
+  .pribtn.p-low { color:var(--muted); }
+  .pribtn.on { border-color:currentColor; background:var(--surface2); }
   .actmsg { font:10.5px var(--mono); color:var(--muted); margin-left:4px; }
   .actmsg.bad { color:var(--warn); }
   .navtog { float:right; cursor:pointer; color:var(--muted); text-decoration:underline; }
@@ -187,7 +235,23 @@
              word-break:break-word; }
   .cur-warn{ font-size:11.5px; line-height:1.5; color:var(--warn); margin:6px 0;
              border-left:2px solid var(--warn); padding-left:7px; }
-  #angles { margin-top:22px; }
+  /* rail tabs: Angles / Context / Writes */
+  #railtabs { display:flex; gap:2px; margin:18px 0 12px; border-bottom:1px solid var(--border); }
+  .rtab { font:10.5px var(--mono); font-weight:700; text-transform:uppercase;
+          letter-spacing:.6px; color:var(--muted); padding:4px 9px 6px; cursor:pointer;
+          border-bottom:2px solid transparent; margin-bottom:-1px; user-select:none; }
+  .rtab:hover { color:var(--ink); }
+  .rtab.on { color:var(--ink); border-bottom-color:var(--accent); }
+  .rtabpane { display:none; }
+  .rtabpane.on { display:block; }
+  .wr-h { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+          color:var(--muted); margin:14px 0 6px; }
+  .wr { font:11px var(--mono); color:var(--ink2); margin:3px 0; display:flex;
+        gap:7px; align-items:baseline; }
+  .wr .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  .wr .lb { min-width:0; word-break:break-all; }
+  .wr .sz { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
+  #angles { margin-top:2px; }
   .ang-g { margin-bottom:10px; }
   .ang-h { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
            letter-spacing:.6px; color:var(--muted); margin-bottom:3px; }
@@ -301,11 +365,15 @@
 <body>
   <nav id="nav">
     <div class="top">
-      <h1>kmcp · session console</h1>
+      <div class="toprow">
+        <h1>kmcp · session console</h1>
+        <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
+      </div>
       <div class="sub" id="navsub">loading…</div>
     </div>
     <div id="navlist"></div>
   </nav>
+  <div id="navgrip" title="Drag to resize · double-click to reset"></div>
 
   <main id="main">
     <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
@@ -325,8 +393,14 @@
       Click a <b>📖 read</b> in the transcript to inspect what this session
       consumed from the base — mode, size, sections, and a link into /browse.
     </div>
-    <div id="angles"></div>
-    <div id="summary"></div>
+    <div id="railtabs">
+      <span class="rtab" data-t="angles" onclick="setRailTab('angles')">Angles</span>
+      <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
+      <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
+    </div>
+    <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
+    <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
+    <div id="pane-writes" class="rtabpane"><div id="writes"></div></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
@@ -380,6 +454,49 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
   grip.addEventListener("dblclick", () => { setW(DEF); localStorage.setItem(KEY, DEF); });
 })();
 
+/* ---------- expandable left sidebar: drag its right edge, « to collapse ---------- */
+(function(){
+  const WKEY = "csd.consoleNavW", MKEY = "csd.consoleNavMin";
+  const MIN = 200, MAX = 560, DEF = 270, SLIM = 40;
+  const root = document.documentElement;
+  let width = parseInt(localStorage.getItem(WKEY), 10) || DEF;
+  let min = localStorage.getItem(MKEY) === "1";
+  const apply = () => {
+    document.body.classList.toggle("navmin", min);
+    root.style.setProperty("--nav-w",
+      (min ? SLIM : Math.max(MIN, Math.min(MAX, width))) + "px");
+    const b = document.getElementById("navtoggle");
+    b.textContent = min ? "»" : "«";
+    b.title = min ? "Expand sidebar" : "Collapse sidebar";
+  };
+  window.toggleNav = () => {
+    min = !min; localStorage.setItem(MKEY, min ? "1" : "0"); apply();
+  };
+  apply();
+  const grip = document.getElementById("navgrip");
+  let dragging = false;
+  grip.addEventListener("pointerdown", e => {
+    if(min) return;
+    dragging = true; grip.classList.add("drag");
+    document.body.classList.add("raildrag");
+    grip.setPointerCapture(e.pointerId); e.preventDefault();
+  });
+  grip.addEventListener("pointermove", e => {
+    if(dragging){ width = Math.max(MIN, Math.min(MAX, e.clientX)); apply(); }
+  });
+  const end = () => {
+    if(!dragging) return;
+    dragging = false; grip.classList.remove("drag");
+    document.body.classList.remove("raildrag");
+    localStorage.setItem(WKEY, width);
+  };
+  grip.addEventListener("pointerup", end);
+  grip.addEventListener("pointercancel", end);
+  grip.addEventListener("dblclick", () => {
+    width = DEF; localStorage.setItem(WKEY, DEF); apply();
+  });
+})();
+
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
   const box = document.getElementById("raildetail");
@@ -400,31 +517,98 @@ function clock(ts){ if(!ts)return""; const d=new Date(ts);
 function kb(n){ if(n==null)return "—"; if(n<1024)return n+" ch"; return (n/1024).toFixed(1)+" kB"; }
 
 /* ---------- nav ---------- */
-let showArchived = false;
+let showArchived = false, navData = null;
+
+/* Priority buckets, critical first; unprioritized sessions land in the
+   default "normal" bucket, above low (a flagged-low session sinks). */
+const PRI_ORDER = ["critical", "high", "med", "normal", "low"];
+const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
+
+/* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<pri>:<proj>". */
+let navSec = {};
+try { navSec = JSON.parse(localStorage.getItem("csd.consoleNavSec") || "{}"); }
+catch(e){ navSec = {}; }
+function toggleSec(el){
+  const k = el.dataset.k;
+  navSec[k] = !navSec[k];
+  localStorage.setItem("csd.consoleNavSec", JSON.stringify(navSec));
+  renderNav();
+}
+
+function dshort(ts){
+  if(!ts) return "—";
+  const d = new Date(ts);
+  const t = d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
+  return d.toDateString() === new Date().toDateString()
+    ? t : d.toLocaleDateString([], {month:"short", day:"numeric"}) + " " + t;
+}
+
+/* Context size as a bucketed gauge, not printed text; tooltip has the number. */
+function ctxGauge(tok){
+  if(tok == null) return "";
+  const lvl = tok < 70000 ? 1 : tok < 140000 ? 2 : 3;
+  return `<span class="ctx c${lvl}" title="context ≈ ${(tok/1000).toFixed(0)}k tokens (${tok.toLocaleString()})"><i></i><i></i><i></i></span>`;
+}
+
+function sessRow(s, d){
+  const busy = d.summarizing?.[s.session_id] === "running";
+  const pri = PRI_ORDER.includes(s.priority) ? s.priority : null;
+  const pg = pri ? `<span class="prig p-${pri}" title="priority: ${pri}">${PRI_GLYPH[pri]}</span>` : "";
+  const last = new Date(s.mtime*1000).toISOString();
+  const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
+  const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
+  return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
+    <span class="dot ${s.state}" title="${s.state}"></span>
+    <span class="meta">
+      <div class="ttl">${pg}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
+    </span>
+    ${ctxGauge(s.ctx_tokens)}</div>`;
+}
 
 async function loadNav(){
-  let d;
-  try { d = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
+  try { navData = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
   catch(e){ return; }
-  const list = document.getElementById("navlist");
-  const byProj = {};
-  for(const s of d.sessions){ (byProj[s.project_label||s.project] ??= []).push(s); }
+  renderNav();
+}
+
+function renderNav(){
+  if(!navData) return;
+  const d = navData;
+  const buckets = {};        // pri -> proj -> [session]
+  for(const s of d.sessions){
+    const pri = PRI_ORDER.includes(s.priority) ? s.priority : "normal";
+    ((buckets[pri] ??= {})[s.project_label || s.project] ??= []).push(s);
+  }
+  const pris = PRI_ORDER.filter(p => buckets[p]);
+  // Bucket headers only earn their space once something is actually flagged.
+  const showBuckets = pris.some(p => p !== "normal");
   let html = "";
-  for(const [proj, ss] of Object.entries(byProj)){
-    html += `<div class="proj">${esc(proj)}</div>`;
-    for(const s of ss){
-      const busy = d.summarizing?.[s.session_id] === "running";
-      html += `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
-        <span class="dot ${s.state}" title="${s.state}"></span>
-        <span class="meta">
-          <div class="ttl">${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
-          <div class="sub">${esc(s.session_id.slice(0,8))} · ${s.branch?esc(s.branch)+" · ":""}${rel(new Date(s.mtime*1000).toISOString())}${s.agents?` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>`:""}</div>
-        </span></div>`;
+  const projSet = new Set();
+  for(const pri of pris){
+    const projs = Object.entries(buckets[pri]);
+    projs.forEach(([p]) => projSet.add(p));
+    if(showBuckets){
+      const bkey = "b:" + pri, bcol = !!navSec[bkey];
+      const n = projs.reduce((a, [,ss]) => a + ss.length, 0);
+      html += `<div class="sec pri-${pri}" data-k="${esc(bkey)}" onclick="toggleSec(this)">
+        <span class="tw">${bcol?"▸":"▾"}</span>${PRI_GLYPH[pri]||"·"} ${pri==="normal"?"unprioritized":pri}
+        <span class="n">${n}</span></div>`;
+      if(bcol) continue;
+    }
+    for(const [proj, ss] of projs){
+      const pkey = "p:" + pri + ":" + proj, pcol = !!navSec[pkey];
+      html += `<div class="proj" data-k="${esc(pkey)}" onclick="toggleSec(this)">
+        <span class="tw">${pcol?"▸":"▾"}</span>${esc(proj)}
+        ${pcol?`<span class="n">${ss.length}</span>`:""}</div>`;
+      if(pcol) continue;
+      for(const s of ss) html += sessRow(s, d);
     }
   }
-  list.innerHTML = html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+  document.getElementById("navlist").innerHTML =
+    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
   document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${Object.keys(byProj).length} projects
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${projSet.size} projects
      <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
 }
 
@@ -444,7 +628,8 @@ async function refreshSession(scrollBottom){
   let s; try { s = await (await fetch("/api/session?id="+curId)).json(); } catch(e){ return; }
   if(s.error) return;
   curSession = s;
-  renderHeader(s); renderStream(s); renderAngles(s); renderSummary(s);
+  renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
+  renderWrites(s); renderSummary(s);
   const st = document.getElementById("stream");
   if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
   syncReplyStatus(s);
@@ -525,6 +710,12 @@ function renderHeader(s){
       <button class="act" onclick="act('summarize')"
         title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
       <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <span class="pris"><span class="k-pri">priority</span>
+        ${["critical","high","med","low"].map(p =>
+          `<button class="act sm pribtn p-${p} ${s.priority===p?"on":""}"
+             title="${s.priority===p?"clear priority":"flag "+p}"
+             onclick="setPriority('${s.priority===p?"":p}')">${PRI_GLYPH[p]} ${p}</button>`).join("")}
+      </span>
       <span id="actmsg" class="actmsg"></span>
     </div>`;
   const running = s.state==="running";
@@ -759,9 +950,48 @@ async function mine(){
   actmsg("mined"); await refreshSession(false);
 }
 
+/* Flag/clear a session priority; the sidebar regroups on the next render. */
+async function setPriority(p){
+  if(!curSession) return;
+  actmsg("priority…");
+  const [ok, d] = await post("/api/priority",
+    {session_id: curId, priority: p || null});
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(p ? "priority " + p : "priority cleared");
+  await refreshSession(false); loadNav();
+}
+
 /* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
 const ANGLE_GLYPH = {direction:"→", events:"◆", agents:"⇲", files:"F", kmcp:"W",
                      commands:"$", git:"⎇", errors:"!", knowledge:"K", metrics:"#"};
+
+/* Rail tabs: Angles | Context | Writes. The writes-shaped angle groups
+   (files = file writes, kmcp = kmcp writes) live on the Writes tab; the
+   context/usage panels live on Context; everything else stays on Angles.
+   Active tab persists like the sidebar collapse states. */
+const WRITE_ANGLES = new Set(["files", "kmcp"]);
+let railTab = localStorage.getItem("csd.consoleRailTab") || "angles";
+function setRailTab(t){
+  railTab = t;
+  localStorage.setItem("csd.consoleRailTab", t);
+  applyRailTab();
+}
+function applyRailTab(){
+  document.querySelectorAll("#railtabs .rtab").forEach(el =>
+    el.classList.toggle("on", el.dataset.t === railTab));
+  for(const t of ["angles","context","writes"])
+    document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
+}
+applyRailTab();
+
+function angGroups(gs){
+  return gs.map(g=>`
+    <div class="ang-g">
+      <div class="ang-h">${esc(ANGLE_GLYPH[g.angle]||"·")} ${esc(g.angle)}</div>
+      ${g.items.map(i=>`<div class="ang-i" onclick="showAngle('${esc(i.id)}')">
+        <span class="ang-id">${esc(i.id)}</span> ${esc(i.headline)}</div>`).join("")}
+    </div>`).join("");
+}
 
 function renderAngles(s){
   const el = document.getElementById("angles");
@@ -774,13 +1004,62 @@ function renderAngles(s){
   }
   const age = r.mined_age_s==null ? "" :
     `<span class="k" style="float:right">mined ${rel(Date.now()-r.mined_age_s*1000)}</span>`;
-  const groups = r.angles.map(g=>`
-    <div class="ang-g">
-      <div class="ang-h">${esc(ANGLE_GLYPH[g.angle]||"·")} ${esc(g.angle)}</div>
-      ${g.items.map(i=>`<div class="ang-i" onclick="showAngle('${esc(i.id)}')">
-        <span class="ang-id">${esc(i.id)}</span> ${esc(i.headline)}</div>`).join("")}
-    </div>`).join("");
-  el.innerHTML = `<h3>Turn angles ${age}</h3>${groups}`;
+  const gs = r.angles.filter(g => !WRITE_ANGLES.has(g.angle));
+  el.innerHTML = `<h3>Turn angles ${age}</h3>` +
+    (gs.length ? angGroups(gs)
+               : `<div class="rl-empty">nothing beyond writes this turn —
+                  see the Writes tab.</div>`);
+}
+
+/* Context tab: the token/size story for this session. */
+function renderContext(s){
+  const el = document.getElementById("ctxinfo");
+  const tok = s.ctx_tokens;
+  const pct = tok != null ? Math.min(100, Math.round(tok/200000*100)) : null;
+  el.innerHTML = `<h3>Context</h3>
+    <div class="kv"><span class="k">window</span>
+      <span class="v">${tok!=null ? `${ctxGauge(tok)} ≈${(tok/1000).toFixed(0)}k tok · ${pct}%` : "—"}</span></div>
+    <div class="kv"><span class="k">model</span>
+      <span class="v">${esc((s.model||"—").replace(/^claude-/,""))}</span></div>
+    <div class="kv"><span class="k">events</span>
+      <span class="v">${s.counts?.events ?? "—"}</span></div>
+    <div class="kv"><span class="k">kmcp reads</span>
+      <span class="v">${s.counts?.reads ?? 0} · ${s.counts?.searches ?? 0} searches</span></div>
+    ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}`;
+}
+
+/* Writes tab: the files/kmcp angle groups + every write-shaped tool call
+   pulled from the event stream itself. */
+const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
+const KMCP_WRITE_BASES = new Set(["create_entry", "update_entry", "patch_content",
+  "import_entries", "import_lessons", "add_entry_tag", "create_relationship",
+  "delete_relationship", "move_entry", "rename_entry", "delete_entry",
+  "upload_file", "stage_template", "update_application", "create_application"]);
+
+function renderWrites(s){
+  const el = document.getElementById("writes");
+  const gs = (s.rail?.angles || []).filter(g => WRITE_ANGLES.has(g.angle));
+  const fileWr = [], kmcpWr = [];
+  for(const e of s.events || []){
+    for(const t of e.tools || []){
+      if(typeof t !== "object" || !t.name) continue;
+      if(FILE_WRITE_TOOLS.has(t.name)) fileWr.push(t);
+      else if(t.name.startsWith("mcp__") &&
+              KMCP_WRITE_BASES.has(t.name.replace(/^mcp__.+__/,""))) kmcpWr.push(t);
+    }
+  }
+  const wrRows = ws => ws.map(t=>`<div class="wr">
+    <span class="tg">${t.is_error?"✗":"✎"}</span>
+    <span class="lb" title="${esc(t.detail||"")}">${esc(t.label||t.name)}</span>
+    ${t.chars!=null?`<span class="sz">${kb(t.chars)}</span>`:""}</div>`).join("");
+  const parts = [];
+  if(gs.length) parts.push(angGroups(gs));
+  if(fileWr.length) parts.push(`<div class="wr-h">file writes · ${fileWr.length}</div>${wrRows(fileWr)}`);
+  if(kmcpWr.length) parts.push(`<div class="wr-h">kmcp writes · ${kmcpWr.length}</div>${wrRows(kmcpWr)}`);
+  el.innerHTML = `<h3>Writes</h3>` +
+    (parts.length ? parts.join("")
+                  : `<div class="rl-empty">no file or kmcp writes seen in this
+                     session's transcript.</div>`);
 }
 
 async function showAngle(itemId){

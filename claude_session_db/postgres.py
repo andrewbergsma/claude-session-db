@@ -509,7 +509,11 @@ END $$;
 
 VIEWS_SQL = """
 -- Session overview
-CREATE OR REPLACE VIEW v_session_overview AS
+-- DROP first: the column list grew (own_* / subagent columns), which CREATE OR
+-- REPLACE cannot reconcile against an older definition. CASCADE takes the
+-- dependent v_unsummarized with it — recreated at the bottom of this script.
+DROP VIEW IF EXISTS v_session_overview CASCADE;
+CREATE VIEW v_session_overview AS
 SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        COALESCE(s.custom_title, s.ai_title) AS title,
        s.first_prompt, s.is_subagent, s.agent_name,

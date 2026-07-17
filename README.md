@@ -75,8 +75,7 @@ csd recent 10
 | `csd angles sessions` | Session-management lens: open-thread inventory + delta-after-summary verdicts |
 | `csd angles digest REF` | Per-session digest (`--delta` for the post-summary tail, `--head/--tail/--full`) |
 | `csd angles-watch` | Headless miner: keep the angles state dir warm (serves nothing) |
-| `csd angles-serve` | Ambient LAN dashboard: watcher + one row per live session, drill into subagents |
-| `csd console` | Reply-capable session console: chat + kmcp reads + angle rail (127.0.0.1:4462) |
+| `csd console` | The web UI: reply-capable session console — chat, kmcp reads, angle rail, threads lens, subagent drill-down (127.0.0.1:4462; token-authed on LAN binds) |
 | `csd backfill-subagents` | One-shot: materialize child session rows for already-ingested sidechains |
 | `csd dsn` | Print the connection target (password redacted) |
 | `csd open` | Interactive shell (`pgcli`/`psql`) |
@@ -134,8 +133,33 @@ base-dir lookup would miss), falling back to a glob across
 `~/.claude/projects/*/<id>.jsonl`. Everything is read-only over the archive,
 the knowledge DB, and the transcripts; an unreachable DB or missing
 transcript degrades that row to `unknown` instead of failing the lens.
-`csd angles-serve` exposes the same lens as a **sessions** tab
-(`/api/mgmt`, `/api/digest/<sid>?delta=1`), with row-click digests.
+The session console exposes the same lens as its **threads** overlay
+(`/api/mgmt`, `/api/digest?id=<sid>&delta=1`), with row-click digests.
+
+## 🖥️ Session console (`csd console`) — the single web UI
+
+The one web surface. Reply-capable: it renders each session's transcript as a
+chronological event stream (chat turns, inline kmcp reads/searches joined to
+their tool_results, tool rows, choice cards), the latest turn's angle rail
+(mined out-of-band by `csd angles-watch`), the **threads** overlay
+(open-thread inventory + delta-after-summary digests), and **subagent
+navigation** — agents badges in the nav, Agent rows linking to child
+(`<parent>:<agentId>`) focus views, and a spawn-anchor back-link into the
+parent. Answer resumes a session (`claude -p --resume`, two-writer guarded);
+Fork branches it; Stop/Archive/Summarize act on it.
+
+```bash
+csd console                                  # 127.0.0.1:4462, no auth needed
+csd console --host 0.0.0.0 --port 8791       # LAN bind — token auth REQUIRED
+CSD_CONSOLE_TOKEN=<secret> csd console --host 0.0.0.0   # pin the token
+```
+
+On a non-loopback bind a shared token is required (auto-generated and printed
+at startup if unset; append `?token=<secret>` once — a cookie keeps you in).
+This is not a read-only surface: `/api/answer` and `/api/fork` spawn
+`claude -p` processes, so an unauthenticated LAN bind would be remote code
+execution; `--no-auth` exists but warns loudly and should never leave a
+trusted network.
 
 ## 🏗️ Architecture
 

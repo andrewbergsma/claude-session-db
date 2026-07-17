@@ -95,6 +95,27 @@ def ingest(ctx: click.Context, rebuild: bool, force: bool, quiet: bool) -> None:
     click.echo(stats)
 
 
+@main.command(name="backfill-subagents")
+@click.pass_context
+def backfill_subagents(ctx: click.Context) -> None:
+    """One-shot: materialize child session rows for already-ingested sidechains.
+
+    Historic ingests inserted sidechain MESSAGES under the parent session but
+    never created child session rows (sessions.is_subagent was dead). This
+    derives one child row per (parent, agent_id) from rows already archived —
+    meta.json sidecars where still on disk, else the Agent tool_result join —
+    then recomputes aggregates. Idempotent; safe to re-run. Ongoing ingest keeps
+    child rows current from here on.
+    """
+    from .sync import backfill_subagent_sessions
+    with SessionArchive(ctx.obj["dsn"]) as a:
+        a.initialize()
+        res = backfill_subagent_sessions(a, log=click.echo)
+    click.echo(f"backfilled {res['children']} child sessions "
+               f"({res['meta_hits']} named via meta.json, "
+               f"{res['result_hits']} via Agent-result join)")
+
+
 # Idle threshold (minutes) above which a session is treated as quiesced ("done").
 # Validated 2026-06-06: at 10m only 1.03% of genuine intra-session pauses exceed
 # it. See claudecode:task/claude-session-db/validate/quiescence-threshold.

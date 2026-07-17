@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 5  # + summary_state pre-LLM gate table & v_unsummarized view
+SCHEMA_VERSION = 6  # + subagent visibility: idx_messages_agent, child session rows
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -214,6 +214,9 @@ CREATE INDEX IF NOT EXISTS idx_messages_source_file ON messages(source_file);
 CREATE INDEX IF NOT EXISTS idx_messages_attr_skill ON messages(attribution_skill);
 CREATE INDEX IF NOT EXISTS idx_messages_attr_mcp ON messages(attribution_mcp_server);
 CREATE INDEX IF NOT EXISTS idx_messages_src_tool_asst ON messages(source_tool_assistant_uuid);
+-- Partial: ~40% of messages are sidechain rows carrying agent_id; per-agent
+-- probes (child aggregates, EXISTS checks) seq-scanned without this.
+CREATE INDEX IF NOT EXISTS idx_messages_agent ON messages(agent_id) WHERE agent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS content_blocks (
     block_id    BIGSERIAL PRIMARY KEY,
@@ -891,29 +894,44 @@ class SessionArchive:
         conn.commit()
         return pid
 
-    def upsert_session(self, data: dict) -> None:
-        """Insert/update a session row. Only non-None values overwrite existing."""
-        conn = self.connect()
-        cols = [
-            "session_id", "project_id", "file_path", "is_subagent", "parent_session_id",
-            "agent_id", "ai_title", "custom_title", "first_prompt", "last_prompt",
-            "last_prompt_leaf_uuid", "permission_mode", "mode", "bridge_session_id",
-            "agent_name", "git_branch", "cwd", "cc_version", "entrypoint",
-            "created_at", "modified_at", "message_count",
-        ]
-        vals = [scrub(data.get(c)) for c in cols]
+    _SESSION_COLS = [
+        "session_id", "project_id", "file_path", "is_subagent", "parent_session_id",
+        "agent_id", "ai_title", "custom_title", "first_prompt", "last_prompt",
+        "last_prompt_leaf_uuid", "permission_mode", "mode", "bridge_session_id",
+        "agent_name", "git_branch", "cwd", "cc_version", "entrypoint",
+        "created_at", "modified_at", "message_count",
+    ]
+
+    def _session_upsert_sql(self) -> str:
+        cols = self._SESSION_COLS
         # COALESCE(EXCLUDED.col, sessions.col) so a later file lacking a field
         # doesn't wipe a value an earlier file set.
         updates = ", ".join(
             f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})" for c in cols if c != "session_id"
         )
         placeholders = ", ".join(["%s"] * len(cols))
+        return (f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
+                f"ON CONFLICT (session_id) DO UPDATE SET {updates}")
+
+    def upsert_session(self, data: dict) -> None:
+        """Insert/update a session row. Only non-None values overwrite existing."""
+        conn = self.connect()
+        vals = [scrub(data.get(c)) for c in self._SESSION_COLS]
         with conn.cursor() as cur:
-            cur.execute(
-                f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
-                f"ON CONFLICT (session_id) DO UPDATE SET {updates}",
-                vals,
-            )
+            cur.execute(self._session_upsert_sql(), vals)
+        conn.commit()
+
+    def upsert_sessions(self, rows: list[dict]) -> None:
+        """Batched session upsert (same COALESCE semantics as upsert_session).
+        One executemany (psycopg3 pipelines it) — used by the subagent backfill
+        so ~8K child rows don't cost 8K round-trips."""
+        if not rows:
+            return
+        conn = self.connect()
+        sql = self._session_upsert_sql()
+        with conn.cursor() as cur:
+            cur.executemany(sql, [[scrub(r.get(c)) for c in self._SESSION_COLS]
+                                  for r in rows])
         conn.commit()
 
     # -- batched inserts ----------------------------------------------------

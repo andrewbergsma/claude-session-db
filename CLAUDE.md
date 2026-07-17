@@ -41,7 +41,9 @@ csd summarize-health    # Watcher for the summarize launchd timer (DB-free)
 csd mark-summarized     # Stamp a session's watermark after a verified kmcp write
 csd angles              # Pull-based turn mining: ID-addressable headlines for one turn
 csd angles show ID      # Print the persisted detail behind a headline
-csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session
+csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
+csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
+csd angles-serve        # Ambient LAN dashboard: watcher + one row per live session (+ sessions tab)
 csd usage               # Dual-account Claude Max quota report (live, all vaulted accounts)
 csd usage add-account   # Vault the currently logged-in account (run once per account)
 csd usage use LABEL     # Switch the active account (replaces the interactive /login swap)
@@ -104,6 +106,35 @@ detail persists under the state dir (`csd angles show F1`). Curation is the
 operator's next message ("track E1, load K1, task D1") — nothing is written to
 kmcp by the command itself. Doctrine: pull not push; extraction is code, models
 only judge. A failed probe degrades to `(unavailable)`, never blocks the pull.
+
+## Session management (`csd angles sessions` / `csd angles digest`)
+
+The open-thread inventory (`session_mgmt.py`): one row per recent main
+session with TRUE last activity = `max(messages.ts)` — NEVER transcript mtime
+(bulk file touches create clusters of identical mtimes; mtime only ever lies
+toward "more recent", so `sessions.modified_at` is used solely as a superset
+window filter). Columns: short id, project, branch, last activity, msgs,
+summary_state classification, verdict LIVE (last msg ≤ ~15 min) / OPEN /
+OPEN-delta / CLOSED.
+
+**Delta-after-summary**: for summarized sessions, the transcript tail after
+the summary watermark (resolution order: `leaf_uuid_at_summary` →
+`message_count_at_summary` → kmcp session entry `created_at` from the
+knowledge DB) is classified deterministically (code, no LLM): `none` /
+`confirmation_only` (short confirm prompts, light chatter) /
+`auto_compaction_only` (isCompactSummary + command wrappers) / `real`
+(file/kmcp/git mutations, substantive prompts, ≥8 tool calls, or ≥2000 chars
+of tail narration) → verdict `OPEN-delta`, needs re-capture. `csd angles
+digest REF --delta` renders exactly that tail; plain digests default to a
+head 40 / tail 120 record window (`--full` to disable) since full transcripts
+reach 7.7MB. Transcript resolution is worktree-aware: `sessions.file_path`
+first, then glob `~/.claude/projects/*/<id>.jsonl`.
+
+Doctrine (same as reconcile.py): truth from the ledger not the narrator;
+source never mutated (read-only over archive + knowledge DB + transcripts,
+no new state tables, no kmcp writes); DB/transcript failures degrade a row to
+`unknown`, never crash the lens. `csd angles-serve` exposes the lens as a
+"sessions" tab (`/api/mgmt`, `/api/digest/<sid>`), polled at 30s.
 
 ## Sweep reliability & recovery
 

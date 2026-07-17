@@ -317,6 +317,9 @@ document.addEventListener("keydown", e => {
     clearRail();
 });
 let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
+/* While an answer we dispatched is running, we track it so #cstatus reflects
+   the LIVE run (elapsed timer + completion) instead of freezing on "running". */
+let awaitReply = null, replyTicker = null;
 
 function esc(x){ return String(x??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function rel(ts){ const s=Math.max(0,(Date.now()-new Date(ts).getTime())/1000);
@@ -359,6 +362,7 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 /* ---------- session detail ---------- */
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
+  clearAwait(); document.getElementById("cstatus").textContent = "";
   document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
   await refreshSession(true);
   loadNav();
@@ -372,6 +376,43 @@ async function refreshSession(scrollBottom){
   renderHeader(s); renderStream(s); renderAngles(s); renderSummary(s);
   const st = document.getElementById("stream");
   if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
+  syncReplyStatus(s);
+}
+
+/* ---------- live status for a dispatched answer ---------- */
+function clearAwait(){ awaitReply = null; clearInterval(replyTicker); replyTicker = null; }
+
+function startAwait(){
+  awaitReply = { t0: Date.now(), baseEvents: curSession.events.length, sid: curId };
+  clearInterval(replyTicker);
+  replyTicker = setInterval(tickRunning, 1000);
+  tickRunning();
+}
+
+/* 1s ticker so the operator sees the turn is alive (poll is only every 3s). */
+function tickRunning(){
+  if(!awaitReply){ clearInterval(replyTicker); replyTicker = null; return; }
+  const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
+  document.getElementById("cstatus").textContent =
+    `⏳ headless turn running — ${secs}s · Esc-safe, keep this session open`;
+}
+
+/* On each poll: if the run we spawned is no longer live, resolve the status
+   from whether a new assistant turn actually landed. */
+function syncReplyStatus(s){
+  if(!awaitReply || awaitReply.sid !== curId) return;
+  const live = s.stoppable || s.state === "running";
+  if(live) return;                              // still running — ticker keeps counting
+  if(s.events.length <= awaitReply.baseEvents &&
+     Date.now() - awaitReply.t0 < 4000) return; // give the run a beat to start writing
+  const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
+  const last = s.events[s.events.length - 1] || {};
+  const landed = s.events.length > awaitReply.baseEvents && last.kind === "assistant";
+  clearAwait();
+  const st = document.getElementById("cstatus");
+  st.textContent = landed ? `✓ reply received (${secs}s)`
+                          : `⚠ turn ended (${secs}s) — no reply appended`;
+  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")) st.textContent = ""; }, 8000);
 }
 
 function renderHeader(s){
@@ -780,7 +821,12 @@ async function send(isFork){
       : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
       : d.action==="fork" ? "⑂ forked from end (headless)"
       : "✓ answer sent — headless turn running";
-    if(!d.error) inp.value="";
+    if(!d.error){
+      inp.value = "";
+      // A plain answer resumes THIS session's file, so we can track it live.
+      // Forks write a new session file — leave their one-shot status as-is.
+      if(d.action === "answer"){ startAwait(); refreshSession(false); }
+    }
   } catch(e){ st.textContent = "✗ "+e; }
 }
 

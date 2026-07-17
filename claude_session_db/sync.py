@@ -28,9 +28,16 @@ from .jsonl_records import (
     ToolUseBlock,
 )
 from .postgres import SessionArchive, resolve_dsn
-from .subagent import load_external_tool_results
+from .subagent import load_external_tool_results, read_agent_meta
 from .tool_tldr import tldr_result
 from .transcript_analyzer import classify_error
+
+
+# Volatile background-task outputs live at
+# /private/tmp/claude-<uid>/<proj-encoded>/<session-uuid>/tasks/<task>.output
+# and are wiped on reboot — the sweep below is their only durable copy.
+TASKS_TMP_BASE = Path("/private/tmp")
+TASK_OUTPUT_MAX_BYTES = 5 * 1024 * 1024
 
 
 def decode_project_path(encoded: str) -> str:
@@ -55,6 +62,7 @@ class SyncStats:
     pr_links: int = 0
     agent_tasks: int = 0
     overflow_results: int = 0
+    task_outputs: int = 0
     errors: int = 0
 
     def __str__(self) -> str:
@@ -69,6 +77,7 @@ class SyncStats:
             f"  System events: {self.system_events:,}\n"
             f"  Queue ops: {self.queue_operations:,}  File snapshots: {self.file_snapshots:,}\n"
             f"  PR links: {self.pr_links}  Agent tasks: {self.agent_tasks}\n"
+            f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
 
@@ -79,7 +88,7 @@ class SyncStats:
             ("results", self.tool_results), ("attach", self.attachments),
             ("sysevents", self.system_events), ("queueops", self.queue_operations),
             ("snapshots", self.file_snapshots), ("prs", self.pr_links),
-            ("agents", self.agent_tasks),
+            ("agents", self.agent_tasks), ("taskout", self.task_outputs),
         ]
         parts = [f"{n:,} {label}" for label, n in counts if n]
         body = ", ".join(parts) if parts else "no new records"
@@ -145,6 +154,10 @@ class SessionSync:
                         stats.files_synced += 1
                     else:
                         stats.files_skipped += 1
+                    if not is_sub:
+                        # Task outputs are swept even for mtime-skipped sessions:
+                        # a background task can finish after the JSONL settles.
+                        self._sweep_task_outputs(path.stem, path.parent.name, stats)
                 except Exception as e:  # noqa: BLE001 — keep going on per-file errors
                     # Roll back the aborted transaction so the connection recovers
                     # and subsequent files aren't poisoned by InFailedSqlTransaction.
@@ -202,16 +215,69 @@ class SessionSync:
 
         self._insert_records(records, source_file, owning_session_id, overflow, stats)
 
-        # A main file defines a session row (subagent messages roll up into it)
+        # A main file defines a session row (subagent messages roll up into it);
+        # a subagent file additionally defines a CHILD session row keyed
+        # "<parent>:<agent_id>" so the sidechain is a navigable identity.
         if not is_subagent:
             project_id = self._project_id_for(project_encoded)
             self._upsert_session(records, owning_session_id, project_id, source_file, st)
+        else:
+            self._upsert_subagent_session(records, path, owning_session_id,
+                                          project_encoded, source_file, st)
 
         self.archive.commit()
 
         record_count = sum(len(v) for v in records.values())
         self.archive.update_sync_state(source_file, mtime_ns, record_count, st.st_size)
         return True
+
+    def _sweep_task_outputs(self, session_id: str, project_encoded: str,
+                            stats: SyncStats) -> None:
+        """Sweep /private/tmp/claude-*/<proj>/<sid>/tasks/*.output into the
+        archive — the existing external-overflow capture pattern applied to the
+        VOLATILE task-output files (wiped on reboot; this is the only durable
+        copy). Verbatim, keyed (session_id, task filename), idempotent by
+        mtime, bounded at TASK_OUTPUT_MAX_BYTES with a truncation note.
+        Symlinks resolving into ~/.claude/projects are skipped: their target IS
+        a subagent transcript the archive already holds losslessly."""
+        dirs = list(TASKS_TMP_BASE.glob(
+            f"claude-*/{project_encoded}/{session_id}/tasks"))
+        if not dirs:
+            return
+        known = self.archive.get_task_output_mtimes(session_id)
+        for d in dirs:
+            for f in sorted(d.glob("*.output")):
+                try:
+                    if f.is_symlink() and self.projects_dir in f.resolve().parents:
+                        continue
+                    st = f.stat()
+                except OSError:
+                    continue
+                if known.get(f.name) == st.st_mtime_ns:
+                    continue
+                truncated = st.st_size > TASK_OUTPUT_MAX_BYTES
+                try:
+                    with open(f, "rb") as fh:
+                        data = fh.read(TASK_OUTPUT_MAX_BYTES)
+                except OSError:
+                    continue
+                content = data.decode("utf-8", errors="replace")
+                if truncated:
+                    content += (f"\n\n[csd: truncated at {TASK_OUTPUT_MAX_BYTES}"
+                                f" of {st.st_size} bytes]")
+                self.log(f"  task output {session_id[:8]}/{f.name}"
+                         f" ({st.st_size:,}b{' truncated' if truncated else ''})")
+                self.archive.upsert_task_output({
+                    "session_id": session_id,
+                    "task_name": f.name,
+                    "content": content,
+                    "char_count": len(content),
+                    "truncated": truncated,
+                    "file_size": st.st_size,
+                    "file_mtime_ns": st.st_mtime_ns,
+                    "source_path": str(f),
+                })
+                stats.task_outputs += 1
 
     # -- record -> row builders --------------------------------------------
 
@@ -513,6 +579,53 @@ class SessionSync:
 
     # -- session metadata derivation ---------------------------------------
 
+    def _upsert_subagent_session(self, records: dict, path: Path,
+                                 parent_session_id: str, project_encoded: str,
+                                 source_file: str, st) -> None:
+        """Upsert the CHILD session row for one sidechain file.
+
+        Keyed "<parent_session_id>:<agent_id>" — sidechain MESSAGES stay under
+        the parent session_id exactly as before (source never re-shaped); the
+        child row is the navigable identity. agentType/description come from the
+        adjacent meta.json sidecar (tolerated absent on older sessions);
+        aggregates are filled by recompute_session_aggregates.
+        """
+        from datetime import datetime, timezone
+
+        if not path.stem.startswith("agent-"):
+            return  # workflows journal.jsonl etc. — lifecycle records, no identity
+        agent_id = path.stem[len("agent-"):]
+        meta = read_agent_meta(path)
+
+        users = records.get("user", [])
+        assts = records.get("assistant", [])
+        # The sidechain seed prompt (the Agent dispatch prompt) is the child's
+        # first_prompt — the same shape as a main session's first real prompt.
+        first_prompt = next((u.prompt_text for u in users
+                             if u.is_direct_prompt and not u.is_meta and u.prompt_text),
+                            None)
+        ctx = next((m for m in users + assts), None)
+        ts_list = [m.timestamp for m in users + assts if getattr(m, "timestamp", None)]
+
+        self.archive.upsert_session({
+            "session_id": f"{parent_session_id}:{agent_id}",
+            "project_id": self._project_id_for(project_encoded),
+            "file_path": source_file,
+            "is_subagent": True,
+            "parent_session_id": parent_session_id,
+            "agent_id": agent_id,
+            "agent_name": meta.get("agentType"),
+            "custom_title": meta.get("description"),
+            "first_prompt": first_prompt,
+            "git_branch": ctx.git_branch if ctx else None,
+            "cwd": ctx.cwd if ctx else None,
+            "cc_version": ctx.version if ctx else None,
+            "entrypoint": getattr(ctx, "entrypoint", None) if ctx else None,
+            "created_at": min(ts_list) if ts_list else None,
+            "modified_at": datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
+            "message_count": len(users) + len(assts),
+        })
+
     def _upsert_session(self, records: dict, session_id: str, project_id: int,
                        source_file: str, st) -> None:
         from datetime import datetime, timezone
@@ -567,3 +680,110 @@ class SessionSync:
             "modified_at": modified_at,
             "message_count": len(users) + len(assts),
         })
+
+
+# --- one-shot backfill -------------------------------------------------------
+
+_BF_CHILDREN_SQL = """
+    SELECT m.session_id AS parent, m.agent_id,
+           max(m.source_file) FILTER (WHERE m.source_file LIKE '%%/subagents/%%')
+               AS sub_file,
+           max(m.source_file) AS any_file,
+           min(m.ts) AS created_at, max(m.ts) AS modified_at,
+           count(*) AS message_count
+    FROM messages m
+    WHERE m.is_sidechain AND m.agent_id IS NOT NULL
+    GROUP BY 1, 2
+"""
+
+_BF_FIRST_PROMPT_SQL = """
+    SELECT DISTINCT ON (session_id, agent_id)
+           session_id AS parent, agent_id, prompt_text,
+           cwd, git_branch, cc_version, entrypoint
+    FROM messages
+    WHERE is_sidechain AND agent_id IS NOT NULL
+      AND message_type = 'prompt' AND NOT is_meta AND prompt_text IS NOT NULL
+    ORDER BY session_id, agent_id, ts
+"""
+
+# Parent -> child linkage from the ledger: the Agent tool_use joined to its
+# tool_result, whose tool_use_result JSONB carries {agentId, agentType, ...}.
+_BF_AGENT_RESULTS_SQL = """
+    SELECT cb.session_id AS parent,
+           tr.tool_use_result->>'agentId' AS agent_id,
+           coalesce(tr.tool_use_result->>'agentType',
+                    cb.tool_input->>'subagent_type') AS agent_type,
+           cb.tool_input->>'description' AS description
+    FROM content_blocks cb
+    JOIN tool_results tr ON tr.tool_use_id = cb.tool_use_id
+    WHERE cb.block_type = 'tool_use' AND cb.tool_name = 'Agent'
+      AND tr.tool_use_result ? 'agentId'
+"""
+
+
+def backfill_subagent_sessions(archive: SessionArchive, log=None) -> dict:
+    """Materialize child session rows for ALL already-ingested sidechain files.
+
+    One-shot, idempotent (`csd backfill-subagents`). No re-ingest: everything is
+    derived from rows already in the archive — messages define the child set,
+    the adjacent meta.json sidecar (where still on disk) supplies
+    agentType/description, else the Agent tool_result join does. Ends with a
+    recompute so aggregates land on the new rows.
+    """
+    emit = log if callable(log) else (lambda _m: None)
+
+    emit("scanning archived sidechain messages…")
+    children = archive.query(_BF_CHILDREN_SQL)
+    emit(f"  {len(children)} distinct (parent, agent_id) pairs")
+
+    seeds = {(r["parent"], r["agent_id"]): r
+             for r in archive.query(_BF_FIRST_PROMPT_SQL)}
+    agent_results = {(r["parent"], r["agent_id"]): r
+                     for r in archive.query(_BF_AGENT_RESULTS_SQL)
+                     if r["agent_id"]}
+    parents = {r["session_id"]: r["project_id"] for r in archive.query(
+        "SELECT session_id, project_id FROM sessions WHERE NOT is_subagent")}
+
+    rows: list[dict] = []
+    meta_hits = result_hits = 0
+    for c in children:
+        parent, agent_id = c["parent"], c["agent_id"]
+        source_file = c["sub_file"] or c["any_file"]
+        meta = read_agent_meta(Path(source_file)) if source_file else {}
+        agent_name = meta.get("agentType")
+        description = meta.get("description")
+        if agent_name or description:
+            meta_hits += 1
+        else:
+            hit = agent_results.get((parent, agent_id))
+            if hit:
+                agent_name = hit["agent_type"]
+                description = hit["description"]
+                result_hits += 1
+        seed = seeds.get((parent, agent_id), {})
+        rows.append({
+            "session_id": f"{parent}:{agent_id}",
+            "project_id": parents.get(parent),
+            "file_path": source_file,
+            "is_subagent": True,
+            "parent_session_id": parent,
+            "agent_id": agent_id,
+            "agent_name": agent_name,
+            "custom_title": description,
+            "first_prompt": seed.get("prompt_text"),
+            "cwd": seed.get("cwd"),
+            "git_branch": seed.get("git_branch"),
+            "cc_version": seed.get("cc_version"),
+            "entrypoint": seed.get("entrypoint"),
+            "created_at": c["created_at"],
+            "modified_at": c["modified_at"],
+            "message_count": c["message_count"],
+        })
+
+    emit(f"upserting {len(rows)} child session rows "
+         f"({meta_hits} via meta.json, {result_hits} via Agent-result join)…")
+    archive.upsert_sessions(rows)
+    emit("recomputing session aggregates…")
+    archive.recompute_session_aggregates()
+    return {"children": len(rows), "meta_hits": meta_hits,
+            "result_hits": result_hits}

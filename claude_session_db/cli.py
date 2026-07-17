@@ -95,6 +95,27 @@ def ingest(ctx: click.Context, rebuild: bool, force: bool, quiet: bool) -> None:
     click.echo(stats)
 
 
+@main.command(name="backfill-subagents")
+@click.pass_context
+def backfill_subagents(ctx: click.Context) -> None:
+    """One-shot: materialize child session rows for already-ingested sidechains.
+
+    Historic ingests inserted sidechain MESSAGES under the parent session but
+    never created child session rows (sessions.is_subagent was dead). This
+    derives one child row per (parent, agent_id) from rows already archived —
+    meta.json sidecars where still on disk, else the Agent tool_result join —
+    then recomputes aggregates. Idempotent; safe to re-run. Ongoing ingest keeps
+    child rows current from here on.
+    """
+    from .sync import backfill_subagent_sessions
+    with SessionArchive(ctx.obj["dsn"]) as a:
+        a.initialize()
+        res = backfill_subagent_sessions(a, log=click.echo)
+    click.echo(f"backfilled {res['children']} child sessions "
+               f"({res['meta_hits']} named via meta.json, "
+               f"{res['result_hits']} via Agent-result join)")
+
+
 # Idle threshold (minutes) above which a session is treated as quiesced ("done").
 # Validated 2026-06-06: at 10m only 1.03% of genuine intra-session pauses exceed
 # it. See claudecode:task/claude-session-db/validate/quiescence-threshold.
@@ -510,6 +531,18 @@ def _fmt_idle(s: int | None) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def _fmt_agents(r: dict) -> str:
+    n = r.get("agents_total") or 0
+    if not n:
+        return ""
+    out = str(n)
+    if r.get("agents_running"):
+        out += f"·{r['agents_running']}run"
+    if r.get("agents_failed"):
+        out += f"·{r['agents_failed']}fail"
+    return out
+
+
 def _fmt_delta(d: dict | None) -> str:
     if d is None:
         return ""
@@ -544,7 +577,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         click.echo(f"No main sessions active in the last {window_days}d.")
         return
     hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'PROJECT':<20.20} {'BRANCH':<22.22} "
-           f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5}  {'SUMMARY':<12} DELTA")
+           f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5} {'AGENTS':>8}  "
+           f"{'SUMMARY':<12} DELTA")
     click.echo(hdr)
     counts: dict[str, int] = {}
     for r in rows:
@@ -561,7 +595,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         click.echo(f"{verdict} {r['session_id'][:8]:<8} "
                    f"{str(r['project_name'] or ''):<20.20} "
                    f"{str(r['git_branch'] or '—'):<22.22} {last:<12} "
-                   f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5}  "
+                   f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5} "
+                   f"{_fmt_agents(r):>8}  "
                    f"{state:<12} {_fmt_delta(r['delta'])}")
     tally = " · ".join(f"{k} {v}" for k, v in sorted(counts.items()))
     click.echo(f"\n{len(rows)} sessions ({tally})  ·  "

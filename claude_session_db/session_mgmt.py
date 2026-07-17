@@ -310,7 +310,10 @@ _INVENTORY_SQL = """
            la.last_ts,
            ss.state, ss.reason, ss.kmcp_application, ss.kmcp_path,
            ss.message_count_at_summary, ss.leaf_uuid_at_summary,
-           wm.ts AS leaf_ts
+           wm.ts AS leaf_ts,
+           coalesce(ag.agents_total, 0)   AS agents_total,
+           coalesce(ag.agents_running, 0) AS agents_running,
+           coalesce(ag.agents_failed, 0)  AS agents_failed
     FROM sessions s
     LEFT JOIN projects p USING (project_id)
     LEFT JOIN summary_state ss USING (session_id)
@@ -318,6 +321,18 @@ _INVENTORY_SQL = """
                        WHERE m.session_id = s.session_id) la ON true
     LEFT JOIN LATERAL (SELECT m.ts FROM messages m
                        WHERE m.uuid = ss.leaf_uuid_at_summary LIMIT 1) wm ON true
+    -- Spawn badge from the archived Agent-spawn ledger (v_agent_children):
+    -- running = async_launched with no archived completion; failed = any
+    -- terminal status other than completed.
+    LEFT JOIN (
+        SELECT parent_session_id,
+               count(*) AS agents_total,
+               count(*) FILTER (WHERE status = 'async_launched') AS agents_running,
+               count(*) FILTER (WHERE status IS DISTINCT FROM 'completed'
+                                AND status IS DISTINCT FROM 'async_launched')
+                   AS agents_failed
+        FROM v_agent_children GROUP BY 1
+    ) ag ON ag.parent_session_id = s.session_id
     WHERE NOT s.is_subagent
       AND (%(days)s = 0
            OR s.modified_at > now() - make_interval(days => %(days)s))

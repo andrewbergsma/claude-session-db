@@ -46,6 +46,7 @@ ANGLE_SPECS: dict[str, tuple[str, str]] = {
     "files":     ("F", "det"),
     "commands":  ("X", "det"),
     "git":       ("G", "det"),
+    "agents":    ("A", "det"),
     "kmcp":      ("W", "det"),
     "errors":    ("R", "det"),
     "metrics":   ("M", "det"),
@@ -54,8 +55,12 @@ ANGLE_SPECS: dict[str, tuple[str, str]] = {
     "knowledge": ("K", "retrieval"),
 }
 
-_CAPS = {"files": 8, "commands": 8, "git": 6, "kmcp": 8, "errors": 6,
-         "metrics": 1, "direction": 5, "events": 6, "knowledge": 5}
+_CAPS = {"files": 8, "commands": 8, "git": 6, "agents": 8, "kmcp": 8,
+         "errors": 6, "metrics": 1, "direction": 5, "events": 6, "knowledge": 5}
+
+# Slice of a record-level toolUseResult worth keeping for the agents angle.
+_AGENT_RESULT_KEYS = ("agentId", "agentType", "status", "totalTokens",
+                      "totalDurationMs", "totalToolUseCount", "resolvedModel")
 
 _WRITE_TOOLS = ("create_entry", "update_entry", "patch_content",
                 "import_entries", "create_relationship", "delete_entry",
@@ -102,19 +107,59 @@ def _text_of(content: Any) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def _is_real_prompt(rec: dict) -> bool:
+def subagent_key(jsonl_path: Path) -> Optional[str]:
+    """'<parent_session_id>:<agent_id>' for a sidechain transcript, else None.
+
+    The canonical child-session address (matches sessions.session_id for
+    is_subagent rows in the archive)."""
+    parts = jsonl_path.parts
+    if "subagents" not in parts:
+        return None
+    idx = parts.index("subagents")
+    agent_id = jsonl_path.stem
+    if agent_id.startswith("agent-"):
+        agent_id = agent_id[len("agent-"):]
+    return f"{parts[idx - 1]}:{agent_id}"
+
+
+def _is_real_prompt(rec: dict, allow_sidechain: bool = False) -> bool:
     """A human-typed prompt: user record, main chain, not meta, carries text
-    (not a tool_result carrier, not an injected system wrapper)."""
-    if rec.get("type") != "user" or rec.get("isSidechain") or rec.get("isMeta"):
+    (not a tool_result carrier, not an injected system wrapper). For a child
+    (sidechain) transcript every record is sidechain — allow_sidechain lets the
+    seed prompt count as the turn opener."""
+    if rec.get("type") != "user" or rec.get("isMeta"):
+        return False
+    if rec.get("isSidechain") and not allow_sidechain:
         return False
     text = _text_of(rec.get("message", {}).get("content")).strip()
     return bool(text) and not text.startswith("<")
 
 
+_AGENT_ID_RE = re.compile(r"[0-9a-f]{17}")
+
+
 def find_session_jsonl(cwd: str, session_id: Optional[str] = None) -> Path:
     """Locate the transcript: explicit UUID anywhere under ~/.claude/projects,
-    else the newest .jsonl in the project dir encoded from cwd."""
+    else the newest .jsonl in the project dir encoded from cwd.
+
+    session_id also accepts sidechain addresses: '<parent>:<agent_id>' (the
+    child-session key) or a bare 17-hex agent id — both resolve to the
+    subagents/**/agent-<id>.jsonl file."""
     if session_id:
+        if ":" in session_id:
+            parent, aid = session_id.split(":", 1)
+            hits = sorted(PROJECTS_DIR.glob(
+                f"*/{parent}/subagents/**/agent-{aid}.jsonl"))
+            if not hits:
+                raise FileNotFoundError(f"no sidechain transcript for {session_id}")
+            return hits[0]
+        if _AGENT_ID_RE.fullmatch(session_id):
+            hits = sorted(PROJECTS_DIR.glob(
+                f"*/*/subagents/**/agent-{session_id}.jsonl"))
+            if not hits:
+                raise FileNotFoundError(
+                    f"no sidechain transcript for agent {session_id}")
+            return hits[0]
         hits = sorted(PROJECTS_DIR.glob(f"*/{session_id}.jsonl"))
         if not hits:
             raise FileNotFoundError(f"no transcript for session {session_id}")
@@ -135,7 +180,9 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
     """Slice one turn: the Nth-from-last real user prompt (turn=-1 is the
     latest) through to the next real prompt (or EOF)."""
     recs = load_jsonl(jsonl_path)
-    prompt_idx = [i for i, r in enumerate(recs) if _is_real_prompt(r)]
+    child_key = subagent_key(jsonl_path)
+    prompt_idx = [i for i, r in enumerate(recs)
+                  if _is_real_prompt(r, allow_sidechain=bool(child_key))]
     if not prompt_idx:
         raise ValueError(f"no user prompts found in {jsonl_path.name}")
     try:
@@ -148,7 +195,7 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
     span = recs[start:end]
     tu_names: dict[str, tuple[str, str]] = {}
     delta = TurnDelta(
-        session_id=jsonl_path.stem,
+        session_id=child_key or jsonl_path.stem,
         jsonl_path=jsonl_path,
         user_text=_text_of(span[0].get("message", {}).get("content")).strip(),
         started_at=span[0].get("timestamp", "?"),
@@ -171,7 +218,7 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
                              if r.get("version")), "") or ""
     usage_in = usage_out = 0
     for rec in span:
-        if rec.get("isSidechain"):
+        if rec.get("isSidechain") and not child_key:
             continue
         msg = rec.get("message", {})
         content = msg.get("content")
@@ -182,12 +229,19 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
             for b in content or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
                     delta.tool_uses.append({"name": b.get("name", "?"),
-                                            "input": b.get("input", {})})
+                                            "input": b.get("input", {}),
+                                            "id": b.get("id", "")})
                     tu_names[b.get("id", "")] = (b.get("name", "?"), "")
             u = msg.get("usage") or {}
             usage_in += (u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0)
             usage_out += u.get("output_tokens") or 0
         elif rec.get("type") == "user" and isinstance(content, list):
+            # Record-level toolUseResult: the harness's structured record of the
+            # call (for Agent spawns: agentId/agentType/status/totals).
+            tur = rec.get("toolUseResult")
+            meta = ({k: tur.get(k) for k in _AGENT_RESULT_KEYS
+                     if tur.get(k) is not None}
+                    if isinstance(tur, dict) else {})
             for b in content:
                 if isinstance(b, dict) and b.get("type") == "tool_result":
                     name, _ = tu_names.get(b.get("tool_use_id"), ("?", ""))
@@ -196,8 +250,10 @@ def extract_turn(jsonl_path: Path, turn: int = -1) -> TurnDelta:
                         body = json.dumps(body, ensure_ascii=False)
                     delta.tool_results.append({
                         "name": name,
+                        "tool_use_id": b.get("tool_use_id", ""),
                         "is_error": bool(b.get("is_error")),
                         "body": body.strip(),
+                        "meta": meta,
                     })
     delta.usage = {"input_tokens": usage_in, "output_tokens": usage_out,
                    "tool_calls": len(delta.tool_uses)}
@@ -259,6 +315,51 @@ def angle_git(delta: TurnDelta) -> list[dict]:
         if m:
             out.append({"headline": _one_line(cmd[m.start():], 100),
                         "detail": {"command": cmd}})
+    return out
+
+
+def angle_agents(delta: TurnDelta) -> list[dict]:
+    """Subagent orchestration: Agent spawns, SendMessage continuations,
+    TaskStop. Purely extractive — status and token totals come from the
+    archived tool_result (the ledger), never the child's own narration."""
+    results = {tr.get("tool_use_id"): tr for tr in delta.tool_results
+               if tr.get("tool_use_id")}
+    parent = delta.session_id.split(":", 1)[0]
+    out = []
+    for tu in delta.tool_uses:
+        name, inp = tu["name"], tu["input"]
+        if name not in ("Agent", "SendMessage", "TaskStop"):
+            continue
+        tr = results.get(tu.get("id") or "")
+        meta = (tr or {}).get("meta") or {}
+        child_key = (f"{parent}:{meta['agentId']}"
+                     if meta.get("agentId") else None)
+        if name == "Agent":
+            atype = (inp.get("subagent_type") or meta.get("agentType")
+                     or "general-purpose")
+            desc = inp.get("description") or ""
+            status = meta.get("status") or ("pending" if tr is None else "?")
+            tok = meta.get("totalTokens")
+            tail = (f" · {tok / 1000:.0f}K tok"
+                    if isinstance(tok, (int, float)) and tok else "")
+            hl = f"spawn {atype} '{desc}' → {status}{tail}"
+        elif name == "SendMessage":
+            target = (inp.get("to") or inp.get("agent_id") or inp.get("agent")
+                      or inp.get("name") or "?")
+            if not child_key and _AGENT_ID_RE.fullmatch(str(target)):
+                child_key = f"{parent}:{target}"
+            msg = (inp.get("summary") or inp.get("message")
+                   or inp.get("prompt") or "")
+            hl = f"send → {target} '{_one_line(str(msg), 50)}'"
+        else:  # TaskStop
+            hl = f"stop {inp.get('task_id') or inp.get('agent_id') or ''}".strip()
+        out.append({"headline": _one_line(hl, 110),
+                    "detail": {"tool": name,
+                               "input": {k: _one_line(str(v), 2000)
+                                         for k, v in inp.items()},
+                               "result_meta": meta,
+                               "is_error": bool(tr and tr.get("is_error")),
+                               "child_session_key": child_key}})
     return out
 
 
@@ -409,7 +510,8 @@ def run_angles(cwd: str, angles: Optional[list[str]] = None,
 
     det_fns: dict[str, Callable[[TurnDelta], list[dict]]] = {
         "files": angle_files, "commands": angle_commands, "git": angle_git,
-        "kmcp": angle_kmcp, "errors": angle_errors, "metrics": angle_metrics,
+        "agents": angle_agents, "kmcp": angle_kmcp, "errors": angle_errors,
+        "metrics": angle_metrics,
     }
     results: dict[str, list[dict]] = {}
     failures: dict[str, str] = {}

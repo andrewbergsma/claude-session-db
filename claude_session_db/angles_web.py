@@ -31,9 +31,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
+from pathlib import Path
+
 from . import angles as A
 from . import session_mgmt as mgmt
 from .session_digest import input_hint
+from .subagent import read_agent_meta
 
 SCAN_INTERVAL_S = 5          # transcript poll cadence
 DEBOUNCE_S = 8               # file must be quiet this long before mining
@@ -48,6 +51,16 @@ _KMCP_READ_TOOLS = ("get_entry", "get_entries", "get_section", "search",
                     "hybrid_search", "list_entries", "list_by_tag",
                     "get_process_step", "traverse_graph", "query_view",
                     "list_children", "get_application", "list_applications")
+
+
+def _resolve_transcript(sid: str) -> Optional[Path]:
+    """Main-session uuid -> <proj>/<uuid>.jsonl; child key '<parent>:<agent>'
+    -> the subagents/**/agent-<id>.jsonl sidechain file."""
+    if ":" in sid:
+        parent, aid = sid.split(":", 1)
+        return next(iter(A.PROJECTS_DIR.glob(
+            f"*/{parent}/subagents/**/agent-{aid}.jsonl")), None)
+    return next(iter(A.PROJECTS_DIR.glob(f"*/{sid}.jsonl")), None)
 
 
 class AngleWatcher(threading.Thread):
@@ -80,7 +93,15 @@ class AngleWatcher(threading.Thread):
 
     def _scan_once(self) -> None:
         now = time.time()
-        for p in A.PROJECTS_DIR.glob("*/*.jsonl"):
+        # Main transcripts + live sidechains (a running background child shows
+        # up as its own row under the parent). Sidechain sids are child keys
+        # '<parent>:<agent_id>' — the same address the archive uses.
+        candidates = ((p, p.stem) for p in A.PROJECTS_DIR.glob("*/*.jsonl"))
+        sub = ((p, A.subagent_key(p)) for p in A.PROJECTS_DIR.glob(
+            "*/*/subagents/**/agent-*.jsonl"))
+        for p, sid in (*candidates, *sub):
+            if not sid:
+                continue
             try:
                 st = p.stat()
             except OSError:
@@ -89,7 +110,6 @@ class AngleWatcher(threading.Thread):
                 continue
             if now - st.st_mtime < DEBOUNCE_S:
                 continue  # still being written; next scan will see it settled
-            sid = p.stem
             sig = (st.st_mtime_ns, st.st_size)
             if self.mined_sig.get(sid) == sig or sid in self.queued:
                 continue
@@ -126,7 +146,7 @@ def _sessions_payload(watcher: AngleWatcher) -> list[dict[str, Any]]:
         except (ValueError, OSError):
             continue
         sid = store.get("session_id", f.stem)
-        transcript = next(iter(A.PROJECTS_DIR.glob(f"*/{sid}.jsonl")), None)
+        transcript = _resolve_transcript(sid)
         t_mtime = transcript.stat().st_mtime if transcript else 0
         if now - t_mtime > BOARD_WINDOW_S:
             continue
@@ -134,8 +154,16 @@ def _sessions_payload(watcher: AngleWatcher) -> list[dict[str, Any]]:
         for iid, item in store.get("items", {}).items():
             headlines.setdefault(item.get("angle", "?"), []).append(
                 {"id": iid, "headline": item.get("headline", "")})
+        is_sub = ":" in sid
+        meta = (read_agent_meta(transcript)
+                if is_sub and transcript is not None else {})
         out.append({
             "session_id": sid,
+            "is_subagent": is_sub,
+            "parent_session_id": sid.split(":", 1)[0] if is_sub else None,
+            "agent_id": sid.split(":", 1)[1] if is_sub else None,
+            "agent_type": meta.get("agentType", ""),
+            "agent_description": meta.get("description", ""),
             "slug": store.get("slug", ""),
             "cwd": store.get("cwd", ""),
             "git_branch": store.get("git_branch", ""),
@@ -187,17 +215,58 @@ def _kmcp_target(name: str, inp: dict) -> Optional[tuple[str, str]]:
     return None
 
 
+def _agent_result_map(recs: list[dict]) -> dict[str, dict[str, Any]]:
+    """tool_use_id -> {agent_id, agent_type, status} from record-level
+    toolUseResult carriers (the harness's own record of each Agent spawn)."""
+    out: dict[str, dict[str, Any]] = {}
+    for rec in recs:
+        tur = rec.get("toolUseResult")
+        if rec.get("type") != "user" or not isinstance(tur, dict) \
+                or not tur.get("agentId"):
+            continue
+        for b in rec.get("message", {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_result" \
+                    and b.get("tool_use_id"):
+                out[b["tool_use_id"]] = {
+                    "agent_id": tur.get("agentId"),
+                    "agent_type": tur.get("agentType", ""),
+                    "status": tur.get("status", ""),
+                }
+    return out
+
+
+def _spawn_anchor(parent_recs: list[dict], agent_id: str) -> Optional[str]:
+    """uuid of the parent message to jump to for a child's back-link: the
+    assistant message carrying the Agent tool_use (via the result carrier's
+    sourceToolAssistantUuid/parentUuid), from the archived parent transcript."""
+    for rec in parent_recs:
+        tur = rec.get("toolUseResult")
+        if rec.get("type") == "user" and isinstance(tur, dict) \
+                and tur.get("agentId") == agent_id:
+            return rec.get("sourceToolAssistantUuid") or rec.get("parentUuid")
+    return None
+
+
 def _session_payload(sid: str) -> dict[str, Any]:
-    """Focus view: full message stream + kmcp context loaded + angle items."""
-    transcript = next(iter(A.PROJECTS_DIR.glob(f"*/{sid}.jsonl")), None)
+    """Focus view: full message stream + kmcp context loaded + angle items.
+
+    sid may be a main-session uuid or a child key '<parent>:<agent_id>' — for a
+    child the isSidechain skip is lifted (every record in a sidechain file is
+    sidechain) and the payload carries a `subagent` header block with the
+    meta.json identity + the parent anchor uuid for the back-link.
+    """
+    transcript = _resolve_transcript(sid)
     if not transcript:
         return {"error": f"no transcript for {sid}"}
+    is_child = ":" in sid
     recs = A.load_jsonl(transcript)
+    agent_results = _agent_result_map(recs)
+    base_sid = sid.split(":", 1)[0]
 
     messages: list[dict[str, Any]] = []
     kmcp_loaded: dict[tuple[str, str], int] = {}
     for rec in recs:
-        if rec.get("isSidechain"):
+        if rec.get("isSidechain") and not is_child:
             continue
         typ = rec.get("type")
         msg = rec.get("message", {})
@@ -210,6 +279,7 @@ def _session_payload(sid: str) -> dict[str, Any]:
                 continue
             messages.append({
                 "role": "user", "ts": rec.get("timestamp", ""),
+                "uuid": rec.get("uuid", ""),
                 "compact": bool(rec.get("isCompactSummary")
                                 or text.startswith("This session is being continued")),
                 "text": text[:MSG_TEXT_CAP],
@@ -222,7 +292,16 @@ def _session_payload(sid: str) -> dict[str, Any]:
             for b in content or []:
                 if isinstance(b, dict) and b.get("type") == "tool_use":
                     name, inp = b.get("name", "?"), b.get("input", {}) or {}
-                    tools.append({"name": name, "hint": input_hint(inp)[:90]})
+                    chip: dict[str, Any] = {"name": name,
+                                            "hint": input_hint(inp)[:90]}
+                    spawn = agent_results.get(b.get("id", ""))
+                    if name == "Agent" and spawn:
+                        # The chip becomes a link to the child focus view.
+                        chip["child"] = f"{base_sid}:{spawn['agent_id']}"
+                        chip["status"] = spawn.get("status", "")
+                        chip["hint"] = (inp.get("description")
+                                        or chip["hint"])[:90]
+                    tools.append(chip)
                     hit = _kmcp_target(name, inp)
                     if hit:
                         kmcp_loaded[hit] = kmcp_loaded.get(hit, 0) + 1
@@ -230,6 +309,7 @@ def _session_payload(sid: str) -> dict[str, Any]:
                 continue
             messages.append({"role": "assistant",
                              "ts": rec.get("timestamp", ""),
+                             "uuid": rec.get("uuid", ""),
                              "text": text[:MSG_TEXT_CAP],
                              "truncated": len(text) > MSG_TEXT_CAP,
                              "tools": tools})
@@ -241,13 +321,29 @@ def _session_payload(sid: str) -> dict[str, Any]:
             store = json.loads(f.read_text())
         except (ValueError, OSError):
             store = {}
-    return {
+    payload: dict[str, Any] = {
         "session_id": sid,
         "messages": messages,
         "kmcp_loaded": [{"tool": t, "target": tgt, "n": n}
                         for (t, tgt), n in kmcp_loaded.items()],
         "items": store.get("items", {}),
     }
+    if is_child:
+        parent, aid = sid.split(":", 1)
+        meta = read_agent_meta(transcript)
+        anchor = None
+        parent_path = _resolve_transcript(parent)
+        if parent_path is not None:
+            anchor = _spawn_anchor(A.load_jsonl(parent_path), aid)
+        payload["subagent"] = {
+            "parent_session_id": parent,
+            "agent_id": aid,
+            "agent_type": meta.get("agentType", ""),
+            "description": meta.get("description", ""),
+            "spawn_depth": meta.get("spawnDepth"),
+            "anchor_uuid": anchor,
+        }
+    return payload
 
 
 def _mgmt_payload(csd_dsn: Optional[str], kmcp_dsn: Optional[str],
@@ -275,6 +371,9 @@ def _mgmt_payload(csd_dsn: Optional[str], kmcp_dsn: Optional[str],
             "reason": r["reason"],
             "kmcp_target": (f"{r['kmcp_application']}:{r['kmcp_path']}"
                             if r["kmcp_application"] else None),
+            "agents": {"total": r.get("agents_total", 0),
+                       "running": r.get("agents_running", 0),
+                       "failed": r.get("agents_failed", 0)},
             "delta": r["delta"],
             "verdict": r["verdict"],
         })
@@ -363,7 +462,7 @@ def serve(host: str, port: int, window_s: int, model: str, base_url: str,
 
 # --- UI (inline, self-contained) --------------------------------------------------
 
-_ANGLE_ORDER = ["direction", "events", "files", "kmcp", "commands",
+_ANGLE_ORDER = ["direction", "events", "agents", "files", "kmcp", "commands",
                 "git", "errors", "knowledge", "metrics"]
 
 _PAGE = r"""<!doctype html>
@@ -455,6 +554,10 @@ _PAGE = r"""<!doctype html>
   #detail pre { white-space:pre-wrap; word-break:break-all; font-size:12px; }
   #detail .x { float:right; cursor:pointer; color:var(--dim); }
   .empty { color:var(--dim); padding:40px; text-align:center; }
+  .abadge { color:var(--acc); cursor:pointer; font-size:11px; margin-left:6px; }
+  tr.child td { background:#141a24; font-size:12px; }
+  .chip.agent { border-color:var(--acc); color:var(--acc); cursor:pointer; }
+  .chip.agent b { color:var(--acc); }
   .v-LIVE { color:var(--ok); } .v-OPEN { color:var(--warn); }
   .v-OPENdelta { color:var(--err); font-weight:bold; }
   .v-OPENq { color:var(--warn); } .v-CLOSED { color:var(--dim); }
@@ -488,10 +591,11 @@ function dur(a,liveEnd){ if(!a) return "?";
 function esc(t){ const d=document.createElement("i"); d.textContent=t??"";
   return d.innerHTML; }
 function label(s){ return s.slug ||
-  ((s.cwd||"").split("/").pop()||"?")+" "+s.session_id.slice(0,6); }
+  ((s.cwd||"").split("/").pop()||"?")+" "+(s.session_id||"").slice(0,6); }
 function folders(){
   const m=new Map();
   for(const s of rows){
+    if(s.is_subagent) continue;
     const key=s.cwd||"(unknown)";
     if(!m.has(key)) m.set(key,{cwd:key,sessions:[],live:0,minAge:1e12});
     const f=m.get(key); f.sessions.push(s);
@@ -500,6 +604,14 @@ function folders(){
   }
   return [...m.values()].sort((a,b)=>a.minAge-b.minAge);
 }
+let expanded=new Set();
+function kids(id){ return rows.filter(r=>r.is_subagent&&r.parent_session_id===id); }
+function toggleKids(id){ expanded.has(id)?expanded.delete(id):expanded.add(id); render(); }
+async function openChild(k){ sid=k; render(); await renderFocus(true); }
+async function openParent(p,anchor){ sid=p; render(); await renderFocus(false);
+  if(anchor){ const el=document.getElementById("m-"+anchor);
+    if(el){ el.scrollIntoView({block:"center"}); el.style.outline="1px solid var(--acc)";
+      setTimeout(()=>el.style.outline="",2500); } } }
 function goRoot(){ sid=null; render(); }
 function pickFolder(cwd){ folder=cwd; sid=null; render(); }
 async function pickSession(id){ sid=id; render(); await renderFocus(true); }
@@ -529,6 +641,13 @@ function fmtDelta(d){
   return {confirmation_only:"confirm-only",
           auto_compaction_only:"compaction-only"}[d.class]+` ${body}`;
 }
+function agentsBadge(a){
+  if(!a||!a.total) return "";
+  let t=String(a.total);
+  if(a.running) t+=` <span class="v-OPEN">${a.running}r</span>`;
+  if(a.failed) t+=` <span class="v-OPENdelta">${a.failed}f</span>`;
+  return t;
+}
 function renderMgmt(){
   if(mode!=="mgmt") return;
   document.getElementById("tabs").innerHTML="";
@@ -548,6 +667,7 @@ function renderMgmt(){
       <td>${ts(s.last_ts)}</td>
       <td class="num">${age(s.idle_s)}</td>
       <td class="num">${s.message_count||0}</td>
+      <td>${agentsBadge(s.agents)}</td>
       <td title="${esc(s.kmcp_target||"")}">${esc(state)}</td>
       <td class="${s.delta&&s.delta.class==="real"?"v-OPENdelta":""}"
           title="${esc((s.delta&&s.delta.signals||[]).join("\n"))}">${esc(fmtDelta(s.delta))}</td>
@@ -555,7 +675,7 @@ function renderMgmt(){
   }).join("");
   panel.innerHTML=`<table><thead><tr><th>verdict</th><th>session</th>
     <th>project</th><th>branch</th><th>last activity</th><th>idle</th>
-    <th>msgs</th><th>summary</th><th>delta after summary</th></tr></thead>
+    <th>msgs</th><th>agents</th><th>summary</th><th>delta after summary</th></tr></thead>
     <tbody>${trs}</tbody></table>
     <div style="color:var(--dim);padding:6px 2px;font-size:12px">
       last activity = max(messages.ts) from the archive (never file mtime) ·
@@ -567,6 +687,25 @@ async function showDigest(id,delta){
   document.getElementById("detail").style.display="block";
   const r=await fetch(`/api/digest/${id}?${q}`);
   document.getElementById("dbody").textContent=await r.text();
+}
+function childRow(c){
+  const u=c.usage||{}, mining=c.status==="mining";
+  const name=(c.agent_type||"agent")+" · "+
+    ((c.agent_description||"").slice(0,36)||(c.agent_id||"").slice(0,8));
+  return `<tr class="row child ${c.live?"":"stale"} ${mining?"mining":""}"
+    onclick="pickSession('${c.session_id}')">
+    <td><span class="dot ${c.live?"on":""}"></span></td>
+    <td title="${esc(c.user_text)}" style="padding-left:24px">↳ ${esc(name)}</td>
+    <td>${age(c.transcript_age_s)} ago${mining?" ⛏":""}</td>
+    <td>${ts(c.session_started_at)}</td>
+    <td class="num">${dur(c.session_started_at, c.live?null:(c.turn_span||[])[1])}</td>
+    <td class="num">${c.prompt_count||"?"}</td>
+    <td class="num">${u.tool_calls??"?"}</td>
+    <td class="num">${(u.output_tokens??0).toLocaleString()}</td>
+    <td>—</td>
+    <td>${esc((c.model||"?").replace("claude-",""))}</td>
+    <td class="num">${kb(c.transcript_bytes)}</td>
+    <td>${age(c.pull_age_s)}</td></tr>`;
 }
 function render(){
   if(mode==="mgmt"){ renderMgmt(); return; }
@@ -591,10 +730,12 @@ function render(){
   const f=fs.find(x=>x.cwd===folder);
   const trs=f.sessions.map(s=>{
     const u=s.usage||{}, mining=s.status==="mining";
-    return `<tr class="row ${s.live?"":"stale"} ${mining?"mining":""}"
+    const ch=kids(s.session_id);
+    const badge=ch.length?`<span class="abadge" onclick="event.stopPropagation();toggleKids('${s.session_id}')">${expanded.has(s.session_id)?"▾":"▸"} agents ${ch.length}</span>`:"";
+    let row=`<tr class="row ${s.live?"":"stale"} ${mining?"mining":""}"
       onclick="pickSession('${s.session_id}')">
       <td><span class="dot ${s.live?"on":""}"></span></td>
-      <td title="${esc(s.user_text)}">${esc(label(s))}</td>
+      <td title="${esc(s.user_text)}">${esc(label(s))}${badge}</td>
       <td>${age(s.transcript_age_s)} ago${mining?" ⛏":""}</td>
       <td>${ts(s.session_started_at)}</td>
       <td class="num">${dur(s.session_started_at, s.live?null:(s.turn_span||[])[1])}</td>
@@ -605,6 +746,8 @@ function render(){
       <td>${esc((s.model||"?").replace("claude-",""))}</td>
       <td class="num">${kb(s.transcript_bytes)}</td>
       <td>${age(s.pull_age_s)}</td></tr>`;
+    if(expanded.has(s.session_id)) row+=ch.map(childRow).join("");
+    return row;
   }).join("");
   panel.innerHTML=`<table><thead><tr><th></th><th>session</th><th>last turn</th>
     <th>started</th><th>dur</th><th>prompts</th><th>turn tools</th>
@@ -613,8 +756,9 @@ function render(){
 }
 async function renderFocus(scroll){
   if(!sid) return;
-  const s=rows.find(r=>r.session_id===sid)||{};
+  const s=rows.find(r=>r.session_id===sid)||{session_id:sid};
   const r=await fetch(`/api/session/${sid}`); const d=await r.json();
+  const sub=d.subagent;
   const u=s.usage||{};
   const kv=[["directory",s.cwd||"?"],["branch",s.git_branch||"—"],
     ["started",ts(s.session_started_at)],
@@ -628,9 +772,12 @@ async function renderFocus(scroll){
   const meta=kv.map(([k,v])=>`<div><span class="k">${k}</span>`+
     `<span class="v" title="${esc(v)}">${esc(v)}</span></div>`).join("");
   const msgs=(d.messages||[]).map(m=>{
-    const chips=(m.tools||[]).map(t=>`<span class="chip"><b>${esc(t.name)}</b>`+
-      `${t.hint?" "+esc(t.hint):""}</span>`).join("");
-    return `<div class="msg ${m.role} ${m.compact?"compact":""}">
+    const chips=(m.tools||[]).map(t=> t.child
+      ? `<span class="chip agent" onclick="openChild('${t.child}')"><b>Agent</b>`+
+        `${t.hint?" "+esc(t.hint):""}${t.status?" · "+esc(t.status):""} ↗</span>`
+      : `<span class="chip"><b>${esc(t.name)}</b>`+
+        `${t.hint?" "+esc(t.hint):""}</span>`).join("");
+    return `<div class="msg ${m.role} ${m.compact?"compact":""}"${m.uuid?` id="m-${m.uuid}"`:""}>
       <div class="mh">${m.role}${m.compact?" · compaction":""} · ${tshort(m.ts)}</div>
       ${m.text?`<div class="mt">${esc(m.text)}${m.truncated?" …":""}</div>`:""}
       ${chips?`<div class="chips">${chips}</div>`:""}</div>`;
@@ -653,10 +800,15 @@ async function renderFocus(scroll){
   const keep=el.querySelector("#msgs");
   const nearBottom=!keep||keep.scrollHeight-keep.scrollTop-keep.clientHeight<80;
   const keepTop=keep?keep.scrollTop:0;
+  const crumb = sub
+    ? `<span class="crumb" onclick="openParent('${sub.parent_session_id}','${sub.anchor_uuid||""}')">← parent ${sub.parent_session_id.slice(0,8)}</span>
+       &nbsp; <b>${esc(sub.agent_type||"agent")}</b>
+       <span style="color:var(--dim)"> · ${esc(sub.description||"")}${sub.spawn_depth!=null?` · depth ${sub.spawn_depth}`:""} · agent ${esc((sub.agent_id||"").slice(0,8))}</span>`
+    : `<span class="crumb" onclick="goRoot()">← ${esc((s.cwd||"").split("/").pop()||"back")}</span>
+       &nbsp; <b>${esc(label(s))}</b>
+       <span style="color:var(--dim)"> · “${esc(s.user_text||"")}”</span>`;
   el.innerHTML=`
-    <div><span class="crumb" onclick="goRoot()">← ${esc((s.cwd||"").split("/").pop()||"back")}</span>
-      &nbsp; <b>${esc(label(s))}</b>
-      <span style="color:var(--dim)"> · “${esc(s.user_text||"")}”</span></div>
+    <div>${crumb}</div>
     <div class="kv">${meta}</div>
     <div id="fbody">
       <div id="msgs">${msgs||'<div class="empty">no messages</div>'}</div>

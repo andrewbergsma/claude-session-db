@@ -506,6 +506,45 @@ def _state(records, mtime_age):
     return st
 
 
+# ----------------------------------------------------------------------------
+# project identity for the nav
+#
+# A session's project label comes from its cwd when the transcript has one.
+# Two derivation bugs the sidebar used to leak:
+#   - no cwd -> the RAW encoded projects dir name ("-Users-andrew-Projects-
+#     controltech") stood as a project;
+#   - a git worktree cwd (<repo>/.claude/worktrees/<wt>) stood as its own
+#     project, peer to the repo it belongs to.
+# So: prettify the encoded dir to its leaf, and fold worktrees into their
+# parent repo (label = repo, worktree carried separately for the row tag).
+# ----------------------------------------------------------------------------
+_WORKTREE_RE = re.compile(r"([^/]+)/\.(?:claude|git)/worktrees/([^/]+)")
+_PARENT_DIRS = {"projects", "github", "downloads", "documents", "desktop",
+                "developer", "code", "src", "repos", "work"}
+
+
+def _pretty_project(dirname: str) -> str:
+    """Best-effort leaf name out of an encoded projects dir ('/'->'-')."""
+    parts = dirname.strip("-").split("-")
+    low = [p.lower() for p in parts]
+    if low[:1] == ["users"] and len(parts) > 2:      # -Users-<user>-…
+        parts, low = parts[2:], low[2:]
+    while low and low[0] in _PARENT_DIRS:
+        parts, low = parts[1:], low[1:]
+    return "-".join(parts).lower() or dirname
+
+
+def _project_identity(cwd, dirname: str):
+    """(label, worktree): repo-level label, worktree leaf when cwd is one."""
+    if cwd:
+        c = str(cwd).rstrip("/")
+        m = _WORKTREE_RE.search(c)
+        if m:
+            return m.group(1), m.group(2)
+        return (c.split("/")[-1] or dirname), None
+    return _pretty_project(dirname), None
+
+
 # Whole-file facts for the nav (first timestamp, message-record count) are
 # re-derived only when the transcript changes: keyed by (mtime_ns, size).
 _NAV_STATS: dict[str, tuple] = {}
@@ -575,7 +614,7 @@ def summarize_nav(path: Path):
     mtime_age = time.time() - path.stat().st_mtime
     if not title:
         title = (last_user[:70] + "…") if last_user else path.stem[:12]
-    label = (cwd or str(path.parent.name)).rstrip("/").split("/")[-1]
+    label, worktree = _project_identity(cwd, str(path.parent.name))
     ctx_tokens = None
     if usage:
         ctx_tokens = (usage.get("input_tokens", 0)
@@ -586,6 +625,7 @@ def summarize_nav(path: Path):
         "session_id": path.stem,
         "project": str(path.parent.name),
         "project_label": label,
+        "worktree": worktree,
         "cwd": cwd, "branch": branch, "title": title.strip(),
         "state": _state(recs, mtime_age),
         "mtime": path.stat().st_mtime,

@@ -56,18 +56,18 @@
   body.navmin #nav .top .toprow { justify-content:center; }
   body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist { display:none; }
   .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
-  .sec { display:flex; align-items:center; gap:4px; padding:11px 14px 3px; cursor:pointer;
-         font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.7px;
-         user-select:none; }
-  .sec .n, .proj .n { color:var(--muted); font-weight:400; margin-left:auto; }
+  /* group headers: quiet separators — sessions are the dominant content */
+  .sec, .proj { display:flex; align-items:baseline; gap:4px; padding:9px 14px 2px;
+                cursor:pointer; user-select:none; font-size:10px; font-weight:600;
+                letter-spacing:.3px; color:var(--muted); }
+  .sec .n, .proj .n { color:var(--muted); font-weight:400; opacity:.75; }
   .sec.pri-critical { color:var(--bad); }
   .sec.pri-high { color:var(--warn); }
   .sec.pri-med { color:var(--accent); }
-  .sec.pri-normal { color:var(--ink2); }
   .sec.pri-low { color:var(--muted); }
-  .proj { display:flex; align-items:center; gap:4px; color:var(--ink2); font-size:10.5px;
-          font-weight:700; text-transform:uppercase; letter-spacing:.7px;
-          padding:10px 14px 3px; cursor:pointer; user-select:none; }
+  .proj:hover, .sec:hover { color:var(--ink2); }
+  .ptag { color:var(--muted); font-weight:400; font-size:11px; margin-right:6px; }
+  .wtag { color:var(--muted); font-weight:400; font-size:10.5px; margin-right:6px; }
   .prig { flex:none; font-size:10px; margin-right:4px; }
   .prig.p-critical { color:var(--bad); }
   .prig.p-high { color:var(--warn); }
@@ -524,14 +524,17 @@ let showArchived = false, navData = null;
 const PRI_ORDER = ["critical", "high", "med", "normal", "low"];
 const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
 
-/* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<pri>:<proj>". */
+/* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<proj>".
+   Everything is EXPANDED by default; only explicit user collapses are stored.
+   (v2 key: the v1 scheme nested priority→project and could poison first paint
+   into a headers-only view.) */
 let navSec = {};
-try { navSec = JSON.parse(localStorage.getItem("csd.consoleNavSec") || "{}"); }
+try { navSec = JSON.parse(localStorage.getItem("csd.consoleNavSec2") || "{}"); }
 catch(e){ navSec = {}; }
 function toggleSec(el){
   const k = el.dataset.k;
   navSec[k] = !navSec[k];
-  localStorage.setItem("csd.consoleNavSec", JSON.stringify(navSec));
+  localStorage.setItem("csd.consoleNavSec2", JSON.stringify(navSec));
   renderNav();
 }
 
@@ -550,17 +553,23 @@ function ctxGauge(tok){
   return `<span class="ctx c${lvl}" title="context ≈ ${(tok/1000).toFixed(0)}k tokens (${tok.toLocaleString()})"><i></i><i></i><i></i></span>`;
 }
 
-function sessRow(s, d){
+function sessRow(s, d, tagProject){
   const busy = d.summarizing?.[s.session_id] === "running";
   const pri = PRI_ORDER.includes(s.priority) ? s.priority : null;
   const pg = pri ? `<span class="prig p-${pri}" title="priority: ${pri}">${PRI_GLYPH[pri]}</span>` : "";
+  // Project identity lives on the row when the row isn't under its own
+  // project header; a worktree session always shows its worktree leaf.
+  const ptag = tagProject && s.project_label
+    ? `<span class="ptag">${esc(s.project_label)}${s.worktree?" ⌥"+esc(s.worktree):""} ·</span>` : "";
+  const wtag = !tagProject && s.worktree
+    ? `<span class="wtag">⌥${esc(s.worktree)} ·</span>` : "";
   const last = new Date(s.mtime*1000).toISOString();
   const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
   const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
     <span class="dot ${s.state}" title="${s.state}"></span>
     <span class="meta">
-      <div class="ttl">${pg}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="ttl">${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
     </span>
     ${ctxGauge(s.ctx_tokens)}</div>`;
@@ -575,40 +584,44 @@ async function loadNav(){
 function renderNav(){
   if(!navData) return;
   const d = navData;
-  const buckets = {};        // pri -> proj -> [session]
-  for(const s of d.sessions){
-    const pri = PRI_ORDER.includes(s.priority) ? s.priority : "normal";
-    ((buckets[pri] ??= {})[s.project_label || s.project] ??= []).push(s);
-  }
-  const pris = PRI_ORDER.filter(p => buckets[p]);
-  // Bucket headers only earn their space once something is actually flagged.
-  const showBuckets = pris.some(p => p !== "normal");
+  // ONE level of grouping. Flagged sessions sit directly under a quiet
+  // priority header (project moves onto the row). The unprioritized bulk
+  // keeps project grouping as its single level — but a 1-session project
+  // doesn't earn a header, it renders as a tagged row in recency position.
+  const flagged = {critical:[], high:[], med:[], low:[]};
+  const normal = [];
+  for(const s of d.sessions)
+    (s.priority && flagged[s.priority]) ? flagged[s.priority].push(s) : normal.push(s);
   let html = "";
-  const projSet = new Set();
-  for(const pri of pris){
-    const projs = Object.entries(buckets[pri]);
-    projs.forEach(([p]) => projSet.add(p));
-    if(showBuckets){
-      const bkey = "b:" + pri, bcol = !!navSec[bkey];
-      const n = projs.reduce((a, [,ss]) => a + ss.length, 0);
-      html += `<div class="sec pri-${pri}" data-k="${esc(bkey)}" onclick="toggleSec(this)">
-        <span class="tw">${bcol?"▸":"▾"}</span>${PRI_GLYPH[pri]||"·"} ${pri==="normal"?"unprioritized":pri}
-        <span class="n">${n}</span></div>`;
-      if(bcol) continue;
-    }
-    for(const [proj, ss] of projs){
-      const pkey = "p:" + pri + ":" + proj, pcol = !!navSec[pkey];
-      html += `<div class="proj" data-k="${esc(pkey)}" onclick="toggleSec(this)">
-        <span class="tw">${pcol?"▸":"▾"}</span>${esc(proj)}
-        ${pcol?`<span class="n">${ss.length}</span>`:""}</div>`;
-      if(pcol) continue;
-      for(const s of ss) html += sessRow(s, d);
-    }
+  const bucket = pri => {
+    const ss = flagged[pri];
+    if(!ss.length) return;
+    const bkey = "b:" + pri, bcol = !!navSec[bkey];
+    html += `<div class="sec pri-${pri}" data-k="${esc(bkey)}" onclick="toggleSec(this)">
+      <span class="tw">${bcol?"▸":"▾"}</span>${PRI_GLYPH[pri]} ${pri} <span class="n">· ${ss.length}</span></div>`;
+    if(!bcol) for(const s of ss) html += sessRow(s, d, true);
+  };
+  bucket("critical"); bucket("high"); bucket("med");
+  // group the unprioritized bulk by project, in recency order of appearance
+  const groups = [], gIdx = new Map();
+  for(const s of normal){
+    const k = s.project_label || s.project || "?";
+    if(!gIdx.has(k)){ const g = {k, ss:[]}; gIdx.set(k, g); groups.push(g); }
+    gIdx.get(k).ss.push(s);
   }
+  for(const g of groups){
+    if(g.ss.length === 1){ html += sessRow(g.ss[0], d, true); continue; }
+    const pkey = "p:" + g.k, pcol = !!navSec[pkey];
+    html += `<div class="proj" data-k="${esc(pkey)}" onclick="toggleSec(this)">
+      <span class="tw">${pcol?"▸":"▾"}</span>${esc(g.k)} <span class="n">· ${g.ss.length}</span></div>`;
+    if(!pcol) for(const s of g.ss) html += sessRow(s, d, false);
+  }
+  bucket("low");
   document.getElementById("navlist").innerHTML =
     html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
   document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${projSet.size} projects
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
      <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
 }
 

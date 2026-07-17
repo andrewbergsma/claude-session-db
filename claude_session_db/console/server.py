@@ -23,6 +23,7 @@ Endpoints
   GET  /api/sessions               light nav list (project, title, state, mtime)
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
+  GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
@@ -1364,6 +1365,253 @@ def digest_payload(sid: str, delta: bool, head, tail, full: bool):
 
 
 # ----------------------------------------------------------------------------
+# git tab — per-session repository status
+#
+# Read-only, lazy, and timeout-bounded: the endpoint resolves the session's cwd
+# from its transcript, shells out to git (status --porcelain, rev-parse, log,
+# stash list — NEVER a write command), and caches the snapshot per cwd with a
+# short TTL so tab polling doesn't hammer the repo. `gh pr list` is slower and
+# rate-limited, so PR data caches per repo root with a much longer TTL and a
+# refresh-on-demand path (?refresh=1 busts both caches). Every subprocess call
+# carries a timeout so a hung repo (network FS etc.) can't stall the console.
+#
+# Session-window commit attribution is best-effort by construction: commits are
+# flagged by whether their committer timestamp falls inside the transcript's
+# [started_at, last activity + margin] span — the UI labels them "commits in
+# session window", not "commits made by this session".
+# ----------------------------------------------------------------------------
+GIT_TIMEOUT_S = 3
+GH_TIMEOUT_S = 10
+GIT_TTL_S = 12
+GH_TTL_S = 300
+GIT_LIST_CAP = 40          # max dirty/untracked paths returned per list
+GIT_LOG_N = 30             # recent commits scanned for window flagging
+GIT_WINDOW_END_MARGIN_S = 120
+_GIT_CACHE: dict[str, tuple] = {}   # cwd -> (expires_at, snapshot)
+_GH_CACHE: dict[str, tuple] = {}    # repo root -> (expires_at, payload)
+_GIT_LOCK = threading.Lock()
+_FS = "\x1f"               # field separator for git log formats
+
+
+def _git(args, cwd):
+    """(rc, stdout) for a READ-ONLY git command; (None, "") on timeout/error.
+
+    --no-optional-locks keeps even `status` from touching the index, so the
+    console never writes into a repo it is merely observing.
+    """
+    try:
+        p = subprocess.run(["git", "--no-optional-locks"] + list(args),
+                           cwd=cwd, capture_output=True, text=True,
+                           timeout=GIT_TIMEOUT_S)
+        return p.returncode, p.stdout
+    except (subprocess.TimeoutExpired, OSError):
+        return None, ""
+
+
+def _iso_epoch(ts):
+    """Epoch seconds out of an ISO timestamp (Z or offset), or None."""
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _git_snapshot(cwd: str) -> dict:
+    """Repo identity + working-tree + branch snapshot for one cwd (uncached).
+
+    Non-repo cwds return {"repo": None}; a missing directory or a git that
+    times out degrades to an explanatory field, never an exception.
+    """
+    if not cwd or not Path(cwd).is_dir():
+        return {"cwd": cwd, "cwd_exists": False, "repo": None}
+    rc, top = _git(["rev-parse", "--show-toplevel"], cwd)
+    if rc is None:
+        return {"cwd": cwd, "cwd_exists": True, "repo": None,
+                "git_error": f"git timed out after {GIT_TIMEOUT_S}s"}
+    if rc != 0:
+        return {"cwd": cwd, "cwd_exists": True, "repo": None}
+    root = top.strip()
+
+    # worktree detection: a linked worktree's .git is a FILE pointing at the
+    # parent repo's .git/worktrees/<name>; git-common-dir names the parent.
+    _, dirs = _git(["rev-parse", "--git-dir", "--git-common-dir"], root)
+    lines = dirs.strip().split("\n")
+    git_dir = str((Path(root) / lines[0]).resolve()) if lines and lines[0] else ""
+    common = (str((Path(root) / lines[1]).resolve())
+              if len(lines) > 1 and lines[1] else git_dir)
+    is_worktree = bool(git_dir and common and git_dir != common)
+    parent_root = None
+    if is_worktree and common.endswith("/.git"):
+        parent_root = common[:-len("/.git")]
+    elif is_worktree:
+        parent_root = str(Path(common).parent)
+
+    rc_b, br = _git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    branch = br.strip() if rc_b == 0 else None
+    detached = branch == "HEAD"
+    if detached:
+        _, sha = _git(["rev-parse", "--short", "HEAD"], root)
+        branch = sha.strip() or None
+
+    # working tree: one porcelain pass — tracked changes vs untracked
+    dirty, untracked = [], []
+    rc_s, out = _git(["status", "--porcelain"], root)
+    for ln in (out.splitlines() if rc_s == 0 else []):
+        if len(ln) < 4:
+            continue
+        flags, path_ = ln[:2], ln[3:]
+        (untracked if flags == "??" else dirty).append(
+            {"flags": flags.strip(), "path": path_})
+
+    _, stash = _git(["stash", "list", "--format=%gd"], root)
+    stash_count = len([x for x in stash.splitlines() if x.strip()])
+
+    upstream = ahead = behind = None
+    rc_u, up = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name",
+                     "@{upstream}"], root)
+    if rc_u == 0:
+        upstream = up.strip()
+        rc_c, cnt = _git(["rev-list", "--left-right", "--count",
+                          "HEAD...@{upstream}"], root)
+        if rc_c == 0 and cnt.strip():
+            parts = cnt.split()
+            if len(parts) == 2:
+                ahead, behind = int(parts[0]), int(parts[1])
+
+    # recent commits on HEAD, oldest data the window flagging needs
+    commits = []
+    rc_l, log = _git(["log", f"-{GIT_LOG_N}",
+                      f"--format=%h{_FS}%s{_FS}%cI{_FS}%an"], root)
+    for ln in (log.splitlines() if rc_l == 0 else []):
+        p = ln.split(_FS)
+        if len(p) == 4:
+            commits.append({"hash": p[0], "subject": p[1], "when": p[2],
+                            "author": p[3], "epoch": _iso_epoch(p[2])})
+
+    return {
+        "cwd": cwd, "cwd_exists": True,
+        "repo": {
+            "root": root, "branch": branch, "detached": detached,
+            "is_worktree": is_worktree, "parent_root": parent_root,
+        },
+        "status": {
+            "dirty_count": len(dirty), "dirty": dirty[:GIT_LIST_CAP],
+            "untracked_count": len(untracked),
+            "untracked": untracked[:GIT_LIST_CAP],
+            "truncated": max(len(dirty), len(untracked)) > GIT_LIST_CAP,
+            "stash_count": stash_count,
+        },
+        "branch_status": {
+            "upstream": upstream, "ahead": ahead, "behind": behind,
+            "last_commit": commits[0] if commits else None,
+        },
+        "commits": commits,
+    }
+
+
+def _cached_snapshot(cwd: str, refresh: bool) -> dict:
+    now = time.time()
+    with _GIT_LOCK:
+        hit = _GIT_CACHE.get(cwd)
+        if hit and not refresh and hit[0] > now:
+            return hit[1]
+    snap = _git_snapshot(cwd)
+    with _GIT_LOCK:
+        _GIT_CACHE[cwd] = (now + GIT_TTL_S, snap)
+    return snap
+
+
+def _gh_prs(root: str, refresh: bool) -> dict:
+    """Open-PR listing for the repo, aggressively cached (GH_TTL_S).
+
+    `local` marks PRs whose head branch exists in this clone — the ones the
+    operator's sessions could have produced; those sort first.
+    """
+    now = time.time()
+    with _GIT_LOCK:
+        hit = _GH_CACHE.get(root)
+        if hit and not refresh and hit[0] > now:
+            return hit[1]
+    gh = shutil.which("gh")
+    if not gh:
+        payload = {"available": False, "reason": "gh CLI not installed"}
+    else:
+        rc, url = _git(["remote", "get-url", "origin"], root)
+        if rc != 0 or "github" not in (url or ""):
+            payload = {"available": False, "reason": "no GitHub origin remote"}
+        else:
+            try:
+                p = subprocess.run(
+                    [gh, "pr", "list", "--state", "open", "--json",
+                     "number,title,state,isDraft,headRefName,url",
+                     "--limit", "30"],
+                    cwd=root, capture_output=True, text=True,
+                    timeout=GH_TIMEOUT_S)
+                if p.returncode == 0:
+                    _, refs = _git(["for-each-ref", "refs/heads",
+                                    "--format=%(refname:short)"], root)
+                    local = set(refs.split())
+                    rows = [{"number": r.get("number"), "title": r.get("title"),
+                             "state": r.get("state"), "draft": r.get("isDraft"),
+                             "branch": r.get("headRefName"),
+                             "url": r.get("url"),
+                             "local": r.get("headRefName") in local}
+                            for r in json.loads(p.stdout or "[]")]
+                    rows.sort(key=lambda r: (not r["local"], -(r["number"] or 0)))
+                    payload = {"available": True, "prs": rows,
+                               "fetched_at": now}
+                else:
+                    payload = {"available": True, "prs": [],
+                               "error": (p.stderr or "").strip()[:200]}
+            except (subprocess.TimeoutExpired, OSError, ValueError) as exc:
+                payload = {"available": True, "prs": [],
+                           "error": f"gh: {type(exc).__name__}: {exc}"[:200]}
+    with _GIT_LOCK:
+        _GH_CACHE[root] = (now + GH_TTL_S, payload)
+    return payload
+
+
+def git_payload(sid: str, refresh: bool = False):
+    """(payload, code) for GET /api/git — repo status through the session lens."""
+    path = find_session(sid)
+    if path is None:
+        return {"error": "session not found"}, 404
+    # cwd from the transcript tail — the same derivation the nav uses
+    cwd = None
+    for r in tail_records(path, NAV_TAIL_BYTES):
+        if r.get("type") in ("user", "assistant") and r.get("cwd"):
+            cwd = r["cwd"]
+    if not cwd:
+        return {"cwd": None, "repo": None,
+                "error": "no cwd recorded in this transcript"}, 200
+
+    snap = dict(_cached_snapshot(cwd, refresh))
+
+    # session window: transcript start -> last append (+margin), commits flagged
+    started = _iso_epoch(_nav_stats(path)["started_at"])
+    try:
+        ended = path.stat().st_mtime
+    except OSError:
+        ended = time.time()
+    window = {"started_at": _nav_stats(path)["started_at"],
+              "ended_epoch": ended, "commits": []}
+    commits = snap.pop("commits", [])
+    if started:
+        end = ended + GIT_WINDOW_END_MARGIN_S
+        for c in commits:
+            if c.get("epoch") and started <= c["epoch"] <= end:
+                window["commits"].append(c)
+    snap["session_window"] = window
+
+    if snap.get("repo"):
+        snap["gh"] = _gh_prs(snap["repo"]["root"], refresh)
+    snap["generated_at"] = time.time()
+    return snap, 200
+
+
+# ----------------------------------------------------------------------------
 # auth
 #
 # The console is NOT a read-only surface: /api/answer and /api/fork spawn
@@ -1463,6 +1711,17 @@ class Handler(SimpleHTTPRequestHandler):
             d = angle_detail(sid, item)
             return self._json(d) if d else self._json(
                 {"error": f"{item} not mined for {sid}"}, 404)
+        if u.path == "/api/git":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                payload, code = git_payload(
+                    sid, refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/mgmt":
             q = parse_qs(u.query)
             try:

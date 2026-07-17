@@ -388,6 +388,25 @@ CREATE TABLE IF NOT EXISTS pr_links (
 CREATE INDEX IF NOT EXISTS idx_pr_session ON pr_links(session_id);
 CREATE INDEX IF NOT EXISTS idx_pr_source_file ON pr_links(source_file);
 
+-- Background-task outputs swept from the volatile /private/tmp scratchpad
+-- (wiped on reboot — this sweep is the only durable copy). Stored verbatim,
+-- keyed (session_id, task filename); idempotent by file mtime; bounded (large
+-- files kept to a head + truncation note). Symlinked .output files that
+-- resolve into ~/.claude/projects are skipped at sweep time: their content IS
+-- a subagent transcript already archived losslessly.
+CREATE TABLE IF NOT EXISTS task_outputs (
+    session_id    TEXT NOT NULL,
+    task_name     TEXT NOT NULL,
+    content       TEXT,
+    char_count    INTEGER,
+    truncated     BOOLEAN DEFAULT false,
+    file_size     BIGINT,
+    file_mtime_ns BIGINT,
+    source_path   TEXT,
+    captured_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, task_name)
+);
+
 -- Agent lifecycle (started / result) — keyed by content hash `key`
 CREATE TABLE IF NOT EXISTS agent_tasks (
     key         TEXT PRIMARY KEY,
@@ -1064,6 +1083,41 @@ class SessionArchive:
         self._batch_insert("agent_tasks", cols, rows, {"result"}, conflict="key",
                            conflict_update=["agent_id", "started", "result", "source_file"])
 
+    def get_task_output_mtimes(self, session_id: str) -> dict[str, int]:
+        """task_name -> file_mtime_ns already captured for a session (the
+        idempotence check for the /private/tmp task-output sweep)."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT task_name, file_mtime_ns FROM task_outputs "
+                        "WHERE session_id = %s", (session_id,))
+            rows = cur.fetchall()
+        conn.commit()  # release the read snapshot promptly (see query())
+        return {r[0]: r[1] for r in rows}
+
+    def upsert_task_output(self, row: dict) -> None:
+        """Capture one background-task .output file (verbatim, keyed
+        session_id + task filename; latest mtime wins)."""
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO task_outputs
+                   (session_id, task_name, content, char_count, truncated,
+                    file_size, file_mtime_ns, source_path, captured_at)
+                   VALUES (%(session_id)s, %(task_name)s, %(content)s,
+                           %(char_count)s, %(truncated)s, %(file_size)s,
+                           %(file_mtime_ns)s, %(source_path)s, now())
+                   ON CONFLICT (session_id, task_name) DO UPDATE SET
+                     content = EXCLUDED.content,
+                     char_count = EXCLUDED.char_count,
+                     truncated = EXCLUDED.truncated,
+                     file_size = EXCLUDED.file_size,
+                     file_mtime_ns = EXCLUDED.file_mtime_ns,
+                     source_path = EXCLUDED.source_path,
+                     captured_at = now()""",
+                {k: scrub(v) for k, v in row.items()},
+            )
+        conn.commit()
+
     def insert_file_history(self, snapshot_row: dict, backups: list[dict]) -> None:
         """Insert one snapshot + its backups (needs the generated snapshot_id)."""
         conn = self.connect()
@@ -1318,7 +1372,8 @@ class SessionArchive:
         """
         tables = ["projects", "sessions", "messages", "content_blocks", "tool_results",
                   "attachments", "system_events", "file_history", "file_backups",
-                  "queue_operations", "pr_links", "agent_tasks", "sync_state"]
+                  "queue_operations", "pr_links", "agent_tasks", "task_outputs",
+                  "sync_state"]
         stats: dict[str, Any] = {}
         conn = self.connect()
         with conn.cursor() as cur:

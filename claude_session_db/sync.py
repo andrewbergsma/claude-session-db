@@ -33,6 +33,13 @@ from .tool_tldr import tldr_result
 from .transcript_analyzer import classify_error
 
 
+# Volatile background-task outputs live at
+# /private/tmp/claude-<uid>/<proj-encoded>/<session-uuid>/tasks/<task>.output
+# and are wiped on reboot — the sweep below is their only durable copy.
+TASKS_TMP_BASE = Path("/private/tmp")
+TASK_OUTPUT_MAX_BYTES = 5 * 1024 * 1024
+
+
 def decode_project_path(encoded: str) -> str:
     """Decode a project dir name: -Users-me-GitHub-x -> /Users/me/GitHub/x."""
     if encoded.startswith("-"):
@@ -55,6 +62,7 @@ class SyncStats:
     pr_links: int = 0
     agent_tasks: int = 0
     overflow_results: int = 0
+    task_outputs: int = 0
     errors: int = 0
 
     def __str__(self) -> str:
@@ -69,6 +77,7 @@ class SyncStats:
             f"  System events: {self.system_events:,}\n"
             f"  Queue ops: {self.queue_operations:,}  File snapshots: {self.file_snapshots:,}\n"
             f"  PR links: {self.pr_links}  Agent tasks: {self.agent_tasks}\n"
+            f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
 
@@ -79,7 +88,7 @@ class SyncStats:
             ("results", self.tool_results), ("attach", self.attachments),
             ("sysevents", self.system_events), ("queueops", self.queue_operations),
             ("snapshots", self.file_snapshots), ("prs", self.pr_links),
-            ("agents", self.agent_tasks),
+            ("agents", self.agent_tasks), ("taskout", self.task_outputs),
         ]
         parts = [f"{n:,} {label}" for label, n in counts if n]
         body = ", ".join(parts) if parts else "no new records"
@@ -145,6 +154,10 @@ class SessionSync:
                         stats.files_synced += 1
                     else:
                         stats.files_skipped += 1
+                    if not is_sub:
+                        # Task outputs are swept even for mtime-skipped sessions:
+                        # a background task can finish after the JSONL settles.
+                        self._sweep_task_outputs(path.stem, path.parent.name, stats)
                 except Exception as e:  # noqa: BLE001 — keep going on per-file errors
                     # Roll back the aborted transaction so the connection recovers
                     # and subsequent files aren't poisoned by InFailedSqlTransaction.
@@ -217,6 +230,54 @@ class SessionSync:
         record_count = sum(len(v) for v in records.values())
         self.archive.update_sync_state(source_file, mtime_ns, record_count, st.st_size)
         return True
+
+    def _sweep_task_outputs(self, session_id: str, project_encoded: str,
+                            stats: SyncStats) -> None:
+        """Sweep /private/tmp/claude-*/<proj>/<sid>/tasks/*.output into the
+        archive — the existing external-overflow capture pattern applied to the
+        VOLATILE task-output files (wiped on reboot; this is the only durable
+        copy). Verbatim, keyed (session_id, task filename), idempotent by
+        mtime, bounded at TASK_OUTPUT_MAX_BYTES with a truncation note.
+        Symlinks resolving into ~/.claude/projects are skipped: their target IS
+        a subagent transcript the archive already holds losslessly."""
+        dirs = list(TASKS_TMP_BASE.glob(
+            f"claude-*/{project_encoded}/{session_id}/tasks"))
+        if not dirs:
+            return
+        known = self.archive.get_task_output_mtimes(session_id)
+        for d in dirs:
+            for f in sorted(d.glob("*.output")):
+                try:
+                    if f.is_symlink() and self.projects_dir in f.resolve().parents:
+                        continue
+                    st = f.stat()
+                except OSError:
+                    continue
+                if known.get(f.name) == st.st_mtime_ns:
+                    continue
+                truncated = st.st_size > TASK_OUTPUT_MAX_BYTES
+                try:
+                    with open(f, "rb") as fh:
+                        data = fh.read(TASK_OUTPUT_MAX_BYTES)
+                except OSError:
+                    continue
+                content = data.decode("utf-8", errors="replace")
+                if truncated:
+                    content += (f"\n\n[csd: truncated at {TASK_OUTPUT_MAX_BYTES}"
+                                f" of {st.st_size} bytes]")
+                self.log(f"  task output {session_id[:8]}/{f.name}"
+                         f" ({st.st_size:,}b{' truncated' if truncated else ''})")
+                self.archive.upsert_task_output({
+                    "session_id": session_id,
+                    "task_name": f.name,
+                    "content": content,
+                    "char_count": len(content),
+                    "truncated": truncated,
+                    "file_size": st.st_size,
+                    "file_mtime_ns": st.st_mtime_ns,
+                    "source_path": str(f),
+                })
+                stats.task_outputs += 1
 
     # -- record -> row builders --------------------------------------------
 

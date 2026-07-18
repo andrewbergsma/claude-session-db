@@ -1525,8 +1525,7 @@ async function send(isFork){
       body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });
     const d = await r.json();
     st.textContent = d.error ? "✗ "+d.error
-      : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
-      : d.action==="fork" ? "⑂ forked from end (headless)"
+      : d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
       : "✓ answer sent — headless turn running";
     if(!d.error){
       inp.value = "";

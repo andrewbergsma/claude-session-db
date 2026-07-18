@@ -129,6 +129,16 @@ refused if the session wrote within 15s — the two-writer guard); Fork branches
 it, and a point fork writes a **new** session file rather than mutating the
 original.
 
+**The console always mints a fork's session id itself** — a point fork writes
+the file under a `uuid4()` it chose, and an end fork passes that uuid to
+`claude --fork-session --session-id` (the CLI accepts `--session-id` on a
+resume *only* alongside `--fork-session`). Never let claude assign an id we
+then have to infer: both fork routes return `new_session`, and the spawned run
+registers under the **fork's** id, so Stop aims at the fork instead of its
+parent and the branch is addressable the moment it is created. Correlating a
+process start time against transcript birth times would be inference — racy
+when two runs share a project dir, and blind between spawn and first write.
+
 ### Console actions
 
 - **Stop** — SIGINT → SIGTERM → SIGKILL to the process group of a run *the

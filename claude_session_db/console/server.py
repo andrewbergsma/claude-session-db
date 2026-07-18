@@ -1606,6 +1606,9 @@ def _gh_prs(root: str, refresh: bool) -> dict:
                              "checks": _checks_rollup(r.get("statusCheckRollup")),
                              "oids": [c.get("oid") for c in (r.get("commits") or [])
                                       if isinstance(c, dict) and c.get("oid")],
+                             "subs": [c.get("messageHeadline") or ""
+                                      for c in (r.get("commits") or [])
+                                      if isinstance(c, dict)],
                              "local": r.get("headRefName") in local}
                             for r in json.loads(p.stdout or "[]")]
                     rows.sort(key=lambda r: (
@@ -1631,17 +1634,35 @@ def _pr_ref(pr: dict) -> dict:
             "url": pr["url"], "checks": pr["checks"]}
 
 
+_EQUIV_MIN_SUBJECT = 20   # chars — generic subjects ("fix typo") never ≈-match
+
+
 def _attribute_commits_to_prs(snap: dict, gh: dict):
     """Stamp every commit the payload surfaces with the PR that carries it.
 
-    Matching is oid-prefix (snapshot hashes are abbreviated %h, PR oids are
-    full); a merge commit that lands a PR on the base branch is matched by its
-    `Merge pull request #N` subject since it is not part of the PR's own
-    commits. Commits matching nothing get pr=None — "not part of any PR".
+    Matching, strongest first:
+    1. `Merge pull request #N` subject — the base-branch merge commit that
+       landed a PR (it is not part of the PR's own commits).
+    2. oid-prefix — the commit object itself is in the PR (snapshot hashes are
+       abbreviated %h, PR oids are full).
+    3. subject equivalence (`equiv: true`) — a PR commit carries the exact
+       same subject under a DIFFERENT sha, i.e. the change was cherry-picked
+       onto the PR's branch (the workbench-branch flow). Guarded by a minimum
+       subject length so boilerplate subjects can't false-positive; ties go to
+       the newest PR. The UI renders this as ≈#N, distinct from membership.
+
+    Commits matching nothing get pr=None — "not part of any PR".
     """
     prs = gh.get("prs") or []
     by_num = {p["number"]: p for p in prs}
     merge_re = re.compile(r"^Merge pull request #(\d+)\b")
+    by_subject = {}
+    for p in prs:
+        for s in p.get("subs", ()):
+            if len(s) >= _EQUIV_MIN_SUBJECT:
+                cur = by_subject.get(s)
+                if cur is None or (p["number"] or 0) > (cur["number"] or 0):
+                    by_subject[s] = p
 
     def find(c):
         h, subj = c.get("hash") or "", c.get("subject") or ""
@@ -1652,6 +1673,9 @@ def _attribute_commits_to_prs(snap: dict, gh: dict):
             for p in prs:
                 if any(o.startswith(h) for o in p.get("oids", ())):
                     return _pr_ref(p)
+        p = by_subject.get(subj)
+        if p is not None:
+            return {**_pr_ref(p), "equiv": True}
         return None
 
     for c in (snap.get("session_window") or {}).get("commits", []):
@@ -1703,7 +1727,7 @@ def git_payload(sid: str, refresh: bool = False):
         branch = snap["repo"].get("branch")
         out = dict(gh)
         out["prs"] = [
-            {**{k: v for k, v in p.items() if k != "oids"},
+            {**{k: v for k, v in p.items() if k not in ("oids", "subs")},
              "session_branch": bool(branch) and p.get("branch") == branch}
             for p in (gh.get("prs") or [])]
         snap["gh"] = out

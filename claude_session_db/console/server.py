@@ -19,6 +19,12 @@ calls Ollama, and never queries kmcp — it renders what the miner already left
 on disk. That keeps Direction A intact: transcript + state dir are the source
 of truth; no service is reached into.
 
+One deliberate exception to "no service is reached into": the per-session
+tl;dr (tldr.py) — a last-3-turns catch-up judged by the same small local model
+the angles probes use. Requests only ever serve the cached store off disk;
+generation is queued to a single in-process background worker and lands on a
+later poll, so the request path never blocks on a model.
+
 Endpoints
   GET  /api/sessions               light nav list (project, title, state, mtime)
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
@@ -27,6 +33,7 @@ Endpoints
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
+  POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
@@ -48,6 +55,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+
+from .. import tldr
 
 ROOT = Path(__file__).parent
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -706,6 +715,8 @@ def discover_sessions(archived=False):
             s["stoppable"] = stoppable(p.stem)
             s["agents"] = _agents_glance(p)
             s["priority"] = _priority_of(pri, p.stem)
+            # Cached-or-nothing; stale rows queue an async regeneration.
+            s["tldr"] = tldr.payload(p.stem, p)
             out.append(s)
     return out
 
@@ -943,6 +954,7 @@ def build_session(sid: str):
                    "events": len(events)},
         "events": events,
         "rail": angle_rail(sid),
+        "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
         "priority": _priority_of(_read_priority(), sid),
@@ -1781,6 +1793,15 @@ class Handler(SimpleHTTPRequestHandler):
                     {"error": f"priority must be one of {list(PRIORITIES)} "
                               "or null to clear"}, 400)
             return self._json(set_priority(sid, pr))
+
+        if route == "/api/tldr":
+            # Force-queue a regeneration (the per-session refresh affordance).
+            # Never blocks: the fresh tldr lands on a later /api/session poll.
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json({"ok": True, "tldr": tldr.payload(sid, p, force=True),
+                               "status": tldr.STATUS.get(sid)})
 
         if route == "/api/summarize":
             if ":" in sid:

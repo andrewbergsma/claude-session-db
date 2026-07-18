@@ -110,6 +110,15 @@
   .chip.sid { color:var(--accent); }
   .chip.br { color:var(--purple); }
 
+  /* tl;dr line: the glanceable last-3-turns catch-up in the session header */
+  #chdr .tldr { font-size:12.5px; line-height:1.45; color:var(--ink2); }
+  .tldr-k { font:9px var(--mono); font-weight:700; text-transform:uppercase;
+            letter-spacing:.5px; color:var(--purple); border:1px solid var(--purple);
+            border-radius:3px; padding:0 4px; margin-right:5px; vertical-align:1px; }
+  .tldr-muted { color:var(--muted); font-size:11.5px; }
+  .tldr-re { cursor:pointer; color:var(--muted); margin-left:6px; font:12px var(--mono); }
+  .tldr-re:hover { color:var(--accent); }
+
   #stream { flex:1; overflow-y:auto; padding:16px 20px 8px; }
   .ev { display:flex; gap:10px; margin:2px 0; }
   .ev .gutter { min-width:44px; text-align:right; color:var(--muted);
@@ -602,10 +611,12 @@ function sessRow(s, d, tagProject){
   const last = new Date(s.mtime*1000).toISOString();
   const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
   const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
+  // The tldr rides as the row's hover line — the compact layout stays intact.
+  const tl = s.tldr?.headline ? ` title="tl;dr — ${esc(s.tldr.headline)}"` : "";
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
     <span class="dot ${s.state}" title="${s.state}"></span>
     <span class="meta">
-      <div class="ttl">${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="ttl"${tl}>${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
     </span>
     ${ctxGauge(s.ctx_tokens)}</div>`;
@@ -721,6 +732,28 @@ function syncReplyStatus(s){
   setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")) st.textContent = ""; }, 8000);
 }
 
+/* tl;dr header line: what the session is about + what the agent is doing,
+   summarized from the last 3 full turns. Cached server-side; a stale tldr is
+   shown as-is while a fresh one generates in the background. */
+function tldrLine(s){
+  const t = s.tldr;
+  const re = `<span class="tldr-re" onclick="refreshTldr()" title="regenerate the tl;dr now">⟳</span>`;
+  if(!t) return s.subagent ? "" :
+    `<div class="tldr"><span class="tldr-k">tl;dr</span><span class="tldr-muted">not generated yet</span>${re}</div>`;
+  if(!t.headline)   // negative-cached failure (e.g. headless run, no real turns)
+    return `<div class="tldr"><span class="tldr-k">tl;dr</span><span class="tldr-muted">unavailable — ${esc(t.error||"?")}</span>${re}</div>`;
+  const stale = t.stale ? ` <span class="tldr-muted">(refreshing…)</span>` : "";
+  return `<div class="tldr" title="${esc(t.detail||"")}"><span class="tldr-k">tl;dr</span>${esc(t.headline)}${stale}${re}</div>`;
+}
+
+async function refreshTldr(){
+  if(!curId) return;
+  actmsg("tl;dr queued…");
+  const [ok, d] = await post("/api/tldr", {session_id: curId});
+  if(!ok || d.error){ actmsg(d.error || "tldr failed", true); return; }
+  actmsg("tl;dr regenerating — lands on the next poll");
+}
+
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
@@ -751,6 +784,7 @@ function renderHeader(s){
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
     </div>
+    ${tldrLine(s)}
     <div class="acts">
       <button class="act" ${s.stoppable?"":"disabled"} onclick="act('stop')"
         title="${s.stoppable
@@ -1077,19 +1111,45 @@ function angGroups(gs){
     </div>`).join("");
 }
 
+/* The tldr renders as an angle group per the headline contract: one line,
+   stable ID prefix (T), the fuller paragraph behind the ID. */
+function tldrGroup(s){
+  if(!s.tldr?.headline) return "";
+  return `<div class="ang-g"><div class="ang-h">≡ tldr</div>
+    <div class="ang-i" onclick="showTldr()">
+      <span class="ang-id">T1</span> ${esc(s.tldr.headline)}</div></div>`;
+}
+
+function showTldr(){
+  const t = curSession?.tldr;
+  if(!t) return;
+  const box = document.getElementById("raildetail");
+  box.className = "";
+  box.innerHTML = `${RAIL_BACK}<h4>T1 · tldr</h4>
+    <div class="ang-head">${esc(t.headline)}</div>
+    <div class="curate">
+      <button class="act sm" onclick="refreshTldr()" title="regenerate from the latest turns">⟳ regenerate</button>
+    </div>
+    <div class="kv"><span class="k">about</span><span class="v">${esc(t.about||"—")}</span></div>
+    <div class="kv"><span class="k">doing</span><span class="v">${esc(t.doing||"—")}</span></div>
+    <div class="kv"><span class="k">model</span><span class="v">${esc(t.backend||"?")} · ${esc(t.model||"?")} · ${t.latency_s!=null?t.latency_s+"s":"—"}</span></div>
+    <div class="kv"><span class="k">generated</span><span class="v">${esc(t.generated_at||"—")}${t.stale?" · stale":""}</span></div>
+    <pre class="ang-detail">${esc(t.detail||"(no detail)")}</pre>`;
+}
+
 function renderAngles(s){
   const el = document.getElementById("angles");
   const r = s.rail;
   if(!r || !r.angles.length){
-    el.innerHTML = `<h3>Turn angles</h3>
-      <div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
+    el.innerHTML = `<h3>Turn angles</h3>` + tldrGroup(s) +
+      `<div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
       to keep the latest turn's angles warm.</div>`;
     return;
   }
   const age = r.mined_age_s==null ? "" :
     `<span class="k" style="float:right">mined ${rel(Date.now()-r.mined_age_s*1000)}</span>`;
   const gs = r.angles.filter(g => !WRITE_ANGLES.has(g.angle));
-  el.innerHTML = `<h3>Turn angles ${age}</h3>` +
+  el.innerHTML = `<h3>Turn angles ${age}</h3>` + tldrGroup(s) +
     (gs.length ? angGroups(gs)
                : `<div class="rl-empty">nothing beyond writes this turn —
                   see the Writes tab.</div>`);

@@ -1535,11 +1535,43 @@ def _cached_snapshot(cwd: str, refresh: bool) -> dict:
     return snap
 
 
+_CHECK_FAIL = {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED",
+               "STARTUP_FAILURE"}
+_CHECK_PEND = {"PENDING", "EXPECTED", "IN_PROGRESS", "QUEUED", "REQUESTED",
+               "WAITING"}
+
+
+def _checks_rollup(rollup) -> str | None:
+    """Collapse a statusCheckRollup list to fail/pending/pass; None if no checks.
+
+    Entries are CheckRun ({status, conclusion}) or StatusContext ({state});
+    any failure-ish verdict wins, then any still-running one.
+    """
+    if not rollup:
+        return None
+    verdicts = []
+    for c in rollup:
+        if not isinstance(c, dict):
+            continue
+        v = (c.get("conclusion") or c.get("state") or c.get("status") or "")
+        verdicts.append(str(v).upper())
+    if not verdicts:
+        return None
+    if any(v in _CHECK_FAIL for v in verdicts):
+        return "fail"
+    if any(v in _CHECK_PEND or v == "" for v in verdicts):
+        return "pending"
+    return "pass"
+
+
 def _gh_prs(root: str, refresh: bool) -> dict:
-    """Open-PR listing for the repo, aggressively cached (GH_TTL_S).
+    """PR listing for the repo (open AND recently closed/merged), cached (GH_TTL_S).
 
     `local` marks PRs whose head branch exists in this clone — the ones the
-    operator's sessions could have produced; those sort first.
+    operator's sessions could have produced; open-and-local sort first.
+    Each row keeps the PR's commit oids (`oids`, full hashes) so callers can
+    attribute repo commits to the PR that carries them, plus a `checks`
+    rollup (pass/fail/pending) and `merged_at`.
     """
     now = time.time()
     with _GIT_LOCK:
@@ -1556,8 +1588,9 @@ def _gh_prs(root: str, refresh: bool) -> dict:
         else:
             try:
                 p = subprocess.run(
-                    [gh, "pr", "list", "--state", "open", "--json",
-                     "number,title,state,isDraft,headRefName,url",
+                    [gh, "pr", "list", "--state", "all", "--json",
+                     "number,title,state,isDraft,headRefName,url,mergedAt,"
+                     "statusCheckRollup,commits",
                      "--limit", "30"],
                     cwd=root, capture_output=True, text=True,
                     timeout=GH_TIMEOUT_S)
@@ -1569,9 +1602,16 @@ def _gh_prs(root: str, refresh: bool) -> dict:
                              "state": r.get("state"), "draft": r.get("isDraft"),
                              "branch": r.get("headRefName"),
                              "url": r.get("url"),
+                             "merged_at": r.get("mergedAt"),
+                             "checks": _checks_rollup(r.get("statusCheckRollup")),
+                             "oids": [c.get("oid") for c in (r.get("commits") or [])
+                                      if isinstance(c, dict) and c.get("oid")],
                              "local": r.get("headRefName") in local}
                             for r in json.loads(p.stdout or "[]")]
-                    rows.sort(key=lambda r: (not r["local"], -(r["number"] or 0)))
+                    rows.sort(key=lambda r: (
+                        r["state"] != "OPEN",
+                        not r["local"] if r["state"] == "OPEN" else False,
+                        -(r["number"] or 0)))
                     payload = {"available": True, "prs": rows,
                                "fetched_at": now}
                 else:
@@ -1583,6 +1623,42 @@ def _gh_prs(root: str, refresh: bool) -> dict:
     with _GIT_LOCK:
         _GH_CACHE[root] = (now + GH_TTL_S, payload)
     return payload
+
+
+def _pr_ref(pr: dict) -> dict:
+    """The compact commit-side annotation: which PR a commit belongs to."""
+    return {"number": pr["number"], "state": pr["state"],
+            "url": pr["url"], "checks": pr["checks"]}
+
+
+def _attribute_commits_to_prs(snap: dict, gh: dict):
+    """Stamp every commit the payload surfaces with the PR that carries it.
+
+    Matching is oid-prefix (snapshot hashes are abbreviated %h, PR oids are
+    full); a merge commit that lands a PR on the base branch is matched by its
+    `Merge pull request #N` subject since it is not part of the PR's own
+    commits. Commits matching nothing get pr=None — "not part of any PR".
+    """
+    prs = gh.get("prs") or []
+    by_num = {p["number"]: p for p in prs}
+    merge_re = re.compile(r"^Merge pull request #(\d+)\b")
+
+    def find(c):
+        h, subj = c.get("hash") or "", c.get("subject") or ""
+        m = merge_re.match(subj)
+        if m and int(m.group(1)) in by_num:
+            return _pr_ref(by_num[int(m.group(1))])
+        if h:
+            for p in prs:
+                if any(o.startswith(h) for o in p.get("oids", ())):
+                    return _pr_ref(p)
+        return None
+
+    for c in (snap.get("session_window") or {}).get("commits", []):
+        c["pr"] = find(c)
+    last = (snap.get("branch_status") or {}).get("last_commit")
+    if last:
+        last["pr"] = find(last)
 
 
 def git_payload(sid: str, refresh: bool = False):
@@ -1618,7 +1694,19 @@ def git_payload(sid: str, refresh: bool = False):
     snap["session_window"] = window
 
     if snap.get("repo"):
-        snap["gh"] = _gh_prs(snap["repo"]["root"], refresh)
+        gh = _gh_prs(snap["repo"]["root"], refresh)
+        # only stamp pr/None on commits when a real listing was fetched —
+        # otherwise "no PR" would be indistinguishable from "gh unavailable"
+        if gh.get("available") and not gh.get("error"):
+            _attribute_commits_to_prs(snap, gh)
+        # ship the listing without the oid payload; flag the session branch's PR
+        branch = snap["repo"].get("branch")
+        out = dict(gh)
+        out["prs"] = [
+            {**{k: v for k, v in p.items() if k != "oids"},
+             "session_branch": bool(branch) and p.get("branch") == branch}
+            for p in (gh.get("prs") or [])]
+        snap["gh"] = out
     snap["generated_at"] = time.time()
     return snap, 200
 

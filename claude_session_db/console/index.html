@@ -325,6 +325,24 @@
               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .gpr .gnum { color:var(--good); font-weight:700; }
   .gpr.draft .gnum { color:var(--muted); }
+  .gpr.merged .gnum { color:var(--purple); }
+  .gpr.closed .gnum { color:var(--bad); }
+  .gpr.session { border-color:var(--accent); }
+  .gpstate { font:9px var(--mono); font-weight:700; text-transform:uppercase;
+             border:1px solid var(--border); border-radius:4px; padding:0 4px;
+             margin-left:6px; color:var(--muted); vertical-align:1px; }
+  .gpstate.open { color:var(--good); border-color:var(--good); }
+  .gpstate.merged { color:var(--purple); border-color:var(--purple); }
+  .gpstate.closed { color:var(--bad); border-color:var(--bad); }
+  .gchk.pass { color:var(--good); } .gchk.fail { color:var(--bad); }
+  .gchk.pending { color:var(--warn); }
+  .gcommit .gpr-tag { flex:0 0 auto; font:9.5px var(--mono); font-weight:700;
+                      text-decoration:none; border:1px solid var(--border);
+                      border-radius:4px; padding:0 4px; color:var(--muted); }
+  .gcommit .gpr-tag.open { color:var(--good); border-color:var(--good); }
+  .gcommit .gpr-tag.merged { color:var(--purple); border-color:var(--purple); }
+  .gcommit .gpr-tag.closed { color:var(--bad); border-color:var(--bad); }
+  .gcommit .gpr-tag:hover { border-color:var(--accent); color:var(--accent); }
   .gwt { color:var(--purple); }
 
   /* first-class search rows + rail hit list */
@@ -1245,9 +1263,27 @@ function gitFiles(list, untracked){
     <span class="gp">${esc(f.path)}</span></div>`).join("");
 }
 
+function prStateCls(state, draft){
+  return draft ? "draft" : (state||"").toLowerCase();  // open | merged | closed
+}
+
+function checksGlyph(checks){
+  if(!checks) return "";
+  const g = {pass:"✓", fail:"✗", pending:"⏳"}[checks] || "";
+  return g ? ` <span class="gchk ${checks}" title="checks: ${checks}">${g}</span>` : "";
+}
+
 function gitCommitRow(c){
+  const pr = c.pr
+    ? `<a class="gpr-tag ${prStateCls(c.pr.state)}" href="${esc(c.pr.url||"#")}"
+         target="_blank" onclick="event.stopPropagation()"
+         title="in PR #${c.pr.number} (${esc((c.pr.state||"").toLowerCase())}${c.pr.checks?`, checks ${c.pr.checks}`:""})">#${c.pr.number}</a>`
+    : c.pr === null
+    ? `<span class="gpr-tag" title="not part of any PR">—</span>`
+    : "";   // pr key absent: gh unavailable, membership unknown
   return `<div class="gcommit"><span class="gh">${esc(c.hash)}</span>
     <span class="gs">${esc(c.subject)}</span>
+    ${pr}
     <span class="gt">${c.when?rel(c.when):""}</span></div>`;
 }
 
@@ -1324,11 +1360,24 @@ function renderGit(d){
   else if(gh.error)
     html += `<div class="rl-empty">${esc(gh.error)}</div>`;
   else if(!(gh.prs||[]).length)
-    html += `<div class="rl-empty">no open PRs</div>`;
-  else
-    html += gh.prs.map(p => `<a class="gpr ${p.draft?"draft":""}" href="${esc(p.url||"#")}" target="_blank">
-      <span class="gt1"><span class="gnum">#${p.number}</span> ${esc(p.title||"")}</span>
-      <span class="gt2">${esc(p.branch||"")}${p.draft?" · draft":""}${p.local?"":" · not local"}</span></a>`).join("");
+    html += `<div class="rl-empty">no PRs</div>`;
+  else{
+    const open = gh.prs.filter(p => p.state === "OPEN");
+    const done = gh.prs.filter(p => p.state !== "OPEN").slice(0, 8);
+    const row = p => {
+      const cls = prStateCls(p.state, p.draft);
+      const when = p.state === "MERGED" && p.merged_at
+        ? ` · merged ${rel(p.merged_at)}` : "";
+      return `<a class="gpr ${cls}${p.session_branch?" session":""}" href="${esc(p.url||"#")}" target="_blank"
+        ${p.session_branch?`title="this session's branch"`:""}>
+        <span class="gt1"><span class="gnum">#${p.number}</span> ${esc(p.title||"")}<span class="gpstate ${cls}">${p.draft?"draft":esc((p.state||"").toLowerCase())}</span>${checksGlyph(p.checks)}</span>
+        <span class="gt2">${esc(p.branch||"")}${when}${p.local||p.state!=="OPEN"?"":" · not local"}</span></a>`;
+    };
+    html += open.length ? open.map(row).join("")
+                        : `<div class="rl-empty">no open PRs</div>`;
+    if(done.length)
+      html += `<div class="wr-h">recently merged / closed</div>` + done.map(row).join("");
+  }
   el.innerHTML = html;
 }
 

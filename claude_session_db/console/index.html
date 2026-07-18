@@ -293,6 +293,31 @@
   .rl-secs a.s:hover { border-color:var(--accent); color:var(--accent); }
   #summary { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }
 
+  /* Git tab */
+  .gh3 { display:flex; align-items:baseline; gap:8px; }
+  .gh3 .act { margin-left:auto; }
+  .gfile { display:flex; gap:7px; align-items:baseline; font:11px var(--mono);
+           color:var(--ink2); margin:2px 0; min-width:0; }
+  .gfile .gf { flex:0 0 auto; width:16px; color:var(--warn); font-weight:700; }
+  .gfile .gf.unt { color:var(--muted); }
+  .gfile .gp { min-width:0; word-break:break-all; }
+  .gmore { font:10.5px var(--mono); color:var(--muted); margin:3px 0 0 23px; }
+  .gcommit { display:flex; gap:7px; align-items:baseline; font:11px var(--mono);
+             color:var(--ink2); margin:3px 0; min-width:0; }
+  .gcommit .gh { flex:0 0 auto; color:var(--accent); }
+  .gcommit .gs { min-width:0; word-break:break-word; }
+  .gcommit .gt { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
+  .gpr { display:block; text-decoration:none; padding:6px 8px; margin-bottom:6px;
+         border:1px solid var(--border); border-radius:6px; background:var(--surface2); }
+  .gpr:hover { border-color:var(--accent); }
+  .gpr .gt1 { display:block; font-size:12px; color:var(--ink); white-space:nowrap;
+              overflow:hidden; text-overflow:ellipsis; }
+  .gpr .gt2 { display:block; font:10.5px var(--mono); color:var(--muted);
+              white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .gpr .gnum { color:var(--good); font-weight:700; }
+  .gpr.draft .gnum { color:var(--muted); }
+  .gwt { color:var(--purple); }
+
   /* first-class search rows + rail hit list */
   .read.search .ic { filter:none; }
   .read.search .pth .app { color:var(--purple); }
@@ -406,10 +431,12 @@
       <span class="rtab" data-t="angles" onclick="setRailTab('angles')">Angles</span>
       <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
       <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
+      <span class="rtab" data-t="git" onclick="setRailTab('git')">Git</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
     <div id="pane-writes" class="rtabpane"><div id="writes"></div></div>
+    <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
@@ -639,6 +666,7 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 /* ---------- session detail ---------- */
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
+  gitBadge(0);   // stale dirty-count from the previous session
   clearAwait(); document.getElementById("cstatus").textContent = "";
   document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
   await refreshSession(true);
@@ -651,7 +679,7 @@ async function refreshSession(scrollBottom){
   if(s.error) return;
   curSession = s;
   renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
-  renderWrites(s); renderSummary(s);
+  renderWrites(s); renderSummary(s); maybeLoadGit(false);
   const st = document.getElementById("stream");
   if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
   syncReplyStatus(s);
@@ -1030,11 +1058,12 @@ function setRailTab(t){
   railTab = t;
   localStorage.setItem("csd.consoleRailTab", t);
   applyRailTab();
+  if(t === "git") maybeLoadGit(false);   // lazy: only computed when the tab opens
 }
 function applyRailTab(){
   document.querySelectorAll("#railtabs .rtab").forEach(el =>
     el.classList.toggle("on", el.dataset.t === railTab));
-  for(const t of ["angles","context","writes"])
+  for(const t of ["angles","context","writes","git"])
     document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
 }
 applyRailTab();
@@ -1115,6 +1144,132 @@ function renderWrites(s){
     (parts.length ? parts.join("")
                   : `<div class="rl-empty">no file or kmcp writes seen in this
                      session's transcript.</div>`);
+}
+
+/* ---------- Git tab: per-session repo status ------------------------------
+   Lazy (fetched only while the Git tab is open), client-TTL'd on top of the
+   server's per-repo cache; ⟳ passes refresh=1 to bust both (incl. the slow
+   5-min gh PR cache). Everything shown comes from read-only git commands. */
+let gitFor = null, gitAt = 0, gitLoading = false;
+const GIT_CLIENT_TTL = 15000;
+
+async function maybeLoadGit(force){
+  if(railTab !== "git" || !curId || gitLoading) return;
+  if(!force && gitFor === curId && Date.now() - gitAt < GIT_CLIENT_TTL) return;
+  gitLoading = true;
+  const el = document.getElementById("gitinfo");
+  if(gitFor !== curId)
+    el.innerHTML = `<h3>Git</h3><div class="rl-empty">loading…</div>`;
+  try {
+    const d = await (await fetch(`/api/git?id=${curId}${force?"&refresh=1":""}`)).json();
+    gitFor = curId; gitAt = Date.now();
+    renderGit(d);
+  } catch(e){
+    el.innerHTML = `<h3>Git</h3><div class="rl-empty">unavailable — ${esc(String(e))}</div>`;
+  }
+  gitLoading = false;
+}
+
+function gitBadge(n){
+  const tab = document.querySelector('#railtabs .rtab[data-t="git"]');
+  if(tab) tab.textContent = n ? `Git ·${n}` : "Git";
+}
+
+function shortPath(p){
+  return (p||"").replace(/^\/Users\/[^/]+/, "~");
+}
+
+function gitFiles(list, untracked){
+  return (list||[]).map(f => `<div class="gfile">
+    <span class="gf ${untracked?"unt":""}">${esc(untracked?"?":(f.flags||"·"))}</span>
+    <span class="gp">${esc(f.path)}</span></div>`).join("");
+}
+
+function gitCommitRow(c){
+  return `<div class="gcommit"><span class="gh">${esc(c.hash)}</span>
+    <span class="gs">${esc(c.subject)}</span>
+    <span class="gt">${c.when?rel(c.when):""}</span></div>`;
+}
+
+function renderGit(d){
+  const el = document.getElementById("gitinfo");
+  const hdr = `<div class="gh3"><h3>Git</h3>
+    <button class="act sm" onclick="maybeLoadGit(true)"
+      title="Re-run git now and re-fetch PRs (bypasses both caches)">⟳ refresh</button></div>`;
+  if(d.error && !d.repo){
+    gitBadge(0);
+    el.innerHTML = `${hdr}<div class="rl-empty">${esc(d.error)}</div>`;
+    return;
+  }
+  if(!d.repo){
+    gitBadge(0);
+    el.innerHTML = `${hdr}
+      <div class="kv"><span class="k">cwd</span>
+        <span class="v" title="${esc(d.cwd||"")}">${esc(shortPath(d.cwd))}</span></div>
+      <div class="rl-empty" style="margin-top:10px">${
+        d.cwd_exists === false ? "directory no longer exists"
+        : d.git_error ? esc(d.git_error) : "not a git repository"}</div>`;
+    return;
+  }
+  const r = d.repo, st = d.status || {}, bs = d.branch_status || {};
+  gitBadge((st.dirty_count||0) + (st.untracked_count||0));
+
+  // identity
+  let html = hdr;
+  html += `<div class="kv"><span class="k">cwd</span>
+    <span class="v" title="${esc(d.cwd||"")}">${esc(shortPath(d.cwd))}</span></div>`;
+  html += `<div class="kv"><span class="k">repo</span>
+    <span class="v" title="${esc(r.root||"")}">${esc(shortPath(r.root))}</span></div>`;
+  if(r.is_worktree)
+    html += `<div class="kv"><span class="k">worktree</span>
+      <span class="v gwt" title="linked worktree of ${esc(r.parent_root||"?")}">⌥ of ${esc(shortPath(r.parent_root||"?"))}</span></div>`;
+  html += `<div class="kv"><span class="k">branch</span>
+    <span class="v">⎇ ${esc(r.branch||"?")}${r.detached?" (detached)":""}</span></div>`;
+
+  // working tree
+  const clean = !st.dirty_count && !st.untracked_count;
+  html += `<div class="wr-h">working tree · ${clean ? "clean"
+    : `${st.dirty_count||0} dirty · ${st.untracked_count||0} untracked`}${
+    st.stash_count ? ` · ${st.stash_count} stashed` : ""}</div>`;
+  if(st.dirty_count) html += gitFiles(st.dirty, false);
+  if(st.untracked_count) html += gitFiles(st.untracked, true);
+  const shown = (st.dirty||[]).length + (st.untracked||[]).length;
+  const totalFiles = (st.dirty_count||0) + (st.untracked_count||0);
+  if(totalFiles > shown)
+    html += `<div class="gmore">… +${totalFiles - shown} more (list truncated)</div>`;
+
+  // branch status
+  const upd = bs.upstream
+    ? `${esc(bs.upstream)}${bs.ahead||bs.behind ? ` · ↑${bs.ahead||0} ↓${bs.behind||0}` : " · in sync"}`
+    : "no upstream";
+  html += `<div class="wr-h">branch</div>
+    <div class="kv"><span class="k">upstream</span><span class="v">${upd}</span></div>`;
+  if(bs.last_commit)
+    html += `<div class="kv"><span class="k">last commit</span>
+      <span class="v" style="text-align:left">${gitCommitRow(bs.last_commit)}</span></div>`;
+
+  // commits in session window (best-effort attribution by timestamp)
+  const w = d.session_window || {};
+  html += `<div class="wr-h" title="commits on this branch whose timestamps fall inside the transcript's timespan — attribution is best-effort">commits in session window · ${(w.commits||[]).length}</div>`;
+  html += (w.commits||[]).length
+    ? w.commits.map(gitCommitRow).join("")
+    : `<div class="rl-empty">none in this session's timespan</div>`;
+
+  // PRs
+  const gh = d.gh || {};
+  html += `<div class="wr-h">pull requests${
+    gh.fetched_at ? ` · fetched ${rel(gh.fetched_at*1000)} ago` : ""}</div>`;
+  if(!gh.available)
+    html += `<div class="rl-empty">${esc(gh.reason||"gh unavailable")}</div>`;
+  else if(gh.error)
+    html += `<div class="rl-empty">${esc(gh.error)}</div>`;
+  else if(!(gh.prs||[]).length)
+    html += `<div class="rl-empty">no open PRs</div>`;
+  else
+    html += gh.prs.map(p => `<a class="gpr ${p.draft?"draft":""}" href="${esc(p.url||"#")}" target="_blank">
+      <span class="gt1"><span class="gnum">#${p.number}</span> ${esc(p.title||"")}</span>
+      <span class="gt2">${esc(p.branch||"")}${p.draft?" · draft":""}${p.local?"":" · not local"}</span></a>`).join("");
+  el.innerHTML = html;
 }
 
 async function showAngle(itemId){

@@ -343,6 +343,7 @@
   .gcommit .gpr-tag.merged { color:var(--purple); border-color:var(--purple); }
   .gcommit .gpr-tag.closed { color:var(--bad); border-color:var(--bad); }
   .gcommit .gpr-tag:hover { border-color:var(--accent); color:var(--accent); }
+  .gcommit .gpr-tag.equiv { border-style:dashed; }
   .gwt { color:var(--purple); }
 
   /* first-class search rows + rail hit list */
@@ -1275,9 +1276,11 @@ function checksGlyph(checks){
 
 function gitCommitRow(c){
   const pr = c.pr
-    ? `<a class="gpr-tag ${prStateCls(c.pr.state)}" href="${esc(c.pr.url||"#")}"
+    ? `<a class="gpr-tag ${prStateCls(c.pr.state)}${c.pr.equiv?" equiv":""}" href="${esc(c.pr.url||"#")}"
          target="_blank" onclick="event.stopPropagation()"
-         title="in PR #${c.pr.number} (${esc((c.pr.state||"").toLowerCase())}${c.pr.checks?`, checks ${c.pr.checks}`:""})">#${c.pr.number}</a>`
+         title="${c.pr.equiv
+           ? `same change shipped as PR #${c.pr.number} (${esc((c.pr.state||"").toLowerCase())}) under a different sha — cherry-picked onto its branch`
+           : `in PR #${c.pr.number} (${esc((c.pr.state||"").toLowerCase())}${c.pr.checks?`, checks ${c.pr.checks}`:""})`}">${c.pr.equiv?"≈":""}#${c.pr.number}</a>`
     : c.pr === null
     ? `<span class="gpr-tag" title="not part of any PR">—</span>`
     : "";   // pr key absent: gh unavailable, membership unknown

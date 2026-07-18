@@ -195,6 +195,8 @@
   #compose button:disabled { opacity:.4; cursor:not-allowed; }
   #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
              min-height:14px; background:var(--surface); }
+  #cwarn { display:none; color:var(--warn); opacity:.7; font:11px var(--mono);
+           padding:6px 20px 0; background:var(--surface); }
 
   /* ---- right: read detail rail ---- */
   #rail { background:var(--surface); border-left:1px solid var(--border);
@@ -383,8 +385,11 @@
     <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
     <div id="stream"><div class="empty">pick a session on the left</div></div>
     <div id="cstatus"></div>
+    <div id="cwarn">⚠ two-writer note: if an interactive window is open on this session,
+      refresh it (exit + resume) before typing there — an inline reply typed into a stale
+      window will orphan turns sent from here. Fork instead to leave this session untouched.</div>
     <div id="compose">
-      <input id="cin" placeholder="answer this session… (fork if it's running)" disabled
+      <input id="cin" placeholder="answer this session…" disabled
              onkeydown="if(event.key==='Enter')send(false)">
       <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
       <button id="bfork" disabled onclick="send(true)">Fork</button>
@@ -735,7 +740,6 @@ function renderHeader(s){
       </span>
       <span id="actmsg" class="actmsg"></span>
     </div>`;
-  const running = s.state==="running";
   if(sub){
     // Child (subagent) transcripts are read-only: there is no session to
     // resume — answers and forks belong to the parent.
@@ -744,13 +748,28 @@ function renderHeader(s){
       "subagent transcript — read-only; answer the parent session";
     document.getElementById("bans").disabled = true;
     document.getElementById("bfork").disabled = true;
+    document.getElementById("cwarn").style.display = "none";
     return;
   }
+  // Answer gating — from process reality, not transcript shape. An EXITED
+  // session is the SAFE append case: `claude -p --resume` appends to the
+  // file, and a later interactive resume replays the full chain. So the
+  // hard block is only real evidence of a writer in flight — a run this
+  // console spawned, or a transcript written seconds ago (the server's
+  // two-writer guard refuses < 15s regardless). Transcript shape
+  // (state === "running") cannot distinguish an exited session from an
+  // idle-but-open interactive window, so it must not force Fork; for that
+  // undetectable case we allow Answer and show the soft #cwarn note
+  // instead. Fork stays available as an explicit choice.
+  const writing = !!s.stoppable ||
+                  (s.mtime_age_s != null && s.mtime_age_s < 20);
   document.getElementById("cin").disabled = false;
-  document.getElementById("cin").placeholder = running
-    ? "session is running — Fork to speak into a copy" : "answer this session…";
-  document.getElementById("bans").disabled = running;
+  document.getElementById("cin").placeholder = writing
+    ? "session is writing right now — wait for it to settle, or Fork to speak into a copy"
+    : "answer this session…";
+  document.getElementById("bans").disabled = writing;
   document.getElementById("bfork").disabled = false;
+  document.getElementById("cwarn").style.display = writing ? "none" : "block";
 }
 
 /* "app:path" ref → [app, path] (path may itself contain no colon worth splitting) */

@@ -486,6 +486,26 @@
   #topicdlg .td-in:focus { border-color:var(--accent); }
   #topicdlg .td-actions { display:flex; gap:6px; margin-top:14px; }
   #topicdlg .td-actions .primary { color:var(--purple); border-color:var(--purple); }
+
+  /* ---- tl;dr timeline overlay (whole-session catch-up) ---- */
+  #tl { position:fixed; inset:0; background:var(--bg); z-index:50; display:none;
+        flex-direction:column; padding:16px 20px; overflow:hidden; }
+  #tl.open { display:flex; }
+  #tl .mh { display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }
+  #tl .mh h2 { font-size:15px; font-weight:600; }
+  #tl .mh .note { color:var(--muted); font-size:11.5px; }
+  #tl .mh .re { cursor:pointer; color:var(--muted); font:12px var(--mono); }
+  #tl .mh .re:hover { color:var(--accent); }
+  #tl .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
+               font:12px var(--mono); }
+  #tl .mh .x:hover { color:var(--ink); }
+  #tlbody { flex:1; overflow:auto; min-height:0; max-width:900px; }
+  .tlrow { display:grid; grid-template-columns:66px 1fr; gap:14px;
+           padding:9px 4px; border-bottom:1px solid var(--border); align-items:baseline; }
+  .tlrow .tm { font:11px var(--mono); color:var(--accent); white-space:nowrap; }
+  .tlrow .sm { font-size:13px; line-height:1.5; color:var(--ink); }
+  .tlrow.pending .sm { color:var(--muted); font-style:italic; }
+  #tl .tlnote { color:var(--muted); font-size:11.5px; padding:10px 4px; }
 </style>
 </head>
 <body>
@@ -575,6 +595,17 @@
         <button class="act sm" onclick="closeTopicDlg()">Cancel</button>
       </div>
     </div>
+  </div>
+
+  <!-- tl;dr timeline overlay: whole-session, time-stamped catch-up -->
+  <div id="tl">
+    <div class="mh">
+      <h2>tl;dr timeline</h2>
+      <span id="tlnote" class="note"></span>
+      <span class="re" onclick="genTimeline()" title="regenerate the whole-session timeline">⟳ regenerate</span>
+      <span class="x" onclick="closeTimeline()">✕ close (Esc)</span>
+    </div>
+    <div id="tlbody"><div class="empty">loading…</div></div>
   </div>
 
 <script>
@@ -918,6 +949,7 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 /* ---------- session detail ---------- */
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
+  if(tlOpen) closeTimeline();   // the timeline overlay is scoped to one session
   gitBadge(0);   // stale dirty-count from the previous session
   clearAwait(); document.getElementById("cstatus").textContent = "";
   document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
@@ -1045,6 +1077,8 @@ function renderHeader(s){
         title="Set or clear a human-readable title (overlay only — never touches the transcript)">✎ ${s.user_title?"Retitle":"Title"}</button>
       <button class="act" onclick="openTopicDlg()"
         title="Assign a reusable topic › subtopic (overlay only — groups sessions independent of folder)">▦ Topic</button>
+      <button class="act" onclick="openTimeline()"
+        title="Whole-session catch-up: one time-stamped line per turn (tool results omitted), mined by the local model on demand">⧗ tl;dr timeline</button>
       <span class="pris"><span class="k-pri">priority</span>
         ${["critical","high","med","low"].map(p =>
           `<button class="act sm pribtn p-${p} ${s.priority===p?"on":""}"
@@ -1868,8 +1902,8 @@ async function send(isFork){
       return;
     }
     if(!r.ok || d.error){ st.textContent = "✗ "+(d.error || (r.status+" "+r.statusText)); return; }
-    st.textContent = d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
-      : d.action==="fork" ? "⑂ forked from end (headless)"
+    // Both fork routes mint & return new_session (fork-session-id fix); surface it.
+    st.textContent = d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
       : "✓ answer sent — headless turn running";
     inp.value = "";
     // A plain answer resumes THIS session's file, so we can track it live.
@@ -1888,6 +1922,80 @@ async function openParent(parentId, anchorUuid){
   el.classList.add("anchor-flash");
   setTimeout(()=>el.classList.remove("anchor-flash"), 2500);
 }
+
+/* ---------- tl;dr timeline overlay: whole-session catch-up -----------------
+   A pre-determined "angle button". One time-stamped line per user-prompt turn
+   (tool RESULTS omitted), mined by the local model on demand via
+   POST/GET /api/timeline (session_timeline.py). First open auto-generates;
+   later opens serve the cached store instantly and offer ⟳ to regenerate. */
+let tlOpen = false, tlTimer = null;
+
+function openTimeline(){
+  if(!curId){ actmsg("open a session first", true); return; }
+  tlOpen = true;
+  document.getElementById("tl").classList.add("open");
+  document.getElementById("tlbody").innerHTML = `<div class="empty">loading…</div>`;
+  document.getElementById("tlnote").textContent = "";
+  loadTimeline();
+}
+function closeTimeline(){
+  tlOpen = false;
+  clearTimeout(tlTimer); tlTimer = null;
+  document.getElementById("tl").classList.remove("open");
+}
+async function loadTimeline(){
+  if(!tlOpen || !curId) return;
+  let d; try { d = await (await fetch("/api/timeline?id=" + encodeURIComponent(curId))).json(); }
+  catch(e){ return; }
+  const tl = d && d.timeline;
+  if(!tl) return genTimeline();          // never generated -> kick it off
+  renderTimeline(tl);
+  if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+}
+async function genTimeline(){
+  if(!curId) return;
+  document.getElementById("tlbody").innerHTML =
+    `<div class="empty">mining the whole session… one local-model pass per turn</div>`;
+  const [ok, d] = await post("/api/timeline", {session_id: curId});
+  if(!ok || d.error){
+    document.getElementById("tlbody").innerHTML =
+      `<div class="empty">timeline failed — ${esc(d.error || "?")}</div>`;
+    return;
+  }
+  if(d.timeline){
+    renderTimeline(d.timeline);
+    if(d.timeline.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+  }
+}
+function renderTimeline(tl){
+  const body = document.getElementById("tlbody");
+  const note = document.getElementById("tlnote");
+  if(tl.error){ body.innerHTML = `<div class="empty">unavailable — ${esc(tl.error)}</div>`;
+                note.textContent = ""; return; }
+  const rows = tl.rows || [];
+  if(!rows.length){
+    body.innerHTML = `<div class="empty">${tl.generating ? "mining the whole session…"
+                                                          : "no turns to summarize"}</div>`;
+  } else {
+    body.innerHTML = rows.map(r => {
+      const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
+      return `<div class="tlrow${pending ? " pending" : ""}">
+        <span class="tm">${esc(mgmtClock(r.t))}</span>
+        <span class="sm">${esc(r.summary || "…")}</span></div>`;
+    }).join("");
+  }
+  const bits = [];
+  if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
+  if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
+  if(tl.model) bits.push(esc(tl.model));
+  if(tl.generating) bits.push(esc(tl.status || "generating") + "…");
+  else if(tl.stale) bits.push("stale — ⟳ to refresh");
+  if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
+  note.textContent = bits.join(" · ");
+}
+document.addEventListener("keydown", e => {
+  if(e.key === "Escape" && tlOpen){ e.stopPropagation(); closeTimeline(); }
+});
 
 /* ---------- threads overlay: the session-management lens -------------------
    The console face of `csd angles sessions` (session_mgmt.py): one row per

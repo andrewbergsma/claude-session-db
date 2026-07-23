@@ -129,6 +129,16 @@ refused if the session wrote within 15s — the two-writer guard); Fork branches
 it, and a point fork writes a **new** session file rather than mutating the
 original.
 
+**The console always mints a fork's session id itself** — a point fork writes
+the file under a `uuid4()` it chose, and an end fork passes that uuid to
+`claude --fork-session --session-id` (the CLI accepts `--session-id` on a
+resume *only* alongside `--fork-session`). Never let claude assign an id we
+then have to infer: both fork routes return `new_session`, and the spawned run
+registers under the **fork's** id, so Stop aims at the fork instead of its
+parent and the branch is addressable the moment it is created. Correlating a
+process start time against transcript birth times would be inference — racy
+when two runs share a project dir, and blind between spawn and first write.
+
 ### Console actions
 
 - **Stop** — SIGINT → SIGTERM → SIGKILL to the process group of a run *the
@@ -153,6 +163,17 @@ original.
   for visibility, not as an archive gate).
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
+- **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,
+  time-stamped catch-up (one line per user-prompt turn, **tool results omitted**)
+  rendered in a full overlay. Distinct from the last-3-turns `tldr` headline —
+  this walks the ENTIRE conversation. Engine is `session_timeline.py`
+  (`POST /api/timeline` force-generates, `GET /api/timeline` serves cached, never
+  generates). Segment + map: one small local-Ollama call per turn (so it scales
+  to any length and never overflows a 7B/8K-ctx model), completed turns memoized
+  by prompt uuid, the tail turn always recomputed. Pull not push — nothing
+  auto-generates it; first open mines, later opens serve cached + offer ⟳.
+  Bounded by `CSD_TIMELINE_MAX_TURNS` (150; older turns omitted, surfaced in the
+  footer). State: `$CSD_STATE_DIR/timeline/<sid>.json`.
 
 ### Curation — the span action-vocabulary
 

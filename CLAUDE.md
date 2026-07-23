@@ -153,6 +153,17 @@ original.
   for visibility, not as an archive gate).
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
+- **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,
+  time-stamped catch-up (one line per user-prompt turn, **tool results omitted**)
+  rendered in a full overlay. Distinct from the last-3-turns `tldr` headline —
+  this walks the ENTIRE conversation. Engine is `session_timeline.py`
+  (`POST /api/timeline` force-generates, `GET /api/timeline` serves cached, never
+  generates). Segment + map: one small local-Ollama call per turn (so it scales
+  to any length and never overflows a 7B/8K-ctx model), completed turns memoized
+  by prompt uuid, the tail turn always recomputed. Pull not push — nothing
+  auto-generates it; first open mines, later opens serve cached + offer ⟳.
+  Bounded by `CSD_TIMELINE_MAX_TURNS` (150; older turns omitted, surfaced in the
+  footer). State: `$CSD_STATE_DIR/timeline/<sid>.json`.
 
 ### Curation — the span action-vocabulary
 

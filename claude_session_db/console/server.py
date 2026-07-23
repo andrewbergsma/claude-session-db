@@ -30,11 +30,13 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
   POST /api/title                  {session_id, title: str|null} -> set/clear a title
   POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
+  POST /api/timeline               {session_id} -> force-queue a whole-session timeline
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
@@ -58,6 +60,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import tldr
+from .. import session_timeline
 
 ROOT = Path(__file__).parent
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -1925,6 +1928,14 @@ class Handler(SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if u.path == "/api/timeline":
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json({"timeline": session_timeline.payload(sid, p)})
         return super().do_GET()
 
     def do_POST(self):
@@ -1977,6 +1988,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": "not found"}, 404)
             return self._json({"ok": True, "tldr": tldr.payload(sid, p, force=True),
                                "status": tldr.STATUS.get(sid)})
+
+        if route == "/api/timeline":
+            # Button-launched whole-session catch-up. Force-enqueues a
+            # (re)generation; the fresh timeline lands on a later poll of the
+            # GET /api/timeline endpoint. Never blocks.
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json(
+                {"ok": True, "timeline": session_timeline.payload(sid, p, force=True)})
 
         if route == "/api/summarize":
             if ":" in sid:

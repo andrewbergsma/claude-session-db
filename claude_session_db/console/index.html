@@ -1854,18 +1854,28 @@ async function send(isFork){
     const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });
-    const d = await r.json();
-    st.textContent = d.error ? "✗ "+d.error
-      : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
+    // Guard the body: a bodyless/non-JSON/error response (a spawn that threw, a
+    // 401, an empty 500) must surface as status+text — never be JSON.parse'd
+    // blindly into a masking "SyntaxError: unexpected character".
+    const ct = r.headers.get("content-type") || "";
+    let d = null;
+    if(ct.includes("application/json")){
+      try { d = await r.json(); }
+      catch(e){ st.textContent = "✗ "+r.status+" malformed JSON from server"; return; }
+    } else {
+      const t = (await r.text()).trim();
+      st.textContent = "✗ "+r.status+" "+(t.slice(0,300) || r.statusText || "empty response");
+      return;
+    }
+    if(!r.ok || d.error){ st.textContent = "✗ "+(d.error || (r.status+" "+r.statusText)); return; }
+    st.textContent = d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
       : d.action==="fork" ? "⑂ forked from end (headless)"
       : "✓ answer sent — headless turn running";
-    if(!d.error){
-      inp.value = "";
-      // A plain answer resumes THIS session's file, so we can track it live.
-      // Forks write a new session file — leave their one-shot status as-is.
-      if(d.action === "answer"){ startAwait(); refreshSession(false); }
-    }
-  } catch(e){ st.textContent = "✗ "+e; }
+    inp.value = "";
+    // A plain answer resumes THIS session's file, so we can track it live.
+    // Forks write a new session file — leave their one-shot status as-is.
+    if(d.action === "answer"){ startAwait(); refreshSession(false); }
+  } catch(e){ st.textContent = "✗ no response (server error?) — "+e; }
 }
 
 /* ---------- subagent back-link: parent session @ the spawning message ------ */

@@ -1230,14 +1230,30 @@ def spawn_claude(args, cwd, session_id=None, log_path=None):
     the child actually produced anything (a zero-output rc==0 child is the
     observed silent no-op). Default behaviour (shared answers.log) is unchanged.
     """
+    # Resolve `claude` robustly. A console launched with a minimal PATH (a
+    # launchd/GUI parent hands down `/usr/bin:/bin:/usr/sbin:/sbin`) has no
+    # ~/.local/bin, so a bare Popen(["claude", …]) throws FileNotFoundError —
+    # which /api/answer then turned into a bodyless 500 (the JSON.parse crash).
+    # Mirror the _csd_bin()/shutil.which fallback pattern.
+    claude = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    if not Path(claude).exists():
+        raise FileNotFoundError(
+            f"`claude` binary not found (checked PATH and {claude}); is Claude "
+            "Code installed and on the console's PATH?")
+    # Augment the child PATH so the resumed claude can find its own tools even
+    # when the console itself was started with a truncated PATH.
+    env = dict(os.environ)
+    local_bin = str(Path.home() / ".local" / "bin")
+    if local_bin not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
     log_file = Path(log_path) if log_path else ANSWER_LOG
     with open(log_file, "a") as log:
-        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: claude {' '.join(args)} (cwd={cwd})\n")
+        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(args)} (cwd={cwd})\n")
         log.flush()
         proc = subprocess.Popen(
-            ["claude"] + args, cwd=cwd or str(Path.home()),
+            [claude] + args, cwd=cwd or str(Path.home()),
             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            start_new_session=True, env=env,
         )
     _register(session_id, proc)
     return proc
@@ -2057,10 +2073,9 @@ class Handler(SimpleHTTPRequestHandler):
         if tok and hmac.compare_digest(tok, TOKEN):
             self._set_cookie = from_query
             return True
-        self.send_response(401)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"401 unauthorized - append ?token=<secret>\n")
+        # JSON (not plain text) so a token-protected bind's 401 doesn't trip the
+        # same client-side JSON.parse crash the API paths guard against.
+        self._json({"error": "unauthorized — append ?token=<secret>"}, 401)
         return False
 
     def end_headers(self):
@@ -2071,7 +2086,30 @@ class Handler(SimpleHTTPRequestHandler):
             self._set_cookie = False
         super().end_headers()
 
+    # -- outer safety net -------------------------------------------------
+    # A handler that raises leaves the client with a closed/bodyless response,
+    # which the fetch caller then tries to JSON.parse -> a masking
+    # "SyntaxError: unexpected character". These wrappers guarantee EVERY code
+    # path answers with a JSON body, even an unforeseen exception.
+    def _safe_500(self, exc):
+        try:
+            self._json({"error": str(exc)[:300]}, 500)
+        except Exception:
+            pass          # response already partly sent — nothing else to do
+
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception as e:
+            self._safe_500(e)
+
+    def do_POST(self):
+        try:
+            self._do_POST()
+        except Exception as e:
+            self._safe_500(e)
+
+    def _do_GET(self):
         if not self._authed():
             return
         u = urlparse(self.path)
@@ -2148,7 +2186,7 @@ class Handler(SimpleHTTPRequestHandler):
             return
         return super().do_GET()
 
-    def do_POST(self):
+    def _do_POST(self):
         if not self._authed():
             return
         try:
@@ -2248,7 +2286,13 @@ class Handler(SimpleHTTPRequestHandler):
                     {"error": "session written in the last 15s — answer refused "
                               "(two-writer guard); wait for it to settle, "
                               "or fork"}, 409)
-            spawn_claude(["-p", "--resume", sid, text], cwd, sid)
+            # Spawn can throw (e.g. `claude` unresolved) — must return JSON, not
+            # let the exception close the connection bodyless. Mirror /api/fork.
+            try:
+                spawn_claude(["-p", "--resume", sid, text], cwd, sid)
+            except Exception as e:
+                return self._json(
+                    {"error": f"failed to spawn claude: {str(e)[:250]}"}, 500)
             return self._json({"ok": True, "action": "answer", "session": sid})
 
         if route == "/api/fork":

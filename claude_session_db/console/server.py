@@ -1109,6 +1109,11 @@ def build_session(sid: str):
         "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
+        # off-session summary status (in-memory SUMMARIZING) surfaced in the
+        # DETAIL pane too — not just the nav — so its running→done/failed
+        # transition is visible on the session the operator is watching. Child
+        # sids never summarize, so this is None for them.
+        "summarizing": SUMMARIZING.get(sid),
         "priority": _m.get("priority"),
         "user_title": _m.get("title"),
         "topic": _m.get("topic"),
@@ -1139,9 +1144,16 @@ def build_session(sid: str):
 # ----------------------------------------------------------------------------
 # answer / fork (unchanged behaviour from the prototype)
 # ----------------------------------------------------------------------------
-def spawn_claude(args, cwd, session_id=None):
-    """Spawn a claude run, registering it so Stop can signal its process group."""
-    with open(ANSWER_LOG, "a") as log:
+def spawn_claude(args, cwd, session_id=None, log_path=None):
+    """Spawn a claude run, registering it so Stop can signal its process group.
+
+    log_path captures this run's output to a DEDICATED file instead of the
+    shared answers.log — used by the summarize action so it can measure whether
+    the child actually produced anything (a zero-output rc==0 child is the
+    observed silent no-op). Default behaviour (shared answers.log) is unchanged.
+    """
+    log_file = Path(log_path) if log_path else ANSWER_LOG
+    with open(log_file, "a") as log:
         log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: claude {' '.join(args)} (cwd={cwd})\n")
         log.flush()
         proc = subprocess.Popen(
@@ -1450,11 +1462,24 @@ def point_fork(session_id: str, at_uuid: str):
 # ----------------------------------------------------------------------------
 SUMMARIZE_PROMPT = "/session-summary"
 SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
+SUMMARY_MIN_OUTPUT_BYTES = 40        # child output past the header ⇒ it ran
+_SUMMARY_LOG_DIR = CONSOLE_STATE / "summaries"
 
 
-def _await_summary(sid: str, proc):
+def _await_summary(sid: str, proc, log_path: Path, base_size: int):
+    """Resolve a dispatched summary. rc!=0 → failed. rc==0 does NOT prove a kmcp
+    write happened — but a child that produced NO output past the spawn header
+    is the observed silent no-op, so it is downgraded rather than called done."""
     rc = proc.wait()
-    SUMMARIZING[sid] = "done" if rc == 0 else f"summary failed (rc={rc})"
+    if rc != 0:
+        SUMMARIZING[sid] = f"summary failed (rc={rc})"
+        return
+    try:
+        produced = log_path.stat().st_size - base_size
+    except OSError:
+        produced = SUMMARY_MIN_OUTPUT_BYTES + 1     # can't measure → don't accuse
+    SUMMARIZING[sid] = ("done" if produced > SUMMARY_MIN_OUTPUT_BYTES
+                        else "summary produced no output")
 
 
 def summarize_session(sid: str, cwd: str) -> dict:
@@ -1462,10 +1487,19 @@ def summarize_session(sid: str, cwd: str) -> dict:
         return {"ok": False, "error": "a summary is already running"}
     # Off-session: fresh `claude -p`, the UUID as the /session-summary argument.
     # No --resume — the original transcript is digested, never appended to.
-    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid)
+    # A dedicated per-summary log lets _await_summary measure real output.
+    _SUMMARY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _SUMMARY_LOG_DIR / f"{sid}.log"
+    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
+                        log_path=log_path)
+    try:
+        base_size = log_path.stat().st_size          # header only, pre-output
+    except OSError:
+        base_size = 0
     SUMMARIZING[sid] = "running"
     set_archived(sid, True, reason="session-summary")
-    threading.Thread(target=_await_summary, args=(sid, proc),
+    threading.Thread(target=_await_summary,
+                     args=(sid, proc, log_path, base_size),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
             "note": "independent off-session summary dispatched; session archived"}

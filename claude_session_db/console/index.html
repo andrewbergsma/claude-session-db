@@ -262,7 +262,11 @@
   .pribtn.p-med { color:var(--accent); }
   .pribtn.p-low { color:var(--muted); }
   .pribtn.on { border-color:currentColor; background:var(--surface2); }
-  .actmsg { font:10.5px var(--mono); color:var(--muted); margin-left:4px; }
+  .actmsg { font:10.5px var(--mono); color:var(--ink2); margin-left:4px; }
+  /* a set message gets a brief highlight so it's not missed before it settles */
+  .actmsg:not(:empty) { padding:1px 6px; border-radius:4px; background:var(--surface2);
+                        animation:actflash .9s ease-out; }
+  @keyframes actflash { from{ background:var(--accent); color:#fff; } }
   .actmsg.bad { color:var(--warn); }
   .navtog { float:right; cursor:pointer; color:var(--muted); text-decoration:underline; }
   .navtog:hover { color:var(--purple); }
@@ -982,6 +986,10 @@ function renderHeader(s){
       ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
+      ${s.summarizing?`<span class="chip" style="color:${s.summarizing==="running"?"var(--accent)":s.summarizing==="done"?"var(--good)":"var(--warn)"}" title="off-session /session-summary status — based on the child's exit code + output, NOT a verified kmcp write. The detail pane polls every 3s, so running→done/failed shows live.">${
+        s.summarizing==="running" ? "⏳ summarizing…" :
+        s.summarizing==="done" ? "✓ summary done (unverified)" :
+        "⚠ "+esc(s.summarizing)}</span>`:""}
     </div>
     ${tldrLine(s)}
     <div class="acts">
@@ -1293,10 +1301,13 @@ async function act(kind){
   actmsg(kind + "…");
   const [ok, d] = await post("/api/" + kind, body);
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  // Set the success text AFTER the re-render: renderHeader rebuilds #actmsg as a
+  // fresh empty span, so a message set before refreshSession was wiped
+  // sub-second later (summarize had no other detail-pane feedback at all).
+  await refreshSession(false); loadNav();
   actmsg(kind === "stop" ? "stopped" :
          kind === "archive" ? (body.archived ? "archived" : "unarchived") :
-         "archived · independent summary running off-session");
-  await refreshSession(false); loadNav();
+         "archived · independent summary dispatched (watch the summarizing chip)");
 }
 
 async function mine(){

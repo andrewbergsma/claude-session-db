@@ -155,15 +155,30 @@
   .subtools { margin-top:6px; }
   .trow { font:11px var(--mono); margin:2px 0; }
   .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
+  .tline.cmd { cursor:pointer; border-radius:4px; }
+  .tline.cmd:hover { background:var(--surface2); }
   .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  .tcaret { color:var(--muted); flex:0 0 auto; font-size:9px; margin-left:-3px; }
+  .tline.cmd:hover .tcaret { color:var(--accent); }
   .tlabel { color:var(--ink2); word-break:break-word; }
   .tsize { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
   .terr { color:var(--warn); font-size:9.5px; text-transform:uppercase;
           border:1px solid var(--warn); border-radius:3px; padding:0 3px; }
+  /* running / done — terminal-style per-command status */
+  .trun { flex:0 0 auto; color:var(--warn); font-size:9.5px; font-weight:700;
+          text-transform:uppercase; letter-spacing:.4px; border:1px solid var(--warn);
+          border-radius:3px; padding:0 4px; animation:tpulse 1.4s ease-in-out infinite; }
+  @keyframes tpulse { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+  .tdone { flex:0 0 auto; color:var(--good); font-size:11px; }
   .tdet { color:var(--muted); padding:1px 0 2px 18px; white-space:pre-wrap;
           word-break:break-word; opacity:.85;
           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
           overflow:hidden; }
+  /* expanded full command — matches the transcript's code-block styling */
+  .tcmd { margin:4px 0 4px 18px; padding:8px 10px; background:var(--bg);
+          border:1px solid var(--border); border-radius:6px; font:11.5px/1.5 var(--mono);
+          color:var(--ink); white-space:pre-wrap; word-break:break-word;
+          max-height:40vh; overflow:auto; }
 
   /* inline kmcp read marker */
   .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
@@ -1091,23 +1106,60 @@ function choiceCard(e){
    result size with an error flag. Legacy string-only tools still render. */
 const TOOL_GLYPH = {Bash:"$", Write:"✎", Edit:"✎", Read:"📄", Skill:"◆",
                     Agent:"⇲", Task:"⇲", SendMessage:"→", ToolSearch:"⚿"};
-function toolRow(t){
+/* Command rows expand to the full command; the expanded set is tracked by
+   tool_use id so a 3s stream re-render never collapses an open one. */
+let expandedCmds = new Set();
+function toggleCmd(id){
+  if(!id) return;
+  if(expandedCmds.has(id)) expandedCmds.delete(id); else expandedCmds.add(id);
+  if(curSession) renderStream(curSession);
+}
+
+/* Compact elapsed since a turn timestamp (terminal-style "2m24s"). */
+function elapsed(ts){
+  if(!ts) return "";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime())/1000));
+  if(s < 60) return s + "s";
+  if(s < 3600) return Math.floor(s/60) + "m" + String(s%60).padStart(2,"0") + "s";
+  return Math.floor(s/3600) + "h" + String(Math.floor(s/60)%60).padStart(2,"0") + "m";
+}
+
+function toolRow(t, ts, live){
   if(typeof t === "string") return `<div class="trow"><span class="tlabel">⚙ ${esc(t.replace(/^mcp__.+__/,""))}</span></div>`;
   const glyph = TOOL_GLYPH[t.name] || "⚙";
   const size = t.chars!=null ? `<span class="tsize">${kb(t.chars)}</span>` : "";
   const err = t.is_error ? `<span class="terr">error</span>` : "";
   const det = t.detail ? `<div class="tdet">${esc(t.detail)}</div>` : "";
-  // An Agent spawn with an archived sidechain links to the child focus view.
+  // running vs done, terminal-style — only for commands (Bash). A tool_use with
+  // no tool_result yet (server `pending`) on a LIVE session is still running;
+  // once its result lands it flips to ✓. On a non-live session a pending row is
+  // stale, so we show neither (it never truly completed).
+  let stat = "";
+  if(t.name === "Bash"){
+    if(t.pending && live)
+      stat = `<span class="trun" title="running — no tool_result yet">▶ running… ${esc(elapsed(ts))}</span>`;
+    else if(!t.pending)
+      stat = `<span class="tdone" title="completed">✓</span>`;
+  }
+  // Bash rows expand to the full, untruncated command text.
+  const hasCmd = t.name === "Bash" && t.cmd;
+  const open = hasCmd && t.id && expandedCmds.has(t.id);
+  const caret = hasCmd ? `<span class="tcaret" title="${open?"collapse":"show full command"}">${open?"▾":"▸"}</span>` : "";
   const label = t.child
     ? `<span class="tlabel agentlink" onclick="openSession('${esc(t.child)}')"
          title="open subagent transcript">${esc(t.label||t.name)}${t.status?` · ${esc(t.status)}`:""} ↗</span>`
     : `<span class="tlabel">${esc(t.label||t.name)}</span>`;
-  return `<div class="trow"><div class="tline"><span class="tg">${glyph}</span>
-    ${label}${err}${size}</div>${det}</div>`;
+  const click = hasCmd ? ` class="tline cmd" onclick="toggleCmd('${esc(t.id)}')"` : ` class="tline"`;
+  const cmdBlock = open ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "";
+  return `<div class="trow"><div${click}><span class="tg">${glyph}</span>${caret}
+    ${label}${stat}${err}${size}</div>${det}${cmdBlock}</div>`;
 }
-function toolRows(tools){ return (tools||[]).map(toolRow).join(""); }
+function toolRows(tools, ts, live){ return (tools||[]).map(t => toolRow(t, ts, live)).join(""); }
 
 function renderStream(s){
+  // "live" gates the running indicator: only a session still in flight can have
+  // a genuinely-running command (LIVE = state running, or a run we can stop).
+  const live = s.state === "running" || !!s.stoppable;
   let html = "";
   s.events.forEach((e, i) => {
     // The uuid id anchors spawn back-links (child header -> parent message).
@@ -1116,14 +1168,14 @@ function renderStream(s){
     if(e.kind==="user")
       html += `${w}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
-      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools)}</div>` : "";
+      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools, e.ts, live)}</div>` : "";
       html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
       html += `${w}<div class="b">${searchRow(e, i)}</div></div>`;
     else if(e.kind==="tool")
-      html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
+      html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools, e.ts, live)}</div></div></div>`;
     else if(e.kind==="choice")
       html += `${w}<div class="b">${choiceCard(e)}</div></div>`;
   });

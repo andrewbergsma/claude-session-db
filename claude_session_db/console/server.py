@@ -1048,9 +1048,18 @@ def build_session(sid: str):
                         res = rmap.get(tid) or {}
                         row = {
                             "name": name, "label": label, "detail": detail,
+                            "id": tid,
                             "chars": res.get("chars"),
                             "is_error": res.get("is_error", False),
+                            # A tool_use with no tool_result yet (join by id) is
+                            # still in flight — the client shows "running…" for
+                            # such a row on a LIVE session. Verbatim command text
+                            # (never truncated) rides along so the row expands to
+                            # the full command the terminal would show.
+                            "pending": bool(tid) and tid not in rmap,
                         }
+                        if name == "Bash":
+                            row["cmd"] = inp.get("command") or ""
                         spawn = agent_spawns.get(tid)
                         if name in ("Agent", "Task") and spawn \
                                 and spawn.get("agent_id"):

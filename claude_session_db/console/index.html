@@ -54,7 +54,17 @@
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
   body.navmin #nav .top { padding:12px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
-  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist { display:none; }
+  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist,
+  body.navmin #navsort { display:none; }
+  /* sort control: clickable column keys, active one carries a direction arrow */
+  .navsort { display:flex; flex-wrap:wrap; gap:4px; margin-top:7px; }
+  .navsort .lbl { font:9px var(--mono); text-transform:uppercase; letter-spacing:.4px;
+                  color:var(--muted); align-self:center; margin-right:1px; }
+  .sortchip { font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.3px;
+              color:var(--muted); cursor:pointer; padding:1px 5px; border-radius:4px;
+              border:1px solid transparent; user-select:none; white-space:nowrap; }
+  .sortchip:hover { color:var(--ink2); }
+  .sortchip.on { color:var(--ink); border-color:var(--border); background:var(--surface2); }
   .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
   /* group headers: quiet separators — sessions are the dominant content */
   .sec, .proj { display:flex; align-items:baseline; gap:4px; padding:9px 14px 2px;
@@ -83,6 +93,7 @@
   .dot.stale,.dot.idle { background:var(--muted); }
   .sess .meta { min-width:0; flex:1; }
   .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .ttl .tmark { color:var(--muted); font-size:9px; margin-left:4px; vertical-align:1px; }
   .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   /* context-size gauge: three bars, filled count = size bucket */
@@ -429,6 +440,7 @@
         <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
       </div>
       <div class="sub" id="navsub">loading…</div>
+      <div class="navsort" id="navsort"></div>
     </div>
     <div id="navlist"></div>
   </nav>
@@ -588,6 +600,59 @@ let showArchived = false, navData = null;
 const PRI_ORDER = ["critical", "high", "med", "normal", "low"];
 const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
 
+/* ---------- sidebar sort control ----------
+   "grouped" is the signature priority-bucket + project-group view (default).
+   The flat modes sort every visible session by one column with an asc/desc
+   toggle: recent = TRUE last activity (last_ts, never file mtime), priority,
+   title (user-set overrides derived), project/folder. */
+const PRI_RANK = {critical:5, high:4, med:3, normal:2, low:1};
+let navSort = localStorage.getItem("csd.consoleNavSort") || "grouped";
+let navDir  = localStorage.getItem("csd.consoleNavDir")  || "desc";
+
+function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
+                                     : (s.mtime ? s.mtime*1000 : 0); }
+function priRank(s){ return PRI_RANK[PRI_ORDER.includes(s.priority) ? s.priority : "normal"]; }
+function dispTitle(s){ return (s.user_title || s.title || "").toLowerCase(); }
+function projName(s){ return (s.project_label || s.project || "").toLowerCase(); }
+
+const SORT_CMP = {
+  recent:   (a,b) => lastMs(a) - lastMs(b),
+  priority: (a,b) => (priRank(a) - priRank(b)) || (lastMs(a) - lastMs(b)),
+  title:    (a,b) => dispTitle(a).localeCompare(dispTitle(b)),
+  project:  (a,b) => projName(a).localeCompare(projName(b)) || (lastMs(b) - lastMs(a)),
+};
+
+function setNavSort(key){
+  if(key === navSort && key !== "grouped")
+    navDir = navDir === "desc" ? "asc" : "desc";   // re-click toggles direction
+  else {
+    navSort = key;
+    navDir = (key === "title" || key === "project") ? "asc" : "desc";
+  }
+  localStorage.setItem("csd.consoleNavSort", navSort);
+  localStorage.setItem("csd.consoleNavDir", navDir);
+  renderNav();
+}
+
+function sortBar(){
+  const chip = (key, label) => {
+    const on = navSort === key;
+    const arr = (on && key !== "grouped") ? (navDir === "desc" ? " ↓" : " ↑") : "";
+    return `<span class="sortchip ${on?"on":""}" onclick="setNavSort('${key}')"
+      title="sort by ${label}${on&&key!=="grouped"?" ("+navDir+") — click to flip":""}">${label}${arr}</span>`;
+  };
+  return `<span class="lbl">sort</span>` + chip("grouped","grouped")
+       + chip("recent","recent") + chip("priority","priority")
+       + chip("title","title") + chip("project","project");
+}
+
+function setNavSub(d){
+  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
+  document.getElementById("navsub").innerHTML =
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+}
+
 /* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<proj>".
    Everything is EXPANDED by default; only explicit user collapses are stored.
    (v2 key: the v1 scheme nested priority→project and could poison first paint
@@ -627,15 +692,19 @@ function sessRow(s, d, tagProject){
     ? `<span class="ptag">${esc(s.project_label)}${s.worktree?" ⌥"+esc(s.worktree):""} ·</span>` : "";
   const wtag = !tagProject && s.worktree
     ? `<span class="wtag">⌥${esc(s.worktree)} ·</span>` : "";
-  const last = new Date(s.mtime*1000).toISOString();
+  // TRUE last activity for the recency stamp (last_ts), file mtime as fallback.
+  const last = s.last_ts || new Date(s.mtime*1000).toISOString();
   const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
   const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
   // The tldr rides as the row's hover line — the compact layout stays intact.
   const tl = s.tldr?.headline ? ` title="tl;dr — ${esc(s.tldr.headline)}"` : "";
+  // A user-set title overrides the derived one; ✎ marks that it's hand-set.
+  const disp = s.user_title ? `${esc(s.user_title)}<span class="tmark" title="custom title">✎</span>`
+                            : esc(s.title);
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
     <span class="dot ${s.state}" title="${s.state}"></span>
     <span class="meta">
-      <div class="ttl"${tl}>${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="ttl"${tl}>${pg}${ptag}${wtag}${disp}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
     </span>
     ${ctxGauge(s.ctx_tokens)}</div>`;
@@ -650,13 +719,28 @@ async function loadNav(){
 function renderNav(){
   if(!navData) return;
   const d = navData;
+  document.getElementById("navsort").innerHTML = sortBar();
+
+  // Flat sort modes: one column, asc/desc, no grouping (project rides each row).
+  if(navSort !== "grouped"){
+    const dir = navDir === "asc" ? 1 : -1;
+    const rows = [...d.sessions].sort((a,b) => dir * SORT_CMP[navSort](a,b));
+    document.getElementById("navlist").innerHTML = rows.length
+      ? rows.map(s => sessRow(s, d, true)).join("")
+      : `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+    setNavSub(d);
+    return;
+  }
+
   // ONE level of grouping. Flagged sessions sit directly under a quiet
   // priority header (project moves onto the row). The unprioritized bulk
   // keeps project grouping as its single level — but a 1-session project
   // doesn't earn a header, it renders as a tagged row in recency position.
+  // Within groups, order by TRUE last activity (last_ts), newest first.
+  const ordered = [...d.sessions].sort((a,b) => lastMs(b) - lastMs(a));
   const flagged = {critical:[], high:[], med:[], low:[]};
   const normal = [];
-  for(const s of d.sessions)
+  for(const s of ordered)
     (s.priority && flagged[s.priority]) ? flagged[s.priority].push(s) : normal.push(s);
   let html = "";
   const bucket = pri => {
@@ -685,10 +769,7 @@ function renderNav(){
   bucket("low");
   document.getElementById("navlist").innerHTML =
     html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
-  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
-  document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
-     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+  setNavSub(d);
 }
 
 function toggleArchived(){ showArchived = !showArchived; loadNav(); }
@@ -775,6 +856,7 @@ async function refreshTldr(){
 
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
+  const dtitle = s.user_title || s.title;   // user-set title overrides derived
   const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
   const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
   const sub = s.subagent;

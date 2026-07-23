@@ -33,6 +33,7 @@ Endpoints
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
+  POST /api/title                  {session_id, title: str|null} -> set/clear a title
   POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
@@ -261,6 +262,48 @@ def set_priority(sid: str, priority) -> dict:
         tmp.write_text(json.dumps(idx, indent=1))
         tmp.replace(PRIORITY_FILE)         # atomic; never a half-written index
     return {"ok": True, "session_id": sid, "priority": priority or None}
+
+
+# ----------------------------------------------------------------------------
+# titles — operator-set human labels, console state only
+#
+# A small JSON keyed by session id in the console state dir, exactly like the
+# archive and priority indexes: never a mutation of ~/.claude/projects. A title
+# is user-set metadata, NOT derived from the transcript; when set it overrides
+# the derived nav title in the sidebar, and clearing it removes the key (the
+# derived title returns). Atomic replace — never a half-written index.
+# ----------------------------------------------------------------------------
+TITLES_FILE = CONSOLE_STATE / "titles.json"
+_TITLES_LOCK = threading.Lock()
+MAX_TITLE_LEN = 200
+
+
+def _read_titles() -> dict:
+    try:
+        return json.loads(TITLES_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _title_of(idx: dict, sid: str):
+    v = idx.get(sid)
+    return v.get("title") if isinstance(v, dict) else v
+
+
+def set_title(sid: str, title) -> dict:
+    title = (title or "").strip()[:MAX_TITLE_LEN]
+    with _TITLES_LOCK:
+        idx = _read_titles()
+        if title:
+            idx[sid] = {"title": title,
+                        "set_at": datetime.now(timezone.utc).isoformat()}
+        else:
+            idx.pop(sid, None)
+        CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
+        tmp = TITLES_FILE.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(idx, indent=1))
+        tmp.replace(TITLES_FILE)           # atomic; never a half-written index
+    return {"ok": True, "session_id": sid, "title": title or None}
 
 
 # ----------------------------------------------------------------------------
@@ -639,6 +682,7 @@ def summarize_nav(path: Path):
     title = cwd = branch = None
     last_user = None
     usage = None
+    last_ts = None
     for r in recs:
         t = r.get("type")
         if t == "ai-title":
@@ -648,6 +692,11 @@ def summarize_nav(path: Path):
         elif t in ("user", "assistant"):
             cwd = r.get("cwd") or cwd
             branch = r.get("gitBranch") or branch
+            # TRUE last activity = the last message record's own timestamp
+            # (records are chronological, so the last one wins) — NOT file
+            # mtime, which only ever lies toward "more recent".
+            if r.get("timestamp"):
+                last_ts = r["timestamp"]
             if t == "user" and not r.get("isSidechain"):
                 txt = _text_of((r.get("message") or {}).get("content"))
                 if _is_real_user_turn(r, txt):
@@ -675,6 +724,7 @@ def summarize_nav(path: Path):
         "state": _state(recs, mtime_age),
         "mtime": path.stat().st_mtime,
         "mtime_age_s": round(mtime_age),
+        "last_ts": last_ts,
         "started_at": stats["started_at"],
         "msg_count": stats["msg_count"],
         "ctx_tokens": ctx_tokens,
@@ -704,6 +754,7 @@ def discover_sessions(archived=False):
             cands.append((m, p))
     cands.sort(reverse=True)
     pri = _read_priority()
+    titles = _read_titles()
     out = []
     for _, p in cands[:MAX_NAV_SESSIONS]:
         try:
@@ -715,6 +766,7 @@ def discover_sessions(archived=False):
             s["stoppable"] = stoppable(p.stem)
             s["agents"] = _agents_glance(p)
             s["priority"] = _priority_of(pri, p.stem)
+            s["user_title"] = _title_of(titles, p.stem)
             # Cached-or-nothing; stale rows queue an async regeneration.
             s["tldr"] = tldr.payload(p.stem, p)
             out.append(s)
@@ -958,6 +1010,7 @@ def build_session(sid: str):
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
         "priority": _priority_of(_read_priority(), sid),
+        "user_title": _title_of(_read_titles(), sid),
     }
     if is_child:
         from ..subagent import read_agent_meta
@@ -1905,6 +1958,16 @@ class Handler(SimpleHTTPRequestHandler):
                     {"error": f"priority must be one of {list(PRIORITIES)} "
                               "or null to clear"}, 400)
             return self._json(set_priority(sid, pr))
+
+        if route == "/api/title":
+            # Title override is an index-only overlay (titles.json), never a
+            # mutation of ~/.claude/projects. A child (subagent) key inherits
+            # the parent's identity; title the parent instead.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions cannot be titled — "
+                              "title the parent session"}, 400)
+            return self._json(set_title(sid, body.get("title")))
 
         if route == "/api/tldr":
             # Force-queue a regeneration (the per-session refresh affordance).

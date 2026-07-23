@@ -1964,9 +1964,16 @@ class Handler(SimpleHTTPRequestHandler):
                     spawn_claude(["-p", "--resume", new_id, text], cwd, new_id)
                     return self._json({"ok": True, "action": "point-fork",
                                        "new_session": new_id})
-                spawn_claude(["-p", "--resume", sid, "--fork-session", text],
-                             cwd, sid)
-                return self._json({"ok": True, "action": "fork"})
+                # Mint the fork's id ourselves rather than let claude assign one
+                # we never learn — same doctrine as point_fork(). Registering the
+                # run under the PARENT sid would aim Stop at the wrong session and
+                # leave the fork unaddressable. `--session-id` is only accepted
+                # alongside --fork-session when resuming (the CLI enforces this).
+                new_id = str(uuidlib.uuid4())
+                spawn_claude(["-p", "--resume", sid, "--fork-session",
+                              "--session-id", new_id, text], cwd, new_id)
+                return self._json({"ok": True, "action": "fork",
+                                   "new_session": new_id})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
 

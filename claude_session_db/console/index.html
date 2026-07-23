@@ -94,10 +94,22 @@
           border-left:2px solid transparent; }
   .sess:hover { background:var(--surface2); }
   .sess.active { background:var(--surface2); border-left-color:var(--accent); }
-  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px; }
-  .dot.running { background:var(--warn); box-shadow:0 0 5px var(--warn); }
-  .dot.awaiting { background:var(--good); box-shadow:0 0 5px var(--good); }
-  .dot.stale,.dot.idle { background:var(--muted); }
+  /* activity dot — palette makes the OPERATOR-ACTIONABLE state ("waiting for
+     you") draw the eye. Deliberate inversion of the old green=done/orange=busy:
+     amber now means "your move", blue means an agent is working. */
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px;
+         border:1px solid transparent; }
+  .dot.working { background:var(--accent); box-shadow:0 0 5px var(--accent); }
+  .dot.working.fresh { animation:dotpulse 1.4s ease-in-out infinite; }
+  @keyframes dotpulse { 0%,100%{ box-shadow:0 0 3px var(--accent); }
+                        50%{ box-shadow:0 0 9px 1px var(--accent); } }
+  /* subagent-only work reads hollow-blue — distinct from main-chain working */
+  .dot.working.sub { background:transparent; border-color:var(--accent); box-shadow:none; }
+  .dot.waiting { background:var(--warn); box-shadow:0 0 6px 1px var(--warn); }
+  .dot.idle { background:var(--muted); box-shadow:none; }
+  .dot.stale { background:transparent; border-color:var(--muted); box-shadow:none; }
+  .navcensus { font:10px var(--mono); color:var(--muted); margin-top:3px; }
+  .navcensus b { color:var(--warn); font-weight:600; }
   .sess .meta { min-width:0; flex:1; }
   .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .sess .ttl .tmark { color:var(--muted); font-size:9px; margin-left:4px; vertical-align:1px; }
@@ -692,6 +704,23 @@ function projName(s){ return (s.project_label || s.project || "").toLowerCase();
 function topicName(s){ return (s.topic || "").toLowerCase(); }
 function subName(s){ return (s.subtopic || "").toLowerCase(); }
 
+/* activity state → dot class + human label. Triage rank: working < waiting <
+   idle < stale. The dot palette is defined in CSS (amber = your move). */
+const STATE_RANK = {working:0, waiting:1, idle:2, stale:3};
+const STATE_LABEL = {working:"agent working", waiting:"waiting for you",
+                     idle:"idle", stale:"stale (no writer)"};
+function stateRank(s){ return STATE_RANK[s.state] ?? 9; }
+function dotClass(s){
+  let c = "dot " + (s.state || "idle");
+  if(s.sub_working) c += " sub";
+  if(s.state === "working" && s.mtime_age_s != null && s.mtime_age_s <= 15) c += " fresh";
+  return c;
+}
+function stateTitle(s){
+  return (STATE_LABEL[s.state] || s.state || "") + (s.sub_working ? " · via subagent" : "");
+}
+function stateDot(s){ return `<span class="${dotClass(s)}" title="${esc(stateTitle(s))}"></span>`; }
+
 const SORT_CMP = {
   recent:   (a,b) => lastMs(a) - lastMs(b),
   priority: (a,b) => (priRank(a) - priRank(b)) || (lastMs(a) - lastMs(b)),
@@ -699,9 +728,11 @@ const SORT_CMP = {
   project:  (a,b) => projName(a).localeCompare(projName(b)) || (lastMs(b) - lastMs(a)),
   topic:    (a,b) => topicName(a).localeCompare(topicName(b)) || (lastMs(b) - lastMs(a)),
   subtopic: (a,b) => subName(a).localeCompare(subName(b)) || (lastMs(b) - lastMs(a)),
+  activity: (a,b) => (stateRank(a) - stateRank(b)) || (lastMs(b) - lastMs(a)),
 };
-const SORT_COLS = [["recent","date"],["priority","priority"],["title","title"],
-                   ["project","folder"],["topic","topic"],["subtopic","subtopic"]];
+const SORT_COLS = [["recent","date"],["activity","activity"],["priority","priority"],
+                   ["title","title"],["project","folder"],["topic","topic"],
+                   ["subtopic","subtopic"]];
 
 function setNavView(v){ navView = v; localStorage.setItem("csd.consoleNavView", v); renderNav(); }
 function setTopicFilter(v){ navTopicFilter = v;
@@ -710,7 +741,7 @@ function setTopicFilter(v){ navTopicFilter = v;
 function setNavSort(key){
   if(key === navSort) navDir = navDir === "desc" ? "asc" : "desc";   // re-click flips
   else { navSort = key;
-         navDir = ["title","project","topic","subtopic"].includes(key) ? "asc" : "desc"; }
+         navDir = ["title","project","topic","subtopic","activity"].includes(key) ? "asc" : "desc"; }
   localStorage.setItem("csd.consoleNavSort", navSort);
   localStorage.setItem("csd.consoleNavDir", navDir);
   renderNav();
@@ -743,9 +774,18 @@ function navControls(d){
 
 function setNavSub(d){
   const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
+  // one-line activity census — "waiting for you" is emphasised (it's your move)
+  const c = {working:0, waiting:0, idle:0, stale:0};
+  for(const s of d.sessions) if(c[s.state] != null) c[s.state]++;
+  const bits = [];
+  if(c.working) bits.push(`${c.working} working`);
+  if(c.waiting) bits.push(`<b>${c.waiting} waiting for you</b>`);
+  if(c.idle) bits.push(`${c.idle} idle`);
+  if(c.stale) bits.push(`${c.stale} stale`);
+  const census = bits.length ? `<div class="navcensus">${bits.join(" · ")}</div>` : "";
   document.getElementById("navsub").innerHTML =
     `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
-     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>${census}`;
 }
 
 /* Group view: Topic › Subtopic collapsible tree. Untopiced sessions fall under
@@ -838,7 +878,7 @@ function sessRow(s, d, tagProject){
   const disp = s.user_title ? `${esc(s.user_title)}<span class="tmark" title="custom title">✎</span>`
                             : esc(s.title);
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
-    <span class="dot ${s.state}" title="${s.state}"></span>
+    ${stateDot(s)}
     <span class="meta">
       <div class="ttl"${tl}>${pg}${ptag}${wtag}${disp}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
@@ -919,7 +959,7 @@ function tickRunning(){
    from whether a new assistant turn actually landed. */
 function syncReplyStatus(s){
   if(!awaitReply || awaitReply.sid !== curId) return;
-  const live = s.stoppable || s.state === "running";
+  const live = s.stoppable || s.state === "working";
   if(live) return;                              // still running — ticker keeps counting
   if(s.events.length <= awaitReply.baseEvents &&
      Date.now() - awaitReply.t0 < 4000) return; // give the run a beat to start writing
@@ -971,7 +1011,7 @@ function renderHeader(s){
     </div>` : "";
   document.getElementById("chdr").innerHTML = `
     <div class="row1">
-      <span class="dot ${s.state}" title="${s.state}"></span>
+      ${stateDot(s)}
       <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
     </div>
     ${subhdr}
@@ -982,7 +1022,7 @@ function renderHeader(s){
       ${model}${ctx}
       <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
       <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
-      <span class="chip">${s.state}</span>
+      <span class="chip" title="activity state">${esc(STATE_LABEL[s.state]||s.state)}</span>
       ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
@@ -1030,7 +1070,7 @@ function renderHeader(s){
   // hard block is only real evidence of a writer in flight — a run this
   // console spawned, or a transcript written seconds ago (the server's
   // two-writer guard refuses < 15s regardless). Transcript shape
-  // (state === "running") cannot distinguish an exited session from an
+  // (state === "working") cannot distinguish an exited session from an
   // idle-but-open interactive window, so it must not force Fork; for that
   // undetectable case we allow Answer and show the soft #cwarn note
   // instead. Fork stays available as an explicit choice.
@@ -1167,7 +1207,7 @@ function toolRows(tools, ts, live){ return (tools||[]).map(t => toolRow(t, ts, l
 function renderStream(s){
   // "live" gates the running indicator: only a session still in flight can have
   // a genuinely-running command (LIVE = state running, or a run we can stop).
-  const live = s.state === "running" || !!s.stoppable;
+  const live = s.state === "working" || !!s.stoppable;
   let html = "";
   s.events.forEach((e, i) => {
     // The uuid id anchors spawn back-links (child header -> parent message).

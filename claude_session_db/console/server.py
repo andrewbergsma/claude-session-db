@@ -471,6 +471,30 @@ def _result_map(records):
     return out
 
 
+def pending_tool_ids(records, rmap=None):
+    """tool_use ids that have NO matching tool_result yet — the single source of
+    truth for "in flight". Both the activity-state classifier (does the last
+    assistant have an unresolved tool_use → agent still working) and the
+    live-command-status render (WHICH specific commands are still running) call
+    this, so the two can never drift on what "pending" means.
+
+    `_result_map` keeps the id key even for >64KB results (it drops only the
+    text), so membership here is size-safe — a huge tool_result never makes its
+    tool_use look pending.
+    """
+    rmap = rmap if rmap is not None else _result_map(records)
+    pend = set()
+    for r in records:
+        if r.get("type") != "assistant":
+            continue
+        for b in (r.get("message") or {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                tid = b.get("id")
+                if tid and tid not in rmap:
+                    pend.add(tid)
+    return pend
+
+
 def _tool_summary(name, inp):
     """(label, detail) — the one salient field that makes a tool_use readable.
 
@@ -658,7 +682,29 @@ def _is_real_user_turn(r, text):
     return True
 
 
-def _state(records, mtime_age):
+# Activity-state ceilings. All code-computed from transcript shape + file mtime
+# (no LLM, no DB — "truth from the ledger"); every ambiguous/failure case
+# degrades to a NON-alarming state, never a stuck "working".
+FRESH_S = 15            # ≤ this since last write → the client may add a pulse
+WORK_CEIL_S = 240      # working with no write past this = likely killed → stale
+WAIT_COLD_S = 900     # waiting quietly past this → idle (not actionable)
+
+
+def _state(records, mtime_age, stoppable=False, agents_live=0):
+    """(state, sub_working) — 4-value activity classification:
+
+      working — agent generating, or a tool in flight
+      waiting — agent ended its turn cleanly; the human's move
+      idle    — open thread, quiet a long time
+      stale   — claims in-flight but the file is frozen past the ceiling
+                (likely a killed process), or a long-dead waiting thread
+
+    Overrides (strongest evidence wins): a console-spawned live run forces
+    working; a live subagent on an otherwise waiting/idle session counts as
+    working and sets sub_working so the UI can annotate it distinctly.
+    """
+    rmap = _result_map(records)
+    pend = pending_tool_ids(records, rmap)
     last = None
     for r in records:
         if r.get("type") in ("user", "assistant") and not r.get("isSidechain"):
@@ -671,15 +717,32 @@ def _state(records, mtime_age):
                     continue
             last = r
     if last is None:
-        return "idle"
-    if last["type"] == "user":
-        st = "running"
+        base = "idle"
+    elif last["type"] == "user":
+        base = "working"                # prompt in, no reply yet → queued
     else:
         stop = (last.get("message") or {}).get("stop_reason")
-        st = "awaiting" if stop in ("end_turn", "stop_sequence") else "running"
-    if st == "running" and mtime_age > 600:
-        st = "stale"
-    return st
+        terminal = stop in ("end_turn", "stop_sequence")
+        # unresolved tool_use on the LAST assistant record = a tool in flight
+        last_pending = any(
+            isinstance(b, dict) and b.get("type") == "tool_use"
+            and b.get("id") in pend
+            for b in (last.get("message") or {}).get("content") or [])
+        base = "waiting" if (terminal and not last_pending) else "working"
+
+    if base == "working":
+        state = "working" if mtime_age <= WORK_CEIL_S else "stale"
+    elif base == "waiting":
+        state = "waiting" if mtime_age <= WAIT_COLD_S else "idle"
+    else:
+        state = base
+
+    sub_working = False
+    if stoppable:                       # a run we spawned is provably live
+        state = "working"
+    elif state in ("waiting", "idle") and agents_live > 0:
+        state, sub_working = "working", True
+    return state, sub_working
 
 
 # ----------------------------------------------------------------------------
@@ -793,7 +856,7 @@ def summarize_nav(path: Path):
                 u = (r.get("message") or {}).get("usage")
                 if isinstance(u, dict):
                     usage = u
-    mtime_age = time.time() - path.stat().st_mtime
+    mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
     if not title:
         title = (last_user[:70] + "…") if last_user else path.stem[:12]
     label, worktree = _project_identity(cwd, str(path.parent.name))
@@ -803,13 +866,22 @@ def summarize_nav(path: Path):
                       + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0))
     stats = _nav_stats(path)
+    # Activity-state overrides need stoppable + live-subagent count, both cheap
+    # and computed here (discover_sessions reuses these, doesn't recompute).
+    stop = stoppable(path.stem)
+    agents = _agents_glance(path)
+    state, sub_working = _state(recs, mtime_age, stop,
+                                agents["live"] if agents else 0)
     return {
         "session_id": path.stem,
         "project": str(path.parent.name),
         "project_label": label,
         "worktree": worktree,
         "cwd": cwd, "branch": branch, "title": title.strip(),
-        "state": _state(recs, mtime_age),
+        "state": state,
+        "sub_working": sub_working,
+        "stoppable": stop,
+        "agents": agents,
         "mtime": path.stat().st_mtime,
         "mtime_age_s": round(mtime_age),
         "last_ts": last_ts,
@@ -851,8 +923,7 @@ def discover_sessions(archived=False):
         if s:
             m = _meta_of(meta, p.stem)
             s["archived"] = p.stem in idx
-            s["stoppable"] = stoppable(p.stem)
-            s["agents"] = _agents_glance(p)
+            # stoppable + agents already computed in summarize_nav (state override)
             s["priority"] = m.get("priority")
             s["user_title"] = m.get("title")
             s["topic"] = m.get("topic")
@@ -947,6 +1018,7 @@ def build_session(sid: str):
         for r in records:
             r.pop("isSidechain", None)
     rmap = _result_map(records)
+    pend_ids = pending_tool_ids(records, rmap)   # shared "in flight" primitive
     agent_spawns = _agent_result_map(records)
     base_sid = sid.split(":", 1)[0]
 
@@ -1051,12 +1123,13 @@ def build_session(sid: str):
                             "id": tid,
                             "chars": res.get("chars"),
                             "is_error": res.get("is_error", False),
-                            # A tool_use with no tool_result yet (join by id) is
-                            # still in flight — the client shows "running…" for
-                            # such a row on a LIVE session. Verbatim command text
-                            # (never truncated) rides along so the row expands to
-                            # the full command the terminal would show.
-                            "pending": bool(tid) and tid not in rmap,
+                            # A tool_use with no tool_result yet is still in
+                            # flight — the client shows "running…" for such a row
+                            # on a LIVE session. Same primitive the activity-state
+                            # classifier uses (pending_tool_ids), so they can't
+                            # drift. Verbatim command text (never truncated) rides
+                            # along so the row expands to the full command.
+                            "pending": tid in pend_ids,
                         }
                         if name == "Bash":
                             row["cmd"] = inp.get("command") or ""
@@ -1082,7 +1155,7 @@ def build_session(sid: str):
                 continue
             events.append({"kind": "user", "ts": ts, "uuid": uid, "text": txt})
 
-    mtime_age = time.time() - path.stat().st_mtime
+    mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
     if not title:
         first_user = next((e["text"] for e in events if e["kind"] == "user"), None)
         title = (first_user[:70] + "…") if first_user else sid[:12]
@@ -1094,12 +1167,17 @@ def build_session(sid: str):
                       + usage.get("cache_creation_input_tokens", 0))
 
     _m = _meta_of(_read_meta_overlay(), sid)
+    _stop = stoppable(sid)
+    _agents = _agents_glance(path)
+    _state_v, _sub_working = _state(records, mtime_age, _stop,
+                                    _agents["live"] if _agents else 0)
     out = {
         "session_id": sid,
         "project": str(path.parent.name),
         "cwd": cwd, "branch": branch, "title": title.strip(),
         "model": model, "ctx_tokens": ctx_tokens,
-        "state": _state(records, mtime_age),
+        "state": _state_v,
+        "sub_working": _sub_working,
         "mtime_age_s": round(mtime_age),
         "truncated": truncated,
         "counts": {"reads": n_reads, "searches": n_searches,
@@ -1108,7 +1186,7 @@ def build_session(sid: str):
         "rail": angle_rail(sid),
         "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
-        "stoppable": stoppable(sid),
+        "stoppable": _stop,
         # off-session summary status (in-memory SUMMARIZING) surfaced in the
         # DETAIL pane too — not just the nav — so its running→done/failed
         # transition is visible on the session the operator is watching. Child

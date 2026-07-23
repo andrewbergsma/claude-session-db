@@ -54,7 +54,24 @@
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
   body.navmin #nav .top { padding:12px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
-  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist { display:none; }
+  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist,
+  body.navmin #navsort { display:none; }
+  /* view toggle + sort columns + topic filter: stacked rows of clickable keys */
+  .navsort { display:flex; flex-direction:column; gap:4px; margin-top:7px; }
+  .navrow { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+  .navrow .lbl { font:9px var(--mono); text-transform:uppercase; letter-spacing:.4px;
+                 color:var(--muted); align-self:center; margin-right:1px; width:34px; }
+  .sortchip { font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.3px;
+              color:var(--muted); cursor:pointer; padding:1px 5px; border-radius:4px;
+              border:1px solid transparent; user-select:none; white-space:nowrap; }
+  .sortchip:hover { color:var(--ink2); }
+  .sortchip.on { color:var(--ink); border-color:var(--border); background:var(--surface2); }
+  .navfilter { font:10px var(--mono); background:var(--bg); color:var(--ink);
+               border:1px solid var(--border); border-radius:4px; padding:1px 4px;
+               max-width:160px; }
+  /* group-view tree headers reuse .sec/.proj; topic accented, subtopic indented */
+  .sec.topicsec { color:var(--ink2); }
+  .proj.subtopicsec { padding-left:26px; }
   .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
   /* group headers: quiet separators — sessions are the dominant content */
   .sec, .proj { display:flex; align-items:baseline; gap:4px; padding:9px 14px 2px;
@@ -83,6 +100,7 @@
   .dot.stale,.dot.idle { background:var(--muted); }
   .sess .meta { min-width:0; flex:1; }
   .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .ttl .tmark { color:var(--muted); font-size:9px; margin-left:4px; vertical-align:1px; }
   .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   /* context-size gauge: three bars, filled count = size bucket */
@@ -419,6 +437,24 @@
                     border:1px solid var(--border); border-radius:8px;
                     padding:10px 12px; font:11.5px/1.5 var(--mono);
                     white-space:pre-wrap; word-break:break-word; }
+
+  /* topic dialog: a centered popover, above everything, own state (not polled) */
+  #topicdlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:60;
+              display:none; align-items:center; justify-content:center; }
+  #topicdlg.open { display:flex; }
+  #topicdlg .td-card { background:var(--surface); border:1px solid var(--border);
+                       border-radius:10px; padding:18px 20px; width:min(420px,92vw);
+                       display:flex; flex-direction:column; gap:6px; }
+  #topicdlg .td-h { font-size:14px; font-weight:600; margin-bottom:2px; }
+  #topicdlg .td-note { color:var(--muted); font-size:11px; line-height:1.45; margin-bottom:8px; }
+  #topicdlg .td-l { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+                    color:var(--ink2); margin-top:6px; }
+  #topicdlg .td-l .td-opt { color:var(--muted); text-transform:none; letter-spacing:0; }
+  #topicdlg .td-in { background:var(--bg); border:1px solid var(--border); border-radius:7px;
+                     color:var(--ink); padding:8px 11px; font:13px var(--mono); outline:none; }
+  #topicdlg .td-in:focus { border-color:var(--accent); }
+  #topicdlg .td-actions { display:flex; gap:6px; margin-top:14px; }
+  #topicdlg .td-actions .primary { color:var(--purple); border-color:var(--purple); }
 </style>
 </head>
 <body>
@@ -429,6 +465,7 @@
         <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
       </div>
       <div class="sub" id="navsub">loading…</div>
+      <div class="navsort" id="navsort"></div>
     </div>
     <div id="navlist"></div>
   </nav>
@@ -482,6 +519,30 @@
       <div class="dh"><span id="mgmtdigesttitle"></span>
         <span class="x" onclick="closeMgmtDigest()">✕ close digest</span></div>
       <pre id="mgmtdigestpre"></pre>
+    </div>
+  </div>
+
+  <!-- topic dialog: reusable topic › subtopic taxonomy (datalist autocomplete) -->
+  <div id="topicdlg" onclick="if(event.target===this)closeTopicDlg()">
+    <div class="td-card">
+      <div class="td-h">Topic &amp; subtopic</div>
+      <div class="td-note">Reusable across sessions — pick from the list or type a new
+        value (it's remembered). Groups sessions independent of folder.</div>
+      <label class="td-l">topic</label>
+      <input id="td-topic" class="td-in" list="td-topics" autocomplete="off"
+             placeholder="e.g. ControlTech" oninput="refreshSubDatalist()"
+             onkeydown="if(event.key==='Enter')saveTopic()">
+      <datalist id="td-topics"></datalist>
+      <label class="td-l">subtopic <span class="td-opt">(optional)</span></label>
+      <input id="td-subtopic" class="td-in" list="td-subs" autocomplete="off"
+             placeholder="e.g. reliability"
+             onkeydown="if(event.key==='Enter')saveTopic()">
+      <datalist id="td-subs"></datalist>
+      <div class="td-actions">
+        <button class="act sm primary" onclick="saveTopic()">Save</button>
+        <button class="act sm" onclick="clearTopic()">Clear</button>
+        <button class="act sm" onclick="closeTopicDlg()">Cancel</button>
+      </div>
     </div>
   </div>
 
@@ -563,8 +624,11 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  const dlg = document.getElementById("topicdlg");
+  if(dlg && dlg.classList.contains("open")){ closeTopicDlg(); return; }
   const box = document.getElementById("raildetail");
-  if(e.key === "Escape" && box && !box.classList.contains("rl-empty") &&
+  if(box && !box.classList.contains("rl-empty") &&
      !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || ""))
     clearRail();
 });
@@ -587,6 +651,124 @@ let showArchived = false, navData = null;
    default "normal" bucket, above low (a flagged-low session sinks). */
 const PRI_ORDER = ["critical", "high", "med", "normal", "low"];
 const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
+
+/* ---------- sidebar: two views + sortable columns ----------
+   View toggle: "sort" (flat, sortable columns) | "group" (Topic › Subtopic
+   collapsible tree). Sort columns: date (TRUE last activity — last_ts, never
+   file mtime), priority, title (user-set overrides derived), folder/project,
+   topic, subtopic — each with an asc/desc toggle. A topic filter narrows the
+   flat list. Folder shows on every row but never DEFINES the grouping — the
+   topic taxonomy does. */
+const PRI_RANK = {critical:5, high:4, med:3, normal:2, low:1};
+let navView = localStorage.getItem("csd.consoleNavView") || "sort";   // sort | group
+let navSort = localStorage.getItem("csd.consoleNavSort") || "recent";
+let navDir  = localStorage.getItem("csd.consoleNavDir")  || "desc";
+let navTopicFilter = localStorage.getItem("csd.consoleNavTopicFilter") || "";
+
+function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
+                                     : (s.mtime ? s.mtime*1000 : 0); }
+function priRank(s){ return PRI_RANK[PRI_ORDER.includes(s.priority) ? s.priority : "normal"]; }
+function dispTitle(s){ return (s.user_title || s.title || "").toLowerCase(); }
+function projName(s){ return (s.project_label || s.project || "").toLowerCase(); }
+function topicName(s){ return (s.topic || "").toLowerCase(); }
+function subName(s){ return (s.subtopic || "").toLowerCase(); }
+
+const SORT_CMP = {
+  recent:   (a,b) => lastMs(a) - lastMs(b),
+  priority: (a,b) => (priRank(a) - priRank(b)) || (lastMs(a) - lastMs(b)),
+  title:    (a,b) => dispTitle(a).localeCompare(dispTitle(b)),
+  project:  (a,b) => projName(a).localeCompare(projName(b)) || (lastMs(b) - lastMs(a)),
+  topic:    (a,b) => topicName(a).localeCompare(topicName(b)) || (lastMs(b) - lastMs(a)),
+  subtopic: (a,b) => subName(a).localeCompare(subName(b)) || (lastMs(b) - lastMs(a)),
+};
+const SORT_COLS = [["recent","date"],["priority","priority"],["title","title"],
+                   ["project","folder"],["topic","topic"],["subtopic","subtopic"]];
+
+function setNavView(v){ navView = v; localStorage.setItem("csd.consoleNavView", v); renderNav(); }
+function setTopicFilter(v){ navTopicFilter = v;
+  localStorage.setItem("csd.consoleNavTopicFilter", v); renderNav(); }
+
+function setNavSort(key){
+  if(key === navSort) navDir = navDir === "desc" ? "asc" : "desc";   // re-click flips
+  else { navSort = key;
+         navDir = ["title","project","topic","subtopic"].includes(key) ? "asc" : "desc"; }
+  localStorage.setItem("csd.consoleNavSort", navSort);
+  localStorage.setItem("csd.consoleNavDir", navDir);
+  renderNav();
+}
+
+function navControls(d){
+  const topics = (d && d.topics) || {};
+  const vchip = (v,lbl,tip) =>
+    `<span class="sortchip ${navView===v?"on":""}" onclick="setNavView('${v}')" title="${tip}">${lbl}</span>`;
+  let html = `<div class="navrow"><span class="lbl">view</span>
+    ${vchip("sort","sort","Flat, sortable columns")}${vchip("group","group","Topic › subtopic tree")}</div>`;
+  if(navView === "sort"){
+    const chip = ([key,label]) => {
+      const on = navSort === key, arr = on ? (navDir==="desc"?" ↓":" ↑") : "";
+      return `<span class="sortchip ${on?"on":""}" onclick="setNavSort('${key}')"
+        title="sort by ${label}${on?" ("+navDir+") — click to flip":""}">${label}${arr}</span>`;
+    };
+    html += `<div class="navrow"><span class="lbl">sort</span>${SORT_COLS.map(chip).join("")}</div>`;
+    const tnames = Object.keys(topics).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
+    if(tnames.length)
+      html += `<div class="navrow"><span class="lbl">topic</span>
+        <select class="navfilter" onchange="setTopicFilter(this.value)">
+          <option value="" ${navTopicFilter===""?"selected":""}>all</option>
+          ${tnames.map(t=>`<option value="${esc(t)}" ${navTopicFilter===t?"selected":""}>${esc(t)}</option>`).join("")}
+          <option value="__none__" ${navTopicFilter==="__none__"?"selected":""}>(untopiced)</option>
+        </select></div>`;
+  }
+  return html;
+}
+
+function setNavSub(d){
+  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
+  document.getElementById("navsub").innerHTML =
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+}
+
+/* Group view: Topic › Subtopic collapsible tree. Untopiced sessions fall under
+   an "(untopiced)" group (last); topic-but-no-subtopic under "(no subtopic)"
+   inside the topic. Rows inside a group keep the active flat sort. */
+const UNT = "__untopiced__", NOSUB = "__nosub__";
+function renderNavGroup(d){
+  const dir = navDir === "asc" ? 1 : -1;
+  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
+  const byTopic = new Map();
+  for(const s of d.sessions){
+    const t = s.topic || UNT;
+    const st = s.topic ? (s.subtopic || NOSUB) : NOSUB;
+    if(!byTopic.has(t)) byTopic.set(t, new Map());
+    const sm = byTopic.get(t);
+    if(!sm.has(st)) sm.set(st, []);
+    sm.get(st).push(s);
+  }
+  const alpha = (a,b,sentinel) => a===sentinel ? 1 : b===sentinel ? -1
+    : a.toLowerCase().localeCompare(b.toLowerCase());
+  let html = "";
+  for(const t of [...byTopic.keys()].sort((a,b)=>alpha(a,b,UNT))){
+    const sm = byTopic.get(t);
+    const tcount = [...sm.values()].reduce((n,a)=>n+a.length,0);
+    const tkey = "t:"+t, tcol = !!navSec[tkey];
+    html += `<div class="sec topicsec" data-k="${esc(tkey)}" onclick="toggleSec(this)">
+      <span class="tw">${tcol?"▸":"▾"}</span>▦ ${esc(t===UNT?"(untopiced)":t)}
+      <span class="n">· ${tcount}</span></div>`;
+    if(tcol) continue;
+    for(const st of [...sm.keys()].sort((a,b)=>alpha(a,b,NOSUB))){
+      const rows = sm.get(st).slice().sort((a,b)=>dir*cmp(a,b));
+      if(t === UNT){ for(const s of rows) html += sessRow(s, d, true); continue; }
+      const stkey = "ts:"+t+"|"+st, stcol = !!navSec[stkey];
+      html += `<div class="proj subtopicsec" data-k="${esc(stkey)}" onclick="toggleSec(this)">
+        <span class="tw">${stcol?"▸":"▾"}</span>${esc(st===NOSUB?"(no subtopic)":st)}
+        <span class="n">· ${rows.length}</span></div>`;
+      if(!stcol) for(const s of rows) html += sessRow(s, d, true);
+    }
+  }
+  document.getElementById("navlist").innerHTML =
+    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+}
 
 /* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<proj>".
    Everything is EXPANDED by default; only explicit user collapses are stored.
@@ -627,15 +809,19 @@ function sessRow(s, d, tagProject){
     ? `<span class="ptag">${esc(s.project_label)}${s.worktree?" ⌥"+esc(s.worktree):""} ·</span>` : "";
   const wtag = !tagProject && s.worktree
     ? `<span class="wtag">⌥${esc(s.worktree)} ·</span>` : "";
-  const last = new Date(s.mtime*1000).toISOString();
+  // TRUE last activity for the recency stamp (last_ts), file mtime as fallback.
+  const last = s.last_ts || new Date(s.mtime*1000).toISOString();
   const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
   const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
   // The tldr rides as the row's hover line — the compact layout stays intact.
   const tl = s.tldr?.headline ? ` title="tl;dr — ${esc(s.tldr.headline)}"` : "";
+  // A user-set title overrides the derived one; ✎ marks that it's hand-set.
+  const disp = s.user_title ? `${esc(s.user_title)}<span class="tmark" title="custom title">✎</span>`
+                            : esc(s.title);
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
     <span class="dot ${s.state}" title="${s.state}"></span>
     <span class="meta">
-      <div class="ttl"${tl}>${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="ttl"${tl}>${pg}${ptag}${wtag}${disp}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
     </span>
     ${ctxGauge(s.ctx_tokens)}</div>`;
@@ -650,45 +836,22 @@ async function loadNav(){
 function renderNav(){
   if(!navData) return;
   const d = navData;
-  // ONE level of grouping. Flagged sessions sit directly under a quiet
-  // priority header (project moves onto the row). The unprioritized bulk
-  // keeps project grouping as its single level — but a 1-session project
-  // doesn't earn a header, it renders as a tagged row in recency position.
-  const flagged = {critical:[], high:[], med:[], low:[]};
-  const normal = [];
-  for(const s of d.sessions)
-    (s.priority && flagged[s.priority]) ? flagged[s.priority].push(s) : normal.push(s);
-  let html = "";
-  const bucket = pri => {
-    const ss = flagged[pri];
-    if(!ss.length) return;
-    const bkey = "b:" + pri, bcol = !!navSec[bkey];
-    html += `<div class="sec pri-${pri}" data-k="${esc(bkey)}" onclick="toggleSec(this)">
-      <span class="tw">${bcol?"▸":"▾"}</span>${PRI_GLYPH[pri]} ${pri} <span class="n">· ${ss.length}</span></div>`;
-    if(!bcol) for(const s of ss) html += sessRow(s, d, true);
-  };
-  bucket("critical"); bucket("high"); bucket("med");
-  // group the unprioritized bulk by project, in recency order of appearance
-  const groups = [], gIdx = new Map();
-  for(const s of normal){
-    const k = s.project_label || s.project || "?";
-    if(!gIdx.has(k)){ const g = {k, ss:[]}; gIdx.set(k, g); groups.push(g); }
-    gIdx.get(k).ss.push(s);
-  }
-  for(const g of groups){
-    if(g.ss.length === 1){ html += sessRow(g.ss[0], d, true); continue; }
-    const pkey = "p:" + g.k, pcol = !!navSec[pkey];
-    html += `<div class="proj" data-k="${esc(pkey)}" onclick="toggleSec(this)">
-      <span class="tw">${pcol?"▸":"▾"}</span>${esc(g.k)} <span class="n">· ${g.ss.length}</span></div>`;
-    if(!pcol) for(const s of g.ss) html += sessRow(s, d, false);
-  }
-  bucket("low");
-  document.getElementById("navlist").innerHTML =
-    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
-  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
-  document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
-     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+  document.getElementById("navsort").innerHTML = navControls(d);
+
+  if(navView === "group"){ renderNavGroup(d); setNavSub(d); return; }
+
+  // Sort view: flat list, one sort column, asc/desc, optional topic filter.
+  let list = d.sessions;
+  if(navTopicFilter === "__none__") list = list.filter(s => !s.topic);
+  else if(navTopicFilter) list = list.filter(s => s.topic === navTopicFilter);
+  const dir = navDir === "asc" ? 1 : -1;
+  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
+  const rows = [...list].sort((a,b) => dir * cmp(a,b));
+  document.getElementById("navlist").innerHTML = rows.length
+    ? rows.map(s => sessRow(s, d, true)).join("")
+    : `<div class="empty">${showArchived ? "nothing archived"
+        : navTopicFilter ? "no sessions match this topic filter" : "no recent sessions"}</div>`;
+  setNavSub(d);
 }
 
 function toggleArchived(){ showArchived = !showArchived; loadNav(); }
@@ -775,6 +938,7 @@ async function refreshTldr(){
 
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
+  const dtitle = s.user_title || s.title;   // user-set title overrides derived
   const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
   const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
   const sub = s.subagent;
@@ -789,7 +953,7 @@ function renderHeader(s){
   document.getElementById("chdr").innerHTML = `
     <div class="row1">
       <span class="dot ${s.state}" title="${s.state}"></span>
-      <h2 title="${esc(s.title)}">${esc(s.title)}</h2>
+      <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
     </div>
     ${subhdr}
     <div class="chips">
@@ -800,6 +964,7 @@ function renderHeader(s){
       <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
       <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
       <span class="chip">${s.state}</span>
+      ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
     </div>
@@ -813,6 +978,10 @@ function renderHeader(s){
       <button class="act" onclick="act('summarize')"
         title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
       <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <button class="act" onclick="setTitle()"
+        title="Set or clear a human-readable title (overlay only — never touches the transcript)">✎ ${s.user_title?"Retitle":"Title"}</button>
+      <button class="act" onclick="openTopicDlg()"
+        title="Assign a reusable topic › subtopic (overlay only — groups sessions independent of folder)">▦ Topic</button>
       <span class="pris"><span class="k-pri">priority</span>
         ${["critical","high","med","low"].map(p =>
           `<button class="act sm pribtn p-${p} ${s.priority===p?"on":""}"
@@ -1095,6 +1264,62 @@ async function setPriority(p){
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(p ? "priority " + p : "priority cleared");
   await refreshSession(false); loadNav();
+}
+
+/* Set/clear a human title (overlay only). prompt() matches the console's
+   low-ceremony idiom; the sidebar + header pick it up on the next render. */
+async function setTitle(){
+  if(!curSession) return;
+  const t = prompt("Session title (leave blank to clear):", curSession.user_title || "");
+  if(t === null) return;   // cancelled
+  actmsg("title…");
+  const [ok, d] = await post("/api/title", {session_id: curId, title: t.trim() || null});
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(t.trim() ? "title set" : "title cleared");
+  await refreshSession(false); loadNav();
+}
+
+/* ---------- topic dialog: reusable topic › subtopic taxonomy ----------
+   A small popover (NOT inside the polled #chdr, so a 3s refresh can't wipe an
+   open edit). Both inputs are backed by <datalist> autocomplete populated from
+   the managed list (navData.topics); typing a NEW value is allowed and gets
+   remembered server-side so it's reusable next time. */
+function openTopicDlg(){
+  if(!curSession) return;
+  const topics = navData?.topics || {};
+  document.getElementById("td-topics").innerHTML =
+    Object.keys(topics).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()))
+      .map(t=>`<option value="${esc(t)}"></option>`).join("");
+  document.getElementById("td-topic").value = curSession.topic || "";
+  document.getElementById("td-subtopic").value = curSession.subtopic || "";
+  refreshSubDatalist();
+  document.getElementById("topicdlg").classList.add("open");
+  document.getElementById("td-topic").focus();
+}
+function refreshSubDatalist(){
+  const topics = navData?.topics || {};
+  const t = document.getElementById("td-topic").value.trim();
+  const subs = topics[t] || [];
+  document.getElementById("td-subs").innerHTML =
+    subs.map(s=>`<option value="${esc(s)}"></option>`).join("");
+}
+function closeTopicDlg(){ document.getElementById("topicdlg").classList.remove("open"); }
+async function saveTopic(){
+  if(!curSession) return;
+  const topic = document.getElementById("td-topic").value.trim();
+  const subtopic = document.getElementById("td-subtopic").value.trim();
+  actmsg("topic…");
+  const [ok, d] = await post("/api/topic",
+    {session_id: curId, topic: topic || null, subtopic: subtopic || null});
+  closeTopicDlg();
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(topic ? `topic ${topic}${subtopic?" › "+subtopic:""}` : "topic cleared");
+  await refreshSession(false); loadNav();
+}
+async function clearTopic(){
+  document.getElementById("td-topic").value = "";
+  document.getElementById("td-subtopic").value = "";
+  await saveTopic();
 }
 
 /* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */

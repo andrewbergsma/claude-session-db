@@ -33,6 +33,9 @@ Endpoints
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
+  POST /api/title                  {session_id, title: str|null} -> set/clear a title
+  POST /api/topic                  {session_id, topic, subtopic} -> set/clear taxonomy
+  GET  /api/topics                 managed topic -> subtopics list (autocomplete)
   POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
@@ -224,43 +227,171 @@ def set_archived(sid: str, archived: bool, reason: str = "") -> dict:
 
 
 # ----------------------------------------------------------------------------
-# priority — operator triage flag, console state only
+# per-session overlay — title / priority / topic / subtopic (console state only)
 #
-# A small JSON keyed by session id in the console state dir, exactly like the
-# archive index: never a mutation of ~/.claude/projects. The sidebar groups
-# sessions by this flag (critical first); unprioritized sessions fall into a
-# default bucket. Clearing a priority removes the key.
+# ONE JSON keyed by session id in the console state dir, exactly like the
+# archive index: never a mutation of ~/.claude/projects. Every field is
+# operator-set metadata, NOT derived from the transcript — a human title that
+# overrides the derived nav label, a triage priority, and a two-level
+# topic → subtopic taxonomy that groups sessions INDEPENDENT of their cwd/folder
+# (folder still shows on the row, but does NOT define the grouping). Clearing a
+# field drops it; an entry with no fields left is removed entirely. Atomic
+# replace — never a half-written index.
+#
+# The topic/subtopic *values* are a reusable managed list (topics.json) so the
+# UI offers autocomplete from what already exists — anti-drift, so "ControlTech"
+# and "controltech" don't fragment into two groups.
+#
+# Legacy note: priority used to live in its own priority.json (and this branch's
+# earlier titles.json). _migrate_legacy_overlays() seeds meta.json from them once
+# and leaves the old files untouched — nothing is ever destroyed.
 # ----------------------------------------------------------------------------
-PRIORITY_FILE = CONSOLE_STATE / "priority.json"
-_PRIORITY_LOCK = threading.Lock()
 PRIORITIES = ("low", "med", "high", "critical")
+META_FILE = CONSOLE_STATE / "meta.json"
+TOPICS_FILE = CONSOLE_STATE / "topics.json"
+PRIORITY_FILE = CONSOLE_STATE / "priority.json"     # legacy, migrated once
+TITLES_FILE = CONSOLE_STATE / "titles.json"         # legacy, migrated once
+_META_LOCK = threading.Lock()
+_TOPICS_LOCK = threading.Lock()
+META_FIELDS = ("title", "priority", "topic", "subtopic")
+MAX_TITLE_LEN = 200
+MAX_TOPIC_LEN = 80
 
 
-def _read_priority() -> dict:
+def _atomic_write_json(path: Path, obj) -> None:
+    CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=1))
+    tmp.replace(path)                       # atomic; never a half-written index
+
+
+def _read_meta_overlay() -> dict:
     try:
-        return json.loads(PRIORITY_FILE.read_text())
+        d = json.loads(META_FILE.read_text())
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _priority_of(idx: dict, sid: str):
+def _meta_of(idx: dict, sid: str) -> dict:
     v = idx.get(sid)
-    return v.get("priority") if isinstance(v, dict) else v
+    return v if isinstance(v, dict) else {}
+
+
+def _update_meta(sid: str, **fields) -> dict:
+    """Merge fields into a session's overlay entry (a falsy value clears a
+    field). An entry with no meaningful metadata left is dropped so the file
+    stays tidy. Other fields on the same session are always preserved."""
+    with _META_LOCK:
+        idx = _read_meta_overlay()
+        cur = dict(_meta_of(idx, sid))
+        for k, v in fields.items():
+            if v:
+                cur[k] = v
+            else:
+                cur.pop(k, None)
+        kept = {k: cur[k] for k in META_FIELDS if cur.get(k)}
+        if kept:
+            kept["set_at"] = datetime.now(timezone.utc).isoformat()
+            idx[sid] = kept
+        else:
+            idx.pop(sid, None)
+        _atomic_write_json(META_FILE, idx)
+        return idx.get(sid) or {}
+
+
+def _priority_of(idx: dict, sid: str):
+    """priority for a sid out of an already-read overlay index."""
+    return _meta_of(idx, sid).get("priority")
+
+
+def set_title(sid: str, title) -> dict:
+    title = (title or "").strip()[:MAX_TITLE_LEN]
+    _update_meta(sid, title=title or None)
+    return {"ok": True, "session_id": sid, "title": title or None}
 
 
 def set_priority(sid: str, priority) -> dict:
-    with _PRIORITY_LOCK:
-        idx = _read_priority()
-        if priority:
-            idx[sid] = {"priority": priority,
-                        "set_at": datetime.now(timezone.utc).isoformat()}
-        else:
-            idx.pop(sid, None)
-        CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
-        tmp = PRIORITY_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(idx, indent=1))
-        tmp.replace(PRIORITY_FILE)         # atomic; never a half-written index
+    _update_meta(sid, priority=priority or None)
     return {"ok": True, "session_id": sid, "priority": priority or None}
+
+
+def set_topic(sid: str, topic, subtopic) -> dict:
+    """Assign (or clear) a session's topic/subtopic, and remember the values in
+    the managed list so they're reusable next time. No topic means no subtopic."""
+    topic = (topic or "").strip()[:MAX_TOPIC_LEN]
+    subtopic = (subtopic or "").strip()[:MAX_TOPIC_LEN]
+    if not topic:
+        subtopic = ""
+    _update_meta(sid, topic=topic or None, subtopic=subtopic or None)
+    if topic:
+        _remember_topic(topic, subtopic)
+    return {"ok": True, "session_id": sid,
+            "topic": topic or None, "subtopic": subtopic or None}
+
+
+# ---- managed topic → subtopics list (reusable across sessions) --------------
+def _read_topics() -> dict:
+    try:
+        d = json.loads(TOPICS_FILE.read_text())
+        return {k: v for k, v in d.items() if isinstance(v, list)} \
+            if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_topic(topic: str, subtopic: str = "") -> None:
+    """Add topic (and subtopic, if any) to the managed list — the anti-drift
+    memory, so next time the operator picks from a list instead of retyping."""
+    with _TOPICS_LOCK:
+        d = _read_topics()
+        subs = d.get(topic) or []
+        if subtopic and subtopic not in subs:
+            subs.append(subtopic)
+        d[topic] = sorted(subs, key=str.lower)
+        _atomic_write_json(TOPICS_FILE, d)
+
+
+def managed_topics() -> dict:
+    """topic → sorted subtopics, unioning the managed list (topics.json) with
+    what is actually assigned across sessions — self-healing if topics.json
+    ever lags behind the overlay."""
+    d = {k: list(v) for k, v in _read_topics().items()}
+    for _sid, m in _read_meta_overlay().items():
+        if not isinstance(m, dict) or not m.get("topic"):
+            continue
+        subs = d.setdefault(m["topic"], [])
+        st = m.get("subtopic")
+        if st and st not in subs:
+            subs.append(st)
+    return {t: sorted(subs, key=str.lower) for t, subs in d.items()}
+
+
+def _migrate_legacy_overlays() -> None:
+    """One-time seed of meta.json from the pre-unification priority.json /
+    titles.json indexes. Read-only over the legacy files — they are left in
+    place, never deleted; nothing is destroyed."""
+    if META_FILE.exists():
+        return
+    seed: dict = {}
+    for path, field in ((PRIORITY_FILE, "priority"), (TITLES_FILE, "title")):
+        try:
+            legacy = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(legacy, dict):
+            continue
+        for sid, v in legacy.items():
+            val = v.get(field) if isinstance(v, dict) else v
+            if val:
+                seed.setdefault(sid, {})[field] = val
+    if not seed:
+        return
+    for _sid, m in seed.items():
+        m["set_at"] = datetime.now(timezone.utc).isoformat()
+    with _META_LOCK:
+        if not META_FILE.exists():
+            _atomic_write_json(META_FILE, seed)
 
 
 # ----------------------------------------------------------------------------
@@ -639,6 +770,7 @@ def summarize_nav(path: Path):
     title = cwd = branch = None
     last_user = None
     usage = None
+    last_ts = None
     for r in recs:
         t = r.get("type")
         if t == "ai-title":
@@ -648,6 +780,11 @@ def summarize_nav(path: Path):
         elif t in ("user", "assistant"):
             cwd = r.get("cwd") or cwd
             branch = r.get("gitBranch") or branch
+            # TRUE last activity = the last message record's own timestamp
+            # (records are chronological, so the last one wins) — NOT file
+            # mtime, which only ever lies toward "more recent".
+            if r.get("timestamp"):
+                last_ts = r["timestamp"]
             if t == "user" and not r.get("isSidechain"):
                 txt = _text_of((r.get("message") or {}).get("content"))
                 if _is_real_user_turn(r, txt):
@@ -675,6 +812,7 @@ def summarize_nav(path: Path):
         "state": _state(recs, mtime_age),
         "mtime": path.stat().st_mtime,
         "mtime_age_s": round(mtime_age),
+        "last_ts": last_ts,
         "started_at": stats["started_at"],
         "msg_count": stats["msg_count"],
         "ctx_tokens": ctx_tokens,
@@ -703,7 +841,7 @@ def discover_sessions(archived=False):
         if m >= cutoff or archived:
             cands.append((m, p))
     cands.sort(reverse=True)
-    pri = _read_priority()
+    meta = _read_meta_overlay()
     out = []
     for _, p in cands[:MAX_NAV_SESSIONS]:
         try:
@@ -711,10 +849,14 @@ def discover_sessions(archived=False):
         except OSError:
             continue
         if s:
+            m = _meta_of(meta, p.stem)
             s["archived"] = p.stem in idx
             s["stoppable"] = stoppable(p.stem)
             s["agents"] = _agents_glance(p)
-            s["priority"] = _priority_of(pri, p.stem)
+            s["priority"] = m.get("priority")
+            s["user_title"] = m.get("title")
+            s["topic"] = m.get("topic")
+            s["subtopic"] = m.get("subtopic")
             # Cached-or-nothing; stale rows queue an async regeneration.
             s["tldr"] = tldr.payload(p.stem, p)
             out.append(s)
@@ -942,6 +1084,7 @@ def build_session(sid: str):
                       + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0))
 
+    _m = _meta_of(_read_meta_overlay(), sid)
     out = {
         "session_id": sid,
         "project": str(path.parent.name),
@@ -957,7 +1100,10 @@ def build_session(sid: str):
         "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
         "stoppable": stoppable(sid),
-        "priority": _priority_of(_read_priority(), sid),
+        "priority": _m.get("priority"),
+        "user_title": _m.get("title"),
+        "topic": _m.get("topic"),
+        "subtopic": _m.get("subtopic"),
     }
     if is_child:
         from ..subagent import read_agent_meta
@@ -1814,7 +1960,14 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"sessions": discover_sessions(archived=arch),
                                    "archived_count": len(_read_archive()),
                                    "summarizing": SUMMARIZING,
+                                   "topics": managed_topics(),
                                    "generated_at": time.time()})
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/topics":
+            # The managed topic → subtopics list, for the sidebar autocomplete.
+            try:
+                return self._json({"topics": managed_topics()})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/session":
@@ -1906,6 +2059,27 @@ class Handler(SimpleHTTPRequestHandler):
                               "or null to clear"}, 400)
             return self._json(set_priority(sid, pr))
 
+        if route == "/api/title":
+            # Title override is an index-only overlay (meta.json), never a
+            # mutation of ~/.claude/projects. A child (subagent) key inherits
+            # the parent's identity; title the parent instead.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions cannot be titled — "
+                              "title the parent session"}, 400)
+            return self._json(set_title(sid, body.get("title")))
+
+        if route == "/api/topic":
+            # Assign/clear the reusable topic → subtopic taxonomy (overlay only,
+            # never a transcript mutation). Values are remembered in topics.json
+            # so they're offered as autocomplete next time.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions inherit the parent's "
+                              "topic — set it on the parent session"}, 400)
+            return self._json(set_topic(sid, body.get("topic"),
+                                        body.get("subtopic")))
+
         if route == "/api/tldr":
             # Force-queue a regeneration (the per-session refresh affordance).
             # Never blocks: the fresh tldr lands on a later /api/session poll.
@@ -1980,6 +2154,7 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
 
     KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
     CSD_DSN = csd_dsn or os.environ.get("CSD_DATABASE_URL")
+    _migrate_legacy_overlays()      # seed meta.json from legacy priority/titles
 
     if _loopback(host) or no_auth:
         TOKEN = None

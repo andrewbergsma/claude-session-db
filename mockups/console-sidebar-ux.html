@@ -10,7 +10,7 @@
     --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
     --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff; --cyan:#39c5cf;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-    --nav-w:466px;
+    --nav-w:548px;   /* wider here to show all columns; the real nav is resizable */
     color-scheme:dark;
   }
   *{box-sizing:border-box; margin:0}
@@ -150,6 +150,15 @@
   .cdt small{font-size:10px; color:var(--muted)}
   .cdt.hot b{color:var(--accent)}
 
+  .cidle{text-align:right; font:11px var(--mono); color:var(--muted); white-space:nowrap}
+  .cidle.active{color:var(--accent); font-weight:600}
+
+  .cprio{display:flex; justify-content:center}
+  .prio{cursor:pointer; font-size:13px; line-height:1}
+  .prio.high{color:var(--bad)} .prio.med{color:var(--warn)}
+  .prio.low{color:var(--ink2)} .prio.none{color:#3b434d}
+  .prio.none:hover{color:var(--muted)}
+
   /* footer legend */
   .navfoot{border-top:1px solid var(--border); padding:9px 14px; background:var(--surface);
            display:flex; flex-direction:column; gap:6px}
@@ -179,7 +188,7 @@
         <span><i class="dot idle"></i> idle</span>
         <span><i class="dot closed"></i> closed</span>
       </div>
-      <div class="hint">Started = first message · Last msg = most recent user turn · click a header to sort ↕</div>
+      <div class="hint">Idle for = time since last message · ⚑ priority (click to change) · click a header to sort ↕</div>
     </div>
   </div>
 </aside>
@@ -200,25 +209,25 @@ const PROJECTS = [
 // state: working (agent busy) | move (your move — agent handed back / asked you)
 //      | wait (agent done, no explicit ask) | idle | closed
 const SESSIONS = [
-  {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:372000, turns:96, state:"working", wt:"console-sidebar-ux", agents:0, start:"2026-07-24T15:40", last:"2026-07-24T17:18"},
-  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, state:"move",    wt:"console-angles-merge", agents:2, start:"2026-07-24T14:05", last:"2026-07-24T16:42"},
+  {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:372000, turns:96, state:"working", prio:"high", wt:"console-sidebar-ux", agents:0, start:"2026-07-24T15:40", last:"2026-07-24T17:18"},
+  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, state:"move",    prio:"med",  wt:"console-angles-merge", agents:2, start:"2026-07-24T14:05", last:"2026-07-24T16:42"},
   {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, state:"wait",    wt:null, agents:0, start:"2026-07-24T16:02", last:"2026-07-24T16:54"},
-  {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, state:"idle",    wt:null, agents:3, start:"2026-07-24T13:10", last:"2026-07-24T15:45"},
+  {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, state:"idle",    prio:"low",  wt:null, agents:3, start:"2026-07-24T13:10", last:"2026-07-24T15:45"},
   {p:"claude-session-db", title:"PR membership + full PR status in Git tab",        ctx:97000,  turns:44, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T21:30", last:"2026-07-24T14:10"},
   {p:"claude-session-db", title:"timeline rail tab",                                ctx:58000,  turns:33, state:"closed",  wt:null, agents:1, arch:true, start:"2026-07-24T10:15", last:"2026-07-24T12:30"},
   {p:"claude-session-db", title:"sortable columns + titles",                        ctx:41000,  turns:19, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T19:40", last:"2026-07-24T10:30"},
   {p:"claude-session-db", title:"cache-control on nav fetch",                       ctx:31000,  turns:14, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T18:20", last:"2026-07-24T08:40"},
 
-  {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:258000, turns:64, state:"working", wt:null, agents:0, start:"2026-07-24T16:30", last:"2026-07-24T17:16"},
+  {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:258000, turns:64, state:"working", prio:"high", wt:null, agents:0, start:"2026-07-24T16:30", last:"2026-07-24T17:16"},
   {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, state:"move",    wt:null, agents:1, start:"2026-07-24T15:00", last:"2026-07-24T16:20"},
   {p:"knowledge-mcp", title:"import_entries YAML footgun hardening",                ctx:52000,  turns:27, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T22:10", last:"2026-07-24T13:20"},
   {p:"knowledge-mcp", title:"embedding backfill batch sizing",                      ctx:34000,  turns:16, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T20:00", last:"2026-07-24T07:20"},
 
-  {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:231000, turns:83, state:"working", wt:"p6-migration", agents:0, start:"2026-07-24T14:50", last:"2026-07-24T17:05"},
+  {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:231000, turns:83, state:"working", prio:"med", wt:"p6-migration", agents:0, start:"2026-07-24T14:50", last:"2026-07-24T17:05"},
   {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, state:"wait",    wt:null, agents:2, start:"2026-07-24T14:20", last:"2026-07-24T16:10"},
   {p:"p6-tools", title:"layouts export round-trip",                                 ctx:64000,  turns:29, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-24T12:30", last:"2026-07-24T14:50"},
 
-  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, state:"move",    wt:null, agents:1, start:"2026-07-24T15:30", last:"2026-07-24T17:08"},
+  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, state:"move",    prio:"high", wt:null, agents:1, start:"2026-07-24T15:30", last:"2026-07-24T17:08"},
   {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T16:30", last:"2026-07-24T14:00"},
 ];
 
@@ -238,16 +247,22 @@ const sid  = s => s.p+"#"+s.start;
 const byId = id => SESSIONS.find(s=>sid(s)===id);
 
 const ms = s => Date.parse(s);
+// fixed "now" so the mock's idle/relative times stay deterministic
+const NOW = Date.parse("2026-07-24T17:20");
 const STATE_RANK = {working:0, move:1, wait:2, idle:3, closed:4};
 const CMP = {
   recent:  (a,b)=> ms(a.last)  - ms(b.last),
   started: (a,b)=> ms(a.start) - ms(b.start),
+  idle:    (a,b)=> ms(b.last)  - ms(a.last),   // longer idle = older last-msg
   turns:   (a,b)=> a.turns - b.turns,
   ctx:     (a,b)=> a.ctx - b.ctx,
+  prio:    (a,b)=> PRIO_RANK[a.prio||"none"] - PRIO_RANK[b.prio||"none"],
   title:   (a,b)=> a.title.localeCompare(b.title),
   state:   (a,b)=> STATE_RANK[a.state]-STATE_RANK[b.state],
   project: (a,b)=> a.p.localeCompare(b.p) || (ms(b.last)-ms(a.last)),
 };
+const PRIO_RANK = {high:0, med:1, low:2, none:3};
+const PRIO_NEXT = {none:"high", high:"med", med:"low", low:"none"};  // click cycle
 
 // ------------------------------------------------------------------ helpers
 const esc = s => (s||"").replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
@@ -259,6 +274,12 @@ function dtCell(iso, hot){
 const kfmt = t => Math.round(t/1000)+"k";
 // context load colours: green <200k · yellow 200–350k · red ≥350k
 const ckClass = t => t>=350000 ? "bad" : t>=200000 ? "warn" : "";
+function idleFmt(iso){
+  const m = Math.max(0, Math.round((NOW - ms(iso))/60000));
+  if(m < 60)   return m+"m";
+  if(m < 1440) return Math.floor(m/60)+"h"+(m%60?` ${m%60}m`:"");
+  return Math.floor(m/1440)+"d "+Math.floor((m%1440)/60)+"h";
+}
 const initialsOf = p => p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
 const countState = (pid,st) => LIVE.filter(s=>s.p===pid && s.state===st).length;
 
@@ -268,9 +289,10 @@ function render(){
   if(navCollapsed){ renderRail(); return; }
   renderTop();
   const sc = document.getElementById("scroll");
+  // state | title | (turns|project) | ctx | prio | started | last | idle
   sc.style.setProperty("--cols", tab==="archive"
-    ? "12px minmax(0,1fr) 92px 46px 60px 60px"    // state title project ctx started last
-    : "12px minmax(0,1fr) 44px 46px 60px 60px");  // state title turns   ctx started last
+    ? "12px minmax(0,1fr) 84px 44px 30px 54px 54px 46px"
+    : "12px minmax(0,1fr) 38px 44px 30px 54px 54px 46px");
   renderBody();
 }
 function renderBody(){
@@ -358,8 +380,10 @@ function sessionTable(source, showProject){
     ${th("title","Title")}
     ${col3}
     ${th("ctx","Ctx",true)}
+    ${th("prio","Prio")}
     ${th("started","Started")}
-    ${th("recent","Last msg")}
+    ${th("recent","Last")}
+    ${th("idle","Idle",true)}
   </div>`;
 
   const rows = list.map(s=>{
@@ -378,13 +402,21 @@ function sessionTable(source, showProject){
            <div class="t"><span class="ttxt">${esc(s.title)}</span><span class="edit" title="rename" onclick="startEdit(event,'${id}')">✎</span></div>
            <div class="m">${meta}</div>
          </div>`;
+    const pr = s.prio || "none";
+    const prioCell = `<div class="cprio"><span class="prio ${pr}" title="priority: ${pr} — click to change"
+        onclick="setPrio(event,'${id}')">${pr==="none"?"⚐":"⚑"}</span></div>`;
+    const idleCell = s.state==="working"
+      ? `<div class="cidle active" title="agent active now">active</div>`
+      : `<div class="cidle" title="idle ${idleFmt(s.last)} (since last message)">${idleFmt(s.last)}</div>`;
     return `<div class="srow${cls} ${active===id?"active":""}" onclick="selectRow('${id}')">
       <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
       ${titleCell}
       ${col3cell}
       <div class="ck ${ckClass(s.ctx)}" title="${s.ctx.toLocaleString()} tokens">${kfmt(s.ctx)}</div>
+      ${prioCell}
       ${dtCell(s.start)}
       ${dtCell(s.last, s.state==="working")}
+      ${idleCell}
     </div>`;
   }).join("");
 
@@ -416,6 +448,14 @@ function commitEdit(id,val){
 function editKey(e,id){
   if(e.key==="Enter"){ e.preventDefault(); e.target.blur(); }
   else if(e.key==="Escape"){ editing=null; renderBody(); }
+}
+// click a priority flag to cycle none → high → med → low → none
+function setPrio(e,id){
+  e.stopPropagation();
+  const s = byId(id); if(!s) return;
+  const nxt = PRIO_NEXT[s.prio || "none"];
+  s.prio = nxt==="none" ? undefined : nxt;
+  renderBody();
 }
 
 render();

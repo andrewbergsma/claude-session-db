@@ -30,6 +30,7 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/claudemd?id=<sid>&n=   one CLAUDE.md memory file's content (read-only)
   GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
@@ -1036,6 +1037,85 @@ def _agents_glance(path: Path):
     return {"total": total, "live": live} if total else None
 
 
+# ----------------------------------------------------------------------------
+# CLAUDE.md memory files — the always-loaded context Claude Code injects
+#
+# Read-only resolution, confined by construction to $HOME + the session's own
+# directory chain: the global ~/.claude/CLAUDE.md plus a CLAUDE.md per ancestor
+# directory of the session cwd (outermost first — the order Claude Code applies
+# them; a worktree cwd therefore surfaces both the repo's and the worktree's
+# file). /api/claudemd never accepts a path from the caller — it re-resolves
+# this list from the session id and indexes into it.
+# ----------------------------------------------------------------------------
+CLAUDEMD_MAX_BYTES = 512 * 1024
+
+
+def _claudemd_files(cwd):
+    """[{scope, path, chars}] for the CLAUDE.md files a session at `cwd` loads.
+
+    Missing files are omitted (never an error row); duplicates (symlinks,
+    cwd == repo root) collapse on the resolved path.
+    """
+    home = Path.home()
+    out, seen = [], set()
+
+    def add(scope, p: Path):
+        try:
+            rp = p.resolve()
+            if rp in seen or not rp.is_file():
+                return
+            seen.add(rp)
+            out.append({"scope": scope, "path": str(p),
+                        "chars": rp.stat().st_size})
+        except OSError:
+            pass
+
+    add("global", home / ".claude" / "CLAUDE.md")
+    if cwd:
+        try:
+            c = Path(cwd).resolve()
+        except OSError:
+            c = None
+        if c is not None:
+            for d in (*reversed(c.parents), c):
+                if d != home and d.is_relative_to(home):
+                    add("project", d / "CLAUDE.md")
+    return out
+
+
+def _session_cwd(path: Path):
+    """cwd from the transcript tail — the same derivation /api/git uses."""
+    cwd = None
+    for r in tail_records(path, NAV_TAIL_BYTES):
+        if r.get("type") in ("user", "assistant") and r.get("cwd"):
+            cwd = r["cwd"]
+    return cwd
+
+
+def claudemd_payload(sid: str, n: int):
+    """(payload, code) for GET /api/claudemd — one memory file, read-only.
+
+    `n` indexes the server-side re-resolved list for this session; the caller
+    can never name a path, so the endpoint can only serve the global CLAUDE.md
+    or one inside the session's own directory chain.
+    """
+    path = find_session(sid)
+    if path is None:
+        return {"error": "session not found"}, 404
+    files = _claudemd_files(_session_cwd(path))
+    if not 0 <= n < len(files):
+        return {"error": "no such memory file"}, 404
+    f = files[n]
+    try:
+        with open(f["path"], "rb") as fh:
+            data = fh.read(CLAUDEMD_MAX_BYTES + 1)
+    except OSError as e:
+        return {"error": str(e)[:200]}, 500
+    return {**f,
+            "content": data[:CLAUDEMD_MAX_BYTES].decode("utf-8", "replace"),
+            "truncated": len(data) > CLAUDEMD_MAX_BYTES}, 200
+
+
 def build_session(sid: str):
     path = find_session(sid)
     if path is None:
@@ -1212,6 +1292,7 @@ def build_session(sid: str):
         "truncated": truncated,
         "counts": {"reads": n_reads, "searches": n_searches,
                    "events": len(events)},
+        "claudemd": _claudemd_files(cwd),
         "events": events,
         "rail": angle_rail(sid),
         "tldr": tldr.payload(sid, path),
@@ -2244,6 +2325,20 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload, code = git_payload(
                     sid, refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/claudemd":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                n = int((q.get("n") or ["0"])[0])
+            except ValueError:
+                return self._json({"error": "bad n"}, 400)
+            try:
+                payload, code = claudemd_payload(sid, n)
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)

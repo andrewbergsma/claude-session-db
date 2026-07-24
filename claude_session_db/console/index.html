@@ -2,12 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="session console">
 <title>kmcp — session console</title>
 <style>
   :root {
+    color-scheme:dark;   /* native controls (selects, inputs, scrollbars) render dark */
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
-    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#6e7a87;
+    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
     --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
@@ -16,13 +23,23 @@
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
+  html { -webkit-text-size-adjust:100%; }
   body {
     background:var(--bg); color:var(--ink);
     font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     display:grid; grid-template-columns:var(--nav-w) minmax(0,1fr) var(--rail-w);
-    grid-template-rows:100vh; height:100vh; overflow:hidden;
+    grid-template-rows:minmax(0,1fr);
+    height:100vh; height:100dvh;   /* dvh: iOS Safari's 100vh overshoots the visible viewport */
+    overflow:hidden; overscroll-behavior:none;
   }
-  @media (max-width:1100px){ body{ grid-template-columns:var(--nav-w) minmax(0,1fr); } #rail,#railgrip{ display:none; } }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce){
+    *, *::before, *::after { animation-duration:.001ms !important;
+      animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+  }
+
+  /* (responsive/mobile overrides live at the END of this stylesheet so they
+     win the cascade over the base rules below) */
 
   /* drag handle straddling the left edge of the right rail */
   #railgrip { position:fixed; top:0; bottom:0; right:var(--rail-w); width:9px;
@@ -42,7 +59,7 @@
 
   /* ---- left: projects + sessions ---- */
   #nav { background:var(--surface); border-right:1px solid var(--border);
-         overflow-y:auto; }
+         overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
   #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
               border-bottom:1px solid var(--border); z-index:2; }
   #nav .top .toprow { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -54,7 +71,24 @@
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
   body.navmin #nav .top { padding:12px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
-  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist { display:none; }
+  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist,
+  body.navmin #navsort { display:none; }
+  /* view toggle + sort columns + topic filter: stacked rows of clickable keys */
+  .navsort { display:flex; flex-direction:column; gap:4px; margin-top:7px; }
+  .navrow { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+  .navrow .lbl { font:9px var(--mono); text-transform:uppercase; letter-spacing:.4px;
+                 color:var(--muted); align-self:center; margin-right:1px; width:34px; }
+  .sortchip { font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.3px;
+              color:var(--muted); cursor:pointer; padding:1px 5px; border-radius:4px;
+              border:1px solid transparent; user-select:none; white-space:nowrap; }
+  .sortchip:hover { color:var(--ink2); }
+  .sortchip.on { color:var(--ink); border-color:var(--border); background:var(--surface2); }
+  .navfilter { font:10px var(--mono); background:var(--bg); color:var(--ink);
+               border:1px solid var(--border); border-radius:4px; padding:1px 4px;
+               max-width:160px; }
+  /* group-view tree headers reuse .sec/.proj; topic accented, subtopic indented */
+  .sec.topicsec { color:var(--ink2); }
+  .proj.subtopicsec { padding-left:26px; }
   .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
   /* group headers: quiet separators — sessions are the dominant content */
   .sec, .proj { display:flex; align-items:baseline; gap:4px; padding:9px 14px 2px;
@@ -77,12 +111,25 @@
           border-left:2px solid transparent; }
   .sess:hover { background:var(--surface2); }
   .sess.active { background:var(--surface2); border-left-color:var(--accent); }
-  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px; }
-  .dot.running { background:var(--warn); box-shadow:0 0 5px var(--warn); }
-  .dot.awaiting { background:var(--good); box-shadow:0 0 5px var(--good); }
-  .dot.stale,.dot.idle { background:var(--muted); }
+  /* activity dot — palette makes the OPERATOR-ACTIONABLE state ("waiting for
+     you") draw the eye. Deliberate inversion of the old green=done/orange=busy:
+     amber now means "your move", blue means an agent is working. */
+  .dot { width:7px; height:7px; border-radius:50%; flex:none; margin-top:5px;
+         border:1px solid transparent; }
+  .dot.working { background:var(--accent); box-shadow:0 0 5px var(--accent); }
+  .dot.working.fresh { animation:dotpulse 1.4s ease-in-out infinite; }
+  @keyframes dotpulse { 0%,100%{ box-shadow:0 0 3px var(--accent); }
+                        50%{ box-shadow:0 0 9px 1px var(--accent); } }
+  /* subagent-only work reads hollow-blue — distinct from main-chain working */
+  .dot.working.sub { background:transparent; border-color:var(--accent); box-shadow:none; }
+  .dot.waiting { background:var(--warn); box-shadow:0 0 6px 1px var(--warn); }
+  .dot.idle { background:var(--muted); box-shadow:none; }
+  .dot.stale { background:transparent; border-color:var(--muted); box-shadow:none; }
+  .navcensus { font:10px var(--mono); color:var(--muted); margin-top:3px; }
+  .navcensus b { color:var(--warn); font-weight:600; }
   .sess .meta { min-width:0; flex:1; }
   .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sess .ttl .tmark { color:var(--muted); font-size:9px; margin-left:4px; vertical-align:1px; }
   .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
                white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   /* context-size gauge: three bars, filled count = size bucket */
@@ -119,7 +166,9 @@
   .tldr-re { cursor:pointer; color:var(--muted); margin-left:6px; font:12px var(--mono); }
   .tldr-re:hover { color:var(--accent); }
 
-  #stream { flex:1; overflow-y:auto; padding:16px 20px 8px; }
+  #stream { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 20px 8px;
+            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #stream pre { max-width:100%; overflow:auto; }
   .ev { display:flex; gap:10px; margin:2px 0; }
   .ev .gutter { min-width:44px; text-align:right; color:var(--muted);
                 font:11px/1.6 var(--mono); flex:none; padding-top:2px; }
@@ -137,15 +186,30 @@
   .subtools { margin-top:6px; }
   .trow { font:11px var(--mono); margin:2px 0; }
   .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
+  .tline.cmd { cursor:pointer; border-radius:4px; }
+  .tline.cmd:hover { background:var(--surface2); }
   .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  .tcaret { color:var(--muted); flex:0 0 auto; font-size:9px; margin-left:-3px; }
+  .tline.cmd:hover .tcaret { color:var(--accent); }
   .tlabel { color:var(--ink2); word-break:break-word; }
   .tsize { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
   .terr { color:var(--warn); font-size:9.5px; text-transform:uppercase;
           border:1px solid var(--warn); border-radius:3px; padding:0 3px; }
+  /* running / done — terminal-style per-command status */
+  .trun { flex:0 0 auto; color:var(--warn); font-size:9.5px; font-weight:700;
+          text-transform:uppercase; letter-spacing:.4px; border:1px solid var(--warn);
+          border-radius:3px; padding:0 4px; animation:tpulse 1.4s ease-in-out infinite; }
+  @keyframes tpulse { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+  .tdone { flex:0 0 auto; color:var(--good); font-size:11px; }
   .tdet { color:var(--muted); padding:1px 0 2px 18px; white-space:pre-wrap;
           word-break:break-word; opacity:.85;
           display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
           overflow:hidden; }
+  /* expanded full command — matches the transcript's code-block styling */
+  .tcmd { margin:4px 0 4px 18px; padding:8px 10px; background:var(--bg);
+          border:1px solid var(--border); border-radius:6px; font:11.5px/1.5 var(--mono);
+          color:var(--ink); white-space:pre-wrap; word-break:break-word;
+          max-height:40vh; overflow:auto; }
 
   /* inline kmcp read marker */
   .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
@@ -192,11 +256,12 @@
 
   /* compose */
   #compose { border-top:1px solid var(--border); padding:12px 20px; background:var(--surface);
-             display:flex; gap:8px; align-items:center; }
-  #compose input { flex:1; background:var(--bg); border:1px solid var(--border);
-                   border-radius:8px; color:var(--ink); padding:10px 14px;
-                   font:13px var(--mono); outline:none; }
-  #compose input:focus { border-color:var(--accent); }
+             display:flex; gap:8px; align-items:flex-end; }
+  #compose textarea { flex:1; background:var(--bg); border:1px solid var(--border);
+                      border-radius:8px; color:var(--ink); padding:10px 14px;
+                      font:13px/1.4 var(--mono); outline:none; resize:none;
+                      min-height:41px; max-height:30dvh; overflow-y:auto; }
+  #compose textarea:focus { border-color:var(--accent); }
   #compose button { border:1px solid var(--border); border-radius:8px; cursor:pointer;
                     font-size:13px; font-weight:600; padding:10px 16px;
                     background:var(--surface2); color:var(--ink); }
@@ -204,10 +269,15 @@
   #compose button:disabled { opacity:.4; cursor:not-allowed; }
   #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
              min-height:14px; background:var(--surface); }
+  #cstatus.ok { color:var(--good); }
+  #cstatus.bad { color:var(--bad); }
 
   /* ---- right: read detail rail ---- */
   #rail { background:var(--surface); border-left:1px solid var(--border);
-          overflow-y:auto; padding:14px 16px; }
+          overflow-y:auto; padding:14px 16px;
+          -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  .act.danger:not(:disabled):not(.is-disabled) { color:var(--bad); border-color:var(--bad); }
+  .act.is-disabled { opacity:.38; cursor:not-allowed; }
   #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
              color:var(--ink2); margin-bottom:12px; }
   .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
@@ -227,7 +297,11 @@
   .pribtn.p-med { color:var(--accent); }
   .pribtn.p-low { color:var(--muted); }
   .pribtn.on { border-color:currentColor; background:var(--surface2); }
-  .actmsg { font:10.5px var(--mono); color:var(--muted); margin-left:4px; }
+  .actmsg { font:10.5px var(--mono); color:var(--ink2); margin-left:4px; }
+  /* a set message gets a brief highlight so it's not missed before it settles */
+  .actmsg:not(:empty) { padding:1px 6px; border-radius:4px; background:var(--surface2);
+                        animation:actflash .9s ease-out; }
+  @keyframes actflash { from{ background:var(--accent); color:#fff; } }
   .actmsg.bad { color:var(--warn); }
   .navtog { float:right; cursor:pointer; color:var(--muted); text-decoration:underline; }
   .navtog:hover { color:var(--purple); }
@@ -392,7 +466,8 @@
   #mgmt .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
                  font:12px var(--mono); }
   #mgmt .mh .x:hover { color:var(--ink); }
-  #mgmtbody { flex:1; overflow:auto; min-height:0; }
+  #mgmtbody { flex:1; overflow:auto; min-height:0;
+              -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
   #mgmtbody table { border-collapse:collapse; width:100%; font:12.5px var(--mono); }
   #mgmtbody th { color:var(--muted); text-align:left; font-weight:normal;
                  padding:4px 10px; border-bottom:1px solid var(--border);
@@ -417,6 +492,155 @@
                     border:1px solid var(--border); border-radius:8px;
                     padding:10px 12px; font:11.5px/1.5 var(--mono);
                     white-space:pre-wrap; word-break:break-word; }
+
+  /* topic dialog: a centered popover, above everything, own state (not polled) */
+  #topicdlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:60;
+              display:none; align-items:center; justify-content:center; }
+  #topicdlg.open { display:flex; }
+  #topicdlg .td-card { background:var(--surface); border:1px solid var(--border);
+                       border-radius:10px; padding:18px 20px; width:min(420px,92vw);
+                       display:flex; flex-direction:column; gap:6px; }
+  #topicdlg .td-h { font-size:14px; font-weight:600; margin-bottom:2px; }
+  #topicdlg .td-note { color:var(--muted); font-size:11px; line-height:1.45; margin-bottom:8px; }
+  #topicdlg .td-l { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+                    color:var(--ink2); margin-top:6px; }
+  #topicdlg .td-l .td-opt { color:var(--muted); text-transform:none; letter-spacing:0; }
+  #topicdlg .td-in { background:var(--bg); border:1px solid var(--border); border-radius:7px;
+                     color:var(--ink); padding:8px 11px; font:13px var(--mono); outline:none; }
+  #topicdlg .td-in:focus { border-color:var(--accent); }
+  #topicdlg .td-actions { display:flex; gap:6px; margin-top:14px; }
+  #topicdlg .td-actions .primary { color:var(--purple); border-color:var(--purple); }
+
+  /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ---- */
+  #pane-timeline .tlrow { display:grid; grid-template-columns:46px 1fr; gap:9px;
+           padding:7px 0; border-bottom:1px solid var(--border); align-items:baseline; }
+  #pane-timeline .tlrow .tm { font:10px var(--mono); color:var(--accent); white-space:nowrap; }
+  #pane-timeline .tlrow .sm { font-size:12px; line-height:1.45; color:var(--ink); }
+  #pane-timeline .tlrow.pending .sm { color:var(--muted); font-style:italic; }
+  #pane-timeline .tlfoot { color:var(--muted); font:10.5px var(--mono); margin-top:10px;
+           padding-top:8px; border-top:1px solid var(--border); }
+  #pane-timeline .tlgen { margin-top:12px; }
+  #pane-timeline h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
+           float:right; }
+  #pane-timeline h3 .re:hover { color:var(--accent); }
+
+  /* ==================== responsive / mobile (cascade tail) ==================
+     These live LAST so they beat the base rules above at equal specificity. */
+
+  /* drawer backdrop: display:none at ALL widths by default — as a plain grid
+     child it would otherwise steal a grid column and scramble the layout */
+  #navback{ display:none; }
+
+  /* hamburger (drawer toggle) — hidden until the phone breakpoint shows it */
+  .navham{ display:none; cursor:pointer; flex:none; align-items:center; justify-content:center;
+           font-size:17px; padding:4px 11px; border:1px solid var(--border); border-radius:8px;
+           background:var(--surface2); color:var(--ink); user-select:none; }
+  /* rail-sheet close bar: hidden on desktop, a grabber on the sheet */
+  #railclose{ display:none; position:sticky; top:-14px; z-index:3; margin:-14px -16px 10px;
+              padding:10px 16px; background:var(--surface);
+              border-bottom:1px solid var(--border); border-radius:14px 14px 0 0;
+              align-items:center; justify-content:center; gap:8px; cursor:pointer;
+              color:var(--muted); font:12px var(--mono); min-height:44px; }
+  #railclose:active{ color:var(--ink); }
+  .act.mobrail{ display:none; }
+
+  /* connection-loss banner: polling failures must not be silent on a phone */
+  #connbanner{ display:none; position:fixed; top:calc(8px + env(safe-area-inset-top));
+               left:50%; transform:translateX(-50%); z-index:90;
+               background:var(--surface2); border:1px solid var(--warn); color:var(--warn);
+               font:12px var(--mono); padding:7px 12px; border-radius:8px; max-width:92vw; }
+  body.offline #connbanner{ display:block; }
+  body.offline #stream{ opacity:.55; }
+
+  /* toast: refusals/errors float above the composer + keyboard */
+  #toast{ position:fixed; left:50%; transform:translateX(-50%);
+          bottom:calc(env(safe-area-inset-bottom) + 84px); z-index:95;
+          background:var(--surface2); border:1px solid var(--border); color:var(--ink);
+          padding:10px 14px; border-radius:8px; font:13px var(--mono); opacity:0;
+          transition:opacity .2s; pointer-events:none; max-width:92vw; }
+  #toast.show{ opacity:1; }
+  #toast.bad{ border-color:var(--bad); color:var(--bad); }
+
+  /* ≤1100px: the rail becomes an on-demand bottom sheet instead of vanishing —
+     read/search/angle taps must keep working on tablet + phone. */
+  @media (max-width:1100px){
+    body{ grid-template-columns:var(--nav-w) minmax(0,1fr); }
+    #railgrip{ display:none; }
+    #rail{ position:fixed; inset:auto 0 0 0; height:85dvh; z-index:55;
+           transform:translateY(100%); transition:transform .22s ease;
+           border-top:1px solid var(--border); border-left:none;
+           border-radius:14px 14px 0 0; box-shadow:0 -10px 32px rgba(0,0,0,.55);
+           padding-bottom:calc(16px + env(safe-area-inset-bottom)); }
+    body.rail-open #rail{ transform:translateY(0); }
+    #railclose{ display:flex; }
+    .act.mobrail{ display:inline-flex; }
+  }
+
+  /* phone breakpoint: single column, off-canvas session drawer */
+  @media (max-width:760px){
+    body{ grid-template-columns:1fr; }
+    #nav{ position:fixed; top:0; bottom:0; left:0; z-index:70;
+          width:min(86vw,340px);
+          transform:translateX(-100%); transition:transform .22s ease;
+          box-shadow:2px 0 18px rgba(0,0,0,.55);
+          padding-left:env(safe-area-inset-left);
+          padding-top:env(safe-area-inset-top); }
+    body.navopen #nav{ transform:none; }
+    #navback{ display:none; position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.5); }
+    body.navopen #navback{ display:block; }
+    body.navmin #nav{ width:min(86vw,340px); }   /* slim mode is a desktop concept;
+                                                    JS strips .navmin when the drawer opens */
+    #navgrip{ display:none; }
+    .navham{ display:inline-flex; }
+    #chdr{ padding:10px 12px; padding-top:calc(10px + env(safe-area-inset-top)); }
+    #chdr .chips, #chdr .acts{ flex-wrap:nowrap; overflow-x:auto;
+      -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+    #chdr .chips::-webkit-scrollbar, #chdr .acts::-webkit-scrollbar{ display:none; }
+    #chdr .acts{ padding-bottom:4px; }
+    #stream{ padding:12px 12px 8px; }
+    .ev{ gap:6px; }
+    .ev .gutter{ min-width:34px; font-size:10px; }
+    .chip.sid{ max-width:140px; overflow:hidden; text-overflow:ellipsis; }
+    #compose{ padding:10px 12px;
+              padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
+    #cstatus{ font-size:12.5px; padding:0 12px 8px; }
+    .tcmd{ max-height:40dvh; }
+    .ang-detail{ max-height:46dvh; }
+    #mgmtbtn{ left:calc(10px + env(safe-area-inset-left));
+              /* clear the composer + status rows — it sat ON the input at bottom:10px */
+              bottom:calc(86px + env(safe-area-inset-bottom)); min-height:40px; }
+    #mgmt{ padding:12px;
+               padding-top:calc(12px + env(safe-area-inset-top));
+               padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+    #mgmt .mh{ flex-wrap:wrap; }
+    #mgmt .mh .note{ flex-basis:100%; order:9; font-size:10.5px; }
+    /* 10-col thread table: shed the low-value columns on a phone */
+    #mgmtbody th:nth-child(4), #mgmtbody td:nth-child(4),
+    #mgmtbody th:nth-child(5), #mgmtbody td:nth-child(5),
+    #mgmtbody th:nth-child(8), #mgmtbody td:nth-child(8){ display:none; }
+    /* an open digest takes the whole overlay instead of a 50/50 split */
+    #mgmt:has(#mgmtdigest.open) #mgmtbody{ display:none; }
+    #topicdlg{ align-items:flex-start; padding-top:8vh; }
+    #topicdlg .td-card{ max-height:85dvh; overflow:auto; }
+    .tlrow{ grid-template-columns:52px 1fr; gap:8px; }
+    .subhdr .back{ min-height:38px; display:inline-flex; align-items:center; }
+  }
+
+  /* touch ergonomics: bigger targets + press feedback (hover doesn't exist) */
+  @media (pointer:coarse){
+    #navgrip,#railgrip{ display:none; }
+    #compose textarea, #topicdlg .td-in, .navfilter, .cur-row select{ font-size:16px; }
+    .act, #compose button{ min-height:42px; }
+    .act.sm, .pribtn{ min-height:36px; }
+    .sortchip, .navbtn, .navtog, .navham{ min-height:32px; display:inline-flex; align-items:center; }
+    .rtab{ min-height:40px; display:inline-flex; align-items:center; flex:1; justify-content:center; }
+    .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re{ display:inline-flex; align-items:center;
+      justify-content:center; min-height:44px; min-width:44px; }
+    .tline.cmd{ padding:5px 4px; }
+    .read{ padding:8px 10px; }
+    .tline.cmd:active, .read:active, .ang-i:active, .sess:active{ background:var(--surface2); }
+    .subhdr .back:active{ border-color:var(--accent); color:var(--accent); }
+  }
 </style>
 </head>
 <body>
@@ -427,24 +651,30 @@
         <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
       </div>
       <div class="sub" id="navsub">loading…</div>
+      <div class="navsort" id="navsort"></div>
     </div>
     <div id="navlist"></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
+  <div id="navback" onclick="closeNavDrawer()"></div>
 
   <main id="main">
-    <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
+    <div id="chdr"><div class="row1" style="display:flex;align-items:center;gap:10px">
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
+      <h2 style="color:var(--muted)">select a session</h2></div></div>
     <div id="stream"><div class="empty">pick a session on the left</div></div>
     <div id="cstatus"></div>
     <div id="compose">
-      <input id="cin" placeholder="answer this session…" disabled
-             onkeydown="if(event.key==='Enter')send(false)">
+      <textarea id="cin" rows="1" placeholder="answer this session…" disabled
+                enterkeyhint="send" autocapitalize="sentences" spellcheck="true"
+                oninput="growComposer()" onkeydown="composerKey(event)"></textarea>
       <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
       <button id="bfork" disabled onclick="send(true)">Fork</button>
     </div>
   </main>
 
   <aside id="rail">
+    <div id="railclose" onclick="closeRailSheet()" role="button" aria-label="Close rail">▾ close</div>
     <h3>Read detail</h3>
     <div id="raildetail" class="rl-empty">
       Click a <b>📖 read</b> in the transcript to inspect what this session
@@ -455,16 +685,23 @@
       <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
       <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
       <span class="rtab" data-t="git" onclick="setRailTab('git')">Git</span>
+      <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')">Timeline</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
     <div id="pane-writes" class="rtabpane"><div id="writes"></div></div>
     <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
+    <div id="pane-timeline" class="rtabpane"><div id="tlinfo"></div></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
+  <!-- connection-loss banner + toast (populated by JS) -->
+  <div id="connbanner" role="status"></div>
+  <div id="toast" role="status"></div>
+
   <!-- threads overlay: the session-management lens (open-thread inventory) -->
-  <button id="mgmtbtn" onclick="openMgmt()" title="Open-thread inventory: verdicts, agents, delta-after-summary">⊞ threads</button>
+  <button id="mgmtbtn" onclick="openMgmt()" aria-label="Open threads inventory"
+          title="Open-thread inventory: verdicts, agents, delta-after-summary">⊞ threads</button>
   <div id="mgmt">
     <div class="mh">
       <h2>open threads</h2>
@@ -479,6 +716,31 @@
       <pre id="mgmtdigestpre"></pre>
     </div>
   </div>
+
+  <!-- topic dialog: reusable topic › subtopic taxonomy (datalist autocomplete) -->
+  <div id="topicdlg" onclick="if(event.target===this)closeTopicDlg()">
+    <div class="td-card">
+      <div class="td-h">Topic &amp; subtopic</div>
+      <div class="td-note">Reusable across sessions — pick from the list or type a new
+        value (it's remembered). Groups sessions independent of folder.</div>
+      <label class="td-l">topic</label>
+      <input id="td-topic" class="td-in" list="td-topics" autocomplete="off"
+             placeholder="e.g. ControlTech" oninput="refreshSubDatalist()"
+             onkeydown="if(event.key==='Enter')saveTopic()">
+      <datalist id="td-topics"></datalist>
+      <label class="td-l">subtopic <span class="td-opt">(optional)</span></label>
+      <input id="td-subtopic" class="td-in" list="td-subs" autocomplete="off"
+             placeholder="e.g. reliability"
+             onkeydown="if(event.key==='Enter')saveTopic()">
+      <datalist id="td-subs"></datalist>
+      <div class="td-actions">
+        <button class="act sm primary" onclick="saveTopic()">Save</button>
+        <button class="act sm" onclick="clearTopic()">Clear</button>
+        <button class="act sm" onclick="closeTopicDlg()">Cancel</button>
+      </div>
+    </div>
+  </div>
+
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
@@ -529,6 +791,12 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
     b.title = min ? "Expand sidebar" : "Collapse sidebar";
   };
   window.toggleNav = () => {
+    // Phone: the sidebar is an off-canvas drawer, not a collapsible column.
+    if(matchMedia("(max-width:760px)").matches){
+      if(document.body.classList.contains("navopen")) closeNavDrawer();
+      else openNavDrawer();
+      return;
+    }
     min = !min; localStorage.setItem(MKEY, min ? "1" : "0"); apply();
   };
   apply();
@@ -558,11 +826,135 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  const dlg = document.getElementById("topicdlg");
+  if(dlg && dlg.classList.contains("open")){ closeTopicDlg(); return; }
+  if(document.body.classList.contains("navopen")){ closeNavDrawer(); return; }
+  if(document.body.classList.contains("rail-open")){ closeRailSheet(); return; }
   const box = document.getElementById("raildetail");
-  if(e.key === "Escape" && box && !box.classList.contains("rl-empty") &&
+  if(box && !box.classList.contains("rl-empty") &&
      !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || ""))
     clearRail();
 });
+
+/* ---------- overlay ⟷ browser-history integration ----------
+   Every overlay open pushes one history entry, so the OS back gesture (the
+   native "dismiss" on a phone) closes the overlay instead of leaving the
+   console. Explicit closes pop their own entry (ovDone) so entries don't
+   accumulate; closes triggered BY popstate pass fromPop=true and must not. */
+let ovClosing = 0;
+function ovOpen(){ history.pushState({ov: 1}, ""); }
+function ovDone(){
+  if(history.state && history.state.ov){ ovClosing++; history.back(); }
+}
+window.addEventListener("popstate", () => {
+  if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
+  if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
+  if(mgmtOpen) return closeMgmt(true);
+  if(document.body.classList.contains("rail-open")) return closeRailSheet(true);
+  if(document.body.classList.contains("navopen")) return closeNavDrawer(true);
+});
+
+/* ---------- phone drawer (session list) + rail bottom sheet ---------- */
+let navOpenedAt = 0, railOpenedAt = 0;
+function openNavDrawer(){
+  document.body.classList.remove("navmin");   // slim mode is meaningless in a drawer
+  document.body.classList.add("navopen");
+  navOpenedAt = Date.now(); ovOpen();
+}
+function closeNavDrawer(fromPop){
+  if(!document.body.classList.contains("navopen")) return;
+  document.body.classList.remove("navopen");
+  if(!fromPop) ovDone();
+}
+function openRailSheet(){
+  railOpenedAt = Date.now();
+  if(!matchMedia("(max-width:1100px)").matches) return;
+  if(document.body.classList.contains("rail-open")) return;
+  document.body.classList.add("rail-open"); ovOpen();
+}
+function closeRailSheet(fromPop){
+  if(!document.body.classList.contains("rail-open")) return;
+  document.body.classList.remove("rail-open");
+  if(!fromPop) ovDone();
+}
+/* tap-outside closes the sheet/drawer (the opening tap is time-guarded) */
+document.addEventListener("click", e => {
+  if(document.body.classList.contains("rail-open") &&
+     Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
+    closeRailSheet();
+  if(document.body.classList.contains("navopen") &&
+     Date.now() - navOpenedAt > 350 &&
+     !e.target.closest("#nav") && !e.target.closest(".navham"))
+    closeNavDrawer();
+});
+
+/* ---------- connectivity: silence is not an option on a phone ----------
+   Every poll reports into pollDone; sustained failure dims the transcript and
+   shows a banner with the age of the data on screen. failStreak also feeds
+   the poll backoff so a dead server isn't hammered every 3s forever. */
+let lastOk = Date.now(), online = true, failStreak = 0;
+function pollDone(ok){
+  if(ok){
+    failStreak = 0; lastOk = Date.now();
+    if(!online){ online = true; setConnBanner(); }
+  } else {
+    failStreak++;
+    if(online && Date.now() - lastOk > 8000){ online = false; }
+    if(!online) setConnBanner();   // refresh the age text on every failure
+  }
+}
+function setConnBanner(){
+  document.body.classList.toggle("offline", !online);
+  const el = document.getElementById("connbanner");
+  if(el) el.textContent = online ? "" :
+    `⚠ disconnected — showing data from ${rel(lastOk)} ago`;
+}
+window.addEventListener("offline", () => { online = false; setConnBanner(); });
+window.addEventListener("online", () => { loadNav(); refreshSession(false, true); });
+
+/* ---------- toast: refusals must be visible above the keyboard ---------- */
+function toast(msg, bad){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = bad ? "bad show" : "show";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+/* ---------- composer: auto-grow textarea + key handling ---------- */
+function growComposer(){
+  const t = document.getElementById("cin");
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight + 2, window.innerHeight * 0.3) + "px";
+}
+function composerKey(e){
+  // Desktop: Enter sends, Shift+Enter breaks the line. Touch: Enter breaks the
+  // line (multi-line answers) — the Answer button sends.
+  if(e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches){
+    e.preventDefault(); send(false);
+  }
+}
+
+/* ---------- iOS keyboard: pin the app to the VISIBLE viewport ----------
+   iOS Safari overlays the keyboard instead of resizing the layout, hiding the
+   composer behind it. Sizing <body> to visualViewport.height keeps the
+   composer (and the answering/✓ status line) above the keyboard. */
+(function(){
+  const vv = window.visualViewport;
+  if(!vv) return;
+  const sync = () => {
+    if(!matchMedia("(max-width:760px)").matches){
+      document.body.style.height = ""; return;
+    }
+    document.body.style.height = vv.height + "px";
+    window.scrollTo(0, 0);
+  };
+  vv.addEventListener("resize", sync);
+  vv.addEventListener("scroll", sync);
+})();
+
 let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
 /* While an answer we dispatched is running, we track it so #cstatus reflects
    the LIVE run (elapsed timer + completion) instead of freezing on "running". */
@@ -582,6 +974,152 @@ let showArchived = false, navData = null;
    default "normal" bucket, above low (a flagged-low session sinks). */
 const PRI_ORDER = ["critical", "high", "med", "normal", "low"];
 const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
+
+/* ---------- sidebar: two views + sortable columns ----------
+   View toggle: "sort" (flat, sortable columns) | "group" (Topic › Subtopic
+   collapsible tree). Sort columns: date (TRUE last activity — last_ts, never
+   file mtime), priority, title (user-set overrides derived), folder/project,
+   topic, subtopic — each with an asc/desc toggle. A topic filter narrows the
+   flat list. Folder shows on every row but never DEFINES the grouping — the
+   topic taxonomy does. */
+const PRI_RANK = {critical:5, high:4, med:3, normal:2, low:1};
+let navView = localStorage.getItem("csd.consoleNavView") || "sort";   // sort | group
+let navSort = localStorage.getItem("csd.consoleNavSort") || "recent";
+let navDir  = localStorage.getItem("csd.consoleNavDir")  || "desc";
+let navTopicFilter = localStorage.getItem("csd.consoleNavTopicFilter") || "";
+
+function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
+                                     : (s.mtime ? s.mtime*1000 : 0); }
+function priRank(s){ return PRI_RANK[PRI_ORDER.includes(s.priority) ? s.priority : "normal"]; }
+function dispTitle(s){ return (s.user_title || s.title || "").toLowerCase(); }
+function projName(s){ return (s.project_label || s.project || "").toLowerCase(); }
+function topicName(s){ return (s.topic || "").toLowerCase(); }
+function subName(s){ return (s.subtopic || "").toLowerCase(); }
+
+/* activity state → dot class + human label. Triage rank: working < waiting <
+   idle < stale. The dot palette is defined in CSS (amber = your move). */
+const STATE_RANK = {working:0, waiting:1, idle:2, stale:3};
+const STATE_LABEL = {working:"agent working", waiting:"waiting for you",
+                     idle:"idle", stale:"stale (no writer)"};
+function stateRank(s){ return STATE_RANK[s.state] ?? 9; }
+function dotClass(s){
+  let c = "dot " + (s.state || "idle");
+  if(s.sub_working) c += " sub";
+  if(s.state === "working" && s.mtime_age_s != null && s.mtime_age_s <= 15) c += " fresh";
+  return c;
+}
+function stateTitle(s){
+  return (STATE_LABEL[s.state] || s.state || "") + (s.sub_working ? " · via subagent" : "");
+}
+function stateDot(s){ return `<span class="${dotClass(s)}" title="${esc(stateTitle(s))}"></span>`; }
+
+const SORT_CMP = {
+  recent:   (a,b) => lastMs(a) - lastMs(b),
+  priority: (a,b) => (priRank(a) - priRank(b)) || (lastMs(a) - lastMs(b)),
+  title:    (a,b) => dispTitle(a).localeCompare(dispTitle(b)),
+  project:  (a,b) => projName(a).localeCompare(projName(b)) || (lastMs(b) - lastMs(a)),
+  topic:    (a,b) => topicName(a).localeCompare(topicName(b)) || (lastMs(b) - lastMs(a)),
+  subtopic: (a,b) => subName(a).localeCompare(subName(b)) || (lastMs(b) - lastMs(a)),
+  activity: (a,b) => (stateRank(a) - stateRank(b)) || (lastMs(b) - lastMs(a)),
+};
+const SORT_COLS = [["recent","date"],["activity","activity"],["priority","priority"],
+                   ["title","title"],["project","folder"],["topic","topic"],
+                   ["subtopic","subtopic"]];
+
+function setNavView(v){ navView = v; localStorage.setItem("csd.consoleNavView", v); renderNav(); }
+function setTopicFilter(v){ navTopicFilter = v;
+  localStorage.setItem("csd.consoleNavTopicFilter", v); renderNav(); }
+
+function setNavSort(key){
+  if(key === navSort) navDir = navDir === "desc" ? "asc" : "desc";   // re-click flips
+  else { navSort = key;
+         navDir = ["title","project","topic","subtopic","activity"].includes(key) ? "asc" : "desc"; }
+  localStorage.setItem("csd.consoleNavSort", navSort);
+  localStorage.setItem("csd.consoleNavDir", navDir);
+  renderNav();
+}
+
+function navControls(d){
+  const topics = (d && d.topics) || {};
+  const vchip = (v,lbl,tip) =>
+    `<span class="sortchip ${navView===v?"on":""}" onclick="setNavView('${v}')" title="${tip}">${lbl}</span>`;
+  let html = `<div class="navrow"><span class="lbl">view</span>
+    ${vchip("sort","sort","Flat, sortable columns")}${vchip("group","group","Topic › subtopic tree")}</div>`;
+  if(navView === "sort"){
+    const chip = ([key,label]) => {
+      const on = navSort === key, arr = on ? (navDir==="desc"?" ↓":" ↑") : "";
+      return `<span class="sortchip ${on?"on":""}" onclick="setNavSort('${key}')"
+        title="sort by ${label}${on?" ("+navDir+") — click to flip":""}">${label}${arr}</span>`;
+    };
+    html += `<div class="navrow"><span class="lbl">sort</span>${SORT_COLS.map(chip).join("")}</div>`;
+    const tnames = Object.keys(topics).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
+    if(tnames.length)
+      html += `<div class="navrow"><span class="lbl">topic</span>
+        <select class="navfilter" onchange="setTopicFilter(this.value)">
+          <option value="" ${navTopicFilter===""?"selected":""}>all</option>
+          ${tnames.map(t=>`<option value="${esc(t)}" ${navTopicFilter===t?"selected":""}>${esc(t)}</option>`).join("")}
+          <option value="__none__" ${navTopicFilter==="__none__"?"selected":""}>(untopiced)</option>
+        </select></div>`;
+  }
+  return html;
+}
+
+function setNavSub(d){
+  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
+  // one-line activity census — "waiting for you" is emphasised (it's your move)
+  const c = {working:0, waiting:0, idle:0, stale:0};
+  for(const s of d.sessions) if(c[s.state] != null) c[s.state]++;
+  const bits = [];
+  if(c.working) bits.push(`${c.working} working`);
+  if(c.waiting) bits.push(`<b>${c.waiting} waiting for you</b>`);
+  if(c.idle) bits.push(`${c.idle} idle`);
+  if(c.stale) bits.push(`${c.stale} stale`);
+  const census = bits.length ? `<div class="navcensus">${bits.join(" · ")}</div>` : "";
+  document.getElementById("navsub").innerHTML =
+    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
+     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>${census}`;
+}
+
+/* Group view: Topic › Subtopic collapsible tree. Untopiced sessions fall under
+   an "(untopiced)" group (last); topic-but-no-subtopic under "(no subtopic)"
+   inside the topic. Rows inside a group keep the active flat sort. */
+const UNT = "__untopiced__", NOSUB = "__nosub__";
+function renderNavGroup(d){
+  const dir = navDir === "asc" ? 1 : -1;
+  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
+  const byTopic = new Map();
+  for(const s of d.sessions){
+    const t = s.topic || UNT;
+    const st = s.topic ? (s.subtopic || NOSUB) : NOSUB;
+    if(!byTopic.has(t)) byTopic.set(t, new Map());
+    const sm = byTopic.get(t);
+    if(!sm.has(st)) sm.set(st, []);
+    sm.get(st).push(s);
+  }
+  const alpha = (a,b,sentinel) => a===sentinel ? 1 : b===sentinel ? -1
+    : a.toLowerCase().localeCompare(b.toLowerCase());
+  let html = "";
+  for(const t of [...byTopic.keys()].sort((a,b)=>alpha(a,b,UNT))){
+    const sm = byTopic.get(t);
+    const tcount = [...sm.values()].reduce((n,a)=>n+a.length,0);
+    const tkey = "t:"+t, tcol = !!navSec[tkey];
+    html += `<div class="sec topicsec" data-k="${esc(tkey)}" onclick="toggleSec(this)">
+      <span class="tw">${tcol?"▸":"▾"}</span>▦ ${esc(t===UNT?"(untopiced)":t)}
+      <span class="n">· ${tcount}</span></div>`;
+    if(tcol) continue;
+    for(const st of [...sm.keys()].sort((a,b)=>alpha(a,b,NOSUB))){
+      const rows = sm.get(st).slice().sort((a,b)=>dir*cmp(a,b));
+      if(t === UNT){ for(const s of rows) html += sessRow(s, d, true); continue; }
+      const stkey = "ts:"+t+"|"+st, stcol = !!navSec[stkey];
+      html += `<div class="proj subtopicsec" data-k="${esc(stkey)}" onclick="toggleSec(this)">
+        <span class="tw">${stcol?"▸":"▾"}</span>${esc(st===NOSUB?"(no subtopic)":st)}
+        <span class="n">· ${rows.length}</span></div>`;
+      if(!stcol) for(const s of rows) html += sessRow(s, d, true);
+    }
+  }
+  document.getElementById("navlist").innerHTML =
+    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
+}
 
 /* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<proj>".
    Everything is EXPANDED by default; only explicit user collapses are stored.
@@ -622,68 +1160,58 @@ function sessRow(s, d, tagProject){
     ? `<span class="ptag">${esc(s.project_label)}${s.worktree?" ⌥"+esc(s.worktree):""} ·</span>` : "";
   const wtag = !tagProject && s.worktree
     ? `<span class="wtag">⌥${esc(s.worktree)} ·</span>` : "";
-  const last = new Date(s.mtime*1000).toISOString();
+  // TRUE last activity for the recency stamp (last_ts), file mtime as fallback.
+  const last = s.last_ts || new Date(s.mtime*1000).toISOString();
   const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
   const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
   // The tldr rides as the row's hover line — the compact layout stays intact.
   const tl = s.tldr?.headline ? ` title="tl;dr — ${esc(s.tldr.headline)}"` : "";
+  // A user-set title overrides the derived one; ✎ marks that it's hand-set.
+  const disp = s.user_title ? `${esc(s.user_title)}<span class="tmark" title="custom title">✎</span>`
+                            : esc(s.title);
   return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
-    <span class="dot ${s.state}" title="${s.state}"></span>
+    ${stateDot(s)}
     <span class="meta">
-      <div class="ttl"${tl}>${pg}${ptag}${wtag}${esc(s.title)}${busy?' <span class="tag">summarizing</span>':""}</div>
+      <div class="ttl"${tl}>${pg}${ptag}${wtag}${disp}${busy?' <span class="tag">summarizing</span>':""}</div>
       <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
     </span>
     ${ctxGauge(s.ctx_tokens)}</div>`;
 }
 
 async function loadNav(){
-  try { navData = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
-  catch(e){ return; }
+  let j;
+  try { j = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
+  catch(e){ pollDone(false); return; }
+  pollDone(true);
+  if(!j || !Array.isArray(j.sessions)){
+    // a 401 (expired cookie) or server error must not freeze the sidebar silently
+    document.getElementById("navsub").innerHTML =
+      `<span style="color:var(--warn)">⚠ ${esc((j && j.error) || "bad response")}</span>`;
+    return;
+  }
+  navData = j;
   renderNav();
 }
 
 function renderNav(){
   if(!navData) return;
   const d = navData;
-  // ONE level of grouping. Flagged sessions sit directly under a quiet
-  // priority header (project moves onto the row). The unprioritized bulk
-  // keeps project grouping as its single level — but a 1-session project
-  // doesn't earn a header, it renders as a tagged row in recency position.
-  const flagged = {critical:[], high:[], med:[], low:[]};
-  const normal = [];
-  for(const s of d.sessions)
-    (s.priority && flagged[s.priority]) ? flagged[s.priority].push(s) : normal.push(s);
-  let html = "";
-  const bucket = pri => {
-    const ss = flagged[pri];
-    if(!ss.length) return;
-    const bkey = "b:" + pri, bcol = !!navSec[bkey];
-    html += `<div class="sec pri-${pri}" data-k="${esc(bkey)}" onclick="toggleSec(this)">
-      <span class="tw">${bcol?"▸":"▾"}</span>${PRI_GLYPH[pri]} ${pri} <span class="n">· ${ss.length}</span></div>`;
-    if(!bcol) for(const s of ss) html += sessRow(s, d, true);
-  };
-  bucket("critical"); bucket("high"); bucket("med");
-  // group the unprioritized bulk by project, in recency order of appearance
-  const groups = [], gIdx = new Map();
-  for(const s of normal){
-    const k = s.project_label || s.project || "?";
-    if(!gIdx.has(k)){ const g = {k, ss:[]}; gIdx.set(k, g); groups.push(g); }
-    gIdx.get(k).ss.push(s);
-  }
-  for(const g of groups){
-    if(g.ss.length === 1){ html += sessRow(g.ss[0], d, true); continue; }
-    const pkey = "p:" + g.k, pcol = !!navSec[pkey];
-    html += `<div class="proj" data-k="${esc(pkey)}" onclick="toggleSec(this)">
-      <span class="tw">${pcol?"▸":"▾"}</span>${esc(g.k)} <span class="n">· ${g.ss.length}</span></div>`;
-    if(!pcol) for(const s of g.ss) html += sessRow(s, d, false);
-  }
-  bucket("low");
-  document.getElementById("navlist").innerHTML =
-    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
-  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
-  document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
-     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>`;
+  document.getElementById("navsort").innerHTML = navControls(d);
+
+  if(navView === "group"){ renderNavGroup(d); setNavSub(d); return; }
+
+  // Sort view: flat list, one sort column, asc/desc, optional topic filter.
+  let list = d.sessions;
+  if(navTopicFilter === "__none__") list = list.filter(s => !s.topic);
+  else if(navTopicFilter) list = list.filter(s => s.topic === navTopicFilter);
+  const dir = navDir === "asc" ? 1 : -1;
+  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
+  const rows = [...list].sort((a,b) => dir * cmp(a,b));
+  document.getElementById("navlist").innerHTML = rows.length
+    ? rows.map(s => sessRow(s, d, true)).join("")
+    : `<div class="empty">${showArchived ? "nothing archived"
+        : navTopicFilter ? "no sessions match this topic filter" : "no recent sessions"}</div>`;
+  setNavSub(d);
 }
 
 function toggleArchived(){ showArchived = !showArchived; loadNav(); }
@@ -691,22 +1219,48 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 /* ---------- session detail ---------- */
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
+  closeNavDrawer(); closeRailSheet();   // phone: selecting a session dismisses both
+  clearTimeout(tlTimer); tlTimer = null;   // drop any stale poll from the prior session
   gitBadge(0);   // stale dirty-count from the previous session
-  clearAwait(); document.getElementById("cstatus").textContent = "";
+  clearAwait();
+  const cs = document.getElementById("cstatus");
+  cs.textContent = ""; cs.className = "";
   document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
-  await refreshSession(true);
+  await refreshSession(true, true);
   loadNav();
 }
 
-async function refreshSession(scrollBottom){
+/* Conditional + cancellable session poll. The server's ETag folds the
+   transcript (mtime, size) with a 30s bucket, so an unchanged poll costs a
+   304 instead of a multi-MB payload; `force` (session switch, after an
+   action) skips the validator for an immediate full read. A superseded fetch
+   is aborted so a slow response can't paint a stale session. */
+let sessAC = null, sessETag = null, sessETagFor = null;
+async function refreshSession(scrollBottom, force){
   if(!curId) return;
-  let s; try { s = await (await fetch("/api/session?id="+curId)).json(); } catch(e){ return; }
+  const wanted = curId;
+  sessAC?.abort(); sessAC = new AbortController();
+  let r, s;
+  try {
+    const headers = {};
+    if(!force && sessETag && sessETagFor === curId)
+      headers["If-None-Match"] = sessETag;
+    r = await fetch("/api/session?id=" + curId, {signal: sessAC.signal, headers});
+    if(r.status === 304){ pollDone(true); return; }
+    s = await r.json();
+  } catch(e){ if(e.name !== "AbortError") pollDone(false); return; }
+  pollDone(true);
+  if(curId !== wanted) return;   // operator switched sessions mid-flight
   if(s.error) return;
+  sessETag = r.headers.get("ETag"); sessETagFor = curId;
   curSession = s;
   renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
   renderWrites(s); renderSummary(s); maybeLoadGit(false);
-  const st = document.getElementById("stream");
-  if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
+  if(railTab === "timeline") loadTimeline();   // refresh cached rows for the new session
+  if(scrollBottom){
+    const st = document.getElementById("stream");
+    st.scrollTop = st.scrollHeight; pinnedBottom = true;
+  }
   syncReplyStatus(s);
 }
 
@@ -724,7 +1278,9 @@ function startAwait(){
 function tickRunning(){
   if(!awaitReply){ clearInterval(replyTicker); replyTicker = null; return; }
   const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
-  document.getElementById("cstatus").textContent =
+  const st = document.getElementById("cstatus");
+  st.className = "";
+  st.textContent =
     `⏳ headless turn running — ${secs}s · Esc-safe, keep this session open`;
 }
 
@@ -732,7 +1288,7 @@ function tickRunning(){
    from whether a new assistant turn actually landed. */
 function syncReplyStatus(s){
   if(!awaitReply || awaitReply.sid !== curId) return;
-  const live = s.stoppable || s.state === "running";
+  const live = s.stoppable || s.state === "working";
   if(live) return;                              // still running — ticker keeps counting
   if(s.events.length <= awaitReply.baseEvents &&
      Date.now() - awaitReply.t0 < 4000) return; // give the run a beat to start writing
@@ -741,9 +1297,12 @@ function syncReplyStatus(s){
   const landed = s.events.length > awaitReply.baseEvents && last.kind === "assistant";
   clearAwait();
   const st = document.getElementById("cstatus");
+  st.className = landed ? "ok" : "bad";
   st.textContent = landed ? `✓ reply received (${secs}s)`
                           : `⚠ turn ended (${secs}s) — no reply appended`;
-  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")) st.textContent = ""; }, 8000);
+  if(!landed) toast(`turn ended after ${secs}s — no reply appended`, true);
+  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")){
+    st.textContent = ""; st.className = ""; } }, 8000);
 }
 
 /* tl;dr header line: what the session is about + what the agent is doing,
@@ -770,6 +1329,7 @@ async function refreshTldr(){
 
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
+  const dtitle = s.user_title || s.title;   // user-set title overrides derived
   const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
   const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
   const sub = s.subagent;
@@ -783,8 +1343,9 @@ function renderHeader(s){
     </div>` : "";
   document.getElementById("chdr").innerHTML = `
     <div class="row1">
-      <span class="dot ${s.state}" title="${s.state}"></span>
-      <h2 title="${esc(s.title)}">${esc(s.title)}</h2>
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
+      ${stateDot(s)}
+      <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
     </div>
     ${subhdr}
     <div class="chips">
@@ -794,13 +1355,19 @@ function renderHeader(s){
       ${model}${ctx}
       <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
       <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
-      <span class="chip">${s.state}</span>
+      <span class="chip" title="activity state">${esc(STATE_LABEL[s.state]||s.state)}</span>
+      ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
+      ${s.summarizing?`<span class="chip" style="color:${s.summarizing==="running"?"var(--accent)":s.summarizing==="done"?"var(--good)":"var(--warn)"}" title="off-session /session-summary status — based on the child's exit code + output, NOT a verified kmcp write. The detail pane polls every 3s, so running→done/failed shows live.">${
+        s.summarizing==="running" ? "⏳ summarizing…" :
+        s.summarizing==="done" ? "✓ summary done (unverified)" :
+        "⚠ "+esc(s.summarizing)}</span>`:""}
     </div>
     ${tldrLine(s)}
     <div class="acts">
-      <button class="act" ${s.stoppable?"":"disabled"} onclick="act('stop')"
+      <button class="act danger ${s.stoppable?"":"is-disabled"}"
+        onclick="${s.stoppable?"act('stop')":"actmsg(this.title, true)"}"
         title="${s.stoppable
           ? "SIGINT the run this console spawned (same signal as Esc)"
           : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
@@ -808,6 +1375,12 @@ function renderHeader(s){
       <button class="act" onclick="act('summarize')"
         title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
       <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <button class="act" onclick="setTitle()"
+        title="Set or clear a human-readable title (overlay only — never touches the transcript)">✎ ${s.user_title?"Retitle":"Title"}</button>
+      <button class="act" onclick="openTopicDlg()"
+        title="Assign a reusable topic › subtopic (overlay only — groups sessions independent of folder)">▦ Topic</button>
+      <button class="act mobrail" onclick="openRailSheet()"
+        title="Angles / context / writes / git rail">◫ Rail</button>
       <span class="pris"><span class="k-pri">priority</span>
         ${["critical","high","med","low"].map(p =>
           `<button class="act sm pribtn p-${p} ${s.priority===p?"on":""}"
@@ -832,7 +1405,7 @@ function renderHeader(s){
   // hard block is only real evidence of a writer in flight — a run this
   // console spawned, or a transcript written seconds ago (the server's
   // two-writer guard refuses < 15s regardless). Transcript shape
-  // (state === "running") cannot distinguish an exited session from an
+  // (state === "working") cannot distinguish an exited session from an
   // idle-but-open interactive window, so it must not force Fork; for that
   // undetectable case we allow Answer. Fork stays available as an explicit
   // choice.
@@ -915,23 +1488,60 @@ function choiceCard(e){
    result size with an error flag. Legacy string-only tools still render. */
 const TOOL_GLYPH = {Bash:"$", Write:"✎", Edit:"✎", Read:"📄", Skill:"◆",
                     Agent:"⇲", Task:"⇲", SendMessage:"→", ToolSearch:"⚿"};
-function toolRow(t){
+/* Command rows expand to the full command; the expanded set is tracked by
+   tool_use id so a 3s stream re-render never collapses an open one. */
+let expandedCmds = new Set();
+function toggleCmd(id){
+  if(!id) return;
+  if(expandedCmds.has(id)) expandedCmds.delete(id); else expandedCmds.add(id);
+  if(curSession) renderStream(curSession);
+}
+
+/* Compact elapsed since a turn timestamp (terminal-style "2m24s"). */
+function elapsed(ts){
+  if(!ts) return "";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime())/1000));
+  if(s < 60) return s + "s";
+  if(s < 3600) return Math.floor(s/60) + "m" + String(s%60).padStart(2,"0") + "s";
+  return Math.floor(s/3600) + "h" + String(Math.floor(s/60)%60).padStart(2,"0") + "m";
+}
+
+function toolRow(t, ts, live){
   if(typeof t === "string") return `<div class="trow"><span class="tlabel">⚙ ${esc(t.replace(/^mcp__.+__/,""))}</span></div>`;
   const glyph = TOOL_GLYPH[t.name] || "⚙";
   const size = t.chars!=null ? `<span class="tsize">${kb(t.chars)}</span>` : "";
   const err = t.is_error ? `<span class="terr">error</span>` : "";
   const det = t.detail ? `<div class="tdet">${esc(t.detail)}</div>` : "";
-  // An Agent spawn with an archived sidechain links to the child focus view.
+  // running vs done, terminal-style — only for commands (Bash). A tool_use with
+  // no tool_result yet (server `pending`) on a LIVE session is still running;
+  // once its result lands it flips to ✓. On a non-live session a pending row is
+  // stale, so we show neither (it never truly completed).
+  let stat = "";
+  if(t.name === "Bash"){
+    if(t.pending && live)
+      stat = `<span class="trun" title="running — no tool_result yet">▶ running… ${esc(elapsed(ts))}</span>`;
+    else if(!t.pending)
+      stat = `<span class="tdone" title="completed">✓</span>`;
+  }
+  // Bash rows expand to the full, untruncated command text.
+  const hasCmd = t.name === "Bash" && t.cmd;
+  const open = hasCmd && t.id && expandedCmds.has(t.id);
+  const caret = hasCmd ? `<span class="tcaret" title="${open?"collapse":"show full command"}">${open?"▾":"▸"}</span>` : "";
   const label = t.child
     ? `<span class="tlabel agentlink" onclick="openSession('${esc(t.child)}')"
          title="open subagent transcript">${esc(t.label||t.name)}${t.status?` · ${esc(t.status)}`:""} ↗</span>`
     : `<span class="tlabel">${esc(t.label||t.name)}</span>`;
-  return `<div class="trow"><div class="tline"><span class="tg">${glyph}</span>
-    ${label}${err}${size}</div>${det}</div>`;
+  const click = hasCmd ? ` class="tline cmd" onclick="toggleCmd('${esc(t.id)}')"` : ` class="tline"`;
+  const cmdBlock = open ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "";
+  return `<div class="trow"><div${click}><span class="tg">${glyph}</span>${caret}
+    ${label}${stat}${err}${size}</div>${det}${cmdBlock}</div>`;
 }
-function toolRows(tools){ return (tools||[]).map(toolRow).join(""); }
+function toolRows(tools, ts, live){ return (tools||[]).map(t => toolRow(t, ts, live)).join(""); }
 
 function renderStream(s){
+  // "live" gates the running indicator: only a session still in flight can have
+  // a genuinely-running command (LIVE = state running, or a run we can stop).
+  const live = s.state === "working" || !!s.stoppable;
   let html = "";
   s.events.forEach((e, i) => {
     // The uuid id anchors spawn back-links (child header -> parent message).
@@ -940,21 +1550,33 @@ function renderStream(s){
     if(e.kind==="user")
       html += `${w}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
-      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools)}</div>` : "";
+      const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools, e.ts, live)}</div>` : "";
       html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
       html += `${w}<div class="b">${searchRow(e, i)}</div></div>`;
     else if(e.kind==="tool")
-      html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools)}</div></div></div>`;
+      html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools, e.ts, live)}</div></div></div>`;
     else if(e.kind==="choice")
       html += `${w}<div class="b">${choiceCard(e)}</div></div>`;
   });
   const st = document.getElementById("stream");
-  st.onscroll = () => { pinnedBottom = st.scrollHeight - st.scrollTop - st.clientHeight < 40; };
-  st.innerHTML = html || `<div class="empty">empty transcript</div>`;
+  const out = html || `<div class="empty">empty transcript</div>`;
+  // Unchanged output → no repaint: the 3s poll must not rebuild thousands of
+  // DOM nodes (and drop text selection) for identical content.
+  if(out === renderStream._last) return;
+  renderStream._last = out;
+  // Preserve the reading position: innerHTML resets scrollTop to 0, and this
+  // runs from polls AND from tap-to-expand/select — never yank to the top.
+  const prevTop = st.scrollTop, wasPinned = pinnedBottom;
+  st.innerHTML = out;
+  st.scrollTop = wasPinned ? st.scrollHeight : prevTop;
 }
+/* pinned-to-bottom tracking lives on the element once, not per-render */
+document.getElementById("stream").addEventListener("scroll", function(){
+  pinnedBottom = this.scrollHeight - this.scrollTop - this.clientHeight < 40;
+});
 
 function selectEvent(idx){
   selIdx = idx;
@@ -963,6 +1585,7 @@ function selectEvent(idx){
   const rail = document.getElementById("raildetail");
   rail.className = "";
   rail.innerHTML = e.kind === "search" ? searchDetail(e) : readDetail(e);
+  openRailSheet();   // ≤1100px the rail is a bottom sheet — a dead tap otherwise
 }
 
 /* Dismiss whatever detail is showing and restore the rail's default view, so
@@ -979,6 +1602,7 @@ function clearRail(){
   box.className = "rl-empty";
   box.innerHTML = RAIL_PLACEHOLDER;
   document.getElementById("rail").scrollTop = 0;
+  closeRailSheet();
 }
 
 function readDetail(e){
@@ -1054,6 +1678,10 @@ async function post(url, body){
 async function act(kind){
   if(!curSession) return;
   const s = curSession;
+  if(kind === "stop" && !confirm(
+      "Stop this run?\n\nSIGINT → SIGTERM → SIGKILL to the run this console " +
+      "spawned. The turn in flight is lost."))
+    return;
   if(kind === "summarize" && !confirm(
       "Summarize this session independently, then archive it?\n\n" +
       "This spawns a SEPARATE off-session Claude run that digests the transcript " +
@@ -1065,10 +1693,13 @@ async function act(kind){
   actmsg(kind + "…");
   const [ok, d] = await post("/api/" + kind, body);
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  // Set the success text AFTER the re-render: renderHeader rebuilds #actmsg as a
+  // fresh empty span, so a message set before refreshSession was wiped
+  // sub-second later (summarize had no other detail-pane feedback at all).
+  await refreshSession(false, true); loadNav();
   actmsg(kind === "stop" ? "stopped" :
          kind === "archive" ? (body.archived ? "archived" : "unarchived") :
-         "archived · independent summary running off-session");
-  await refreshSession(false); loadNav();
+         "archived · independent summary dispatched (watch the summarizing chip)");
 }
 
 async function mine(){
@@ -1076,7 +1707,7 @@ async function mine(){
   actmsg("mining…");
   const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
   if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
-  actmsg("mined"); await refreshSession(false);
+  actmsg("mined"); await refreshSession(false, true);
 }
 
 /* Flag/clear a session priority; the sidebar regroups on the next render. */
@@ -1087,7 +1718,69 @@ async function setPriority(p){
     {session_id: curId, priority: p || null});
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(p ? "priority " + p : "priority cleared");
-  await refreshSession(false); loadNav();
+  await refreshSession(false, true); loadNav();
+}
+
+/* Set/clear a human title (overlay only). prompt() matches the console's
+   low-ceremony idiom; the sidebar + header pick it up on the next render. */
+async function setTitle(){
+  if(!curSession) return;
+  const t = prompt("Session title (leave blank to clear):", curSession.user_title || "");
+  if(t === null) return;   // cancelled
+  actmsg("title…");
+  const [ok, d] = await post("/api/title", {session_id: curId, title: t.trim() || null});
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(t.trim() ? "title set" : "title cleared");
+  await refreshSession(false, true); loadNav();
+}
+
+/* ---------- topic dialog: reusable topic › subtopic taxonomy ----------
+   A small popover (NOT inside the polled #chdr, so a 3s refresh can't wipe an
+   open edit). Both inputs are backed by <datalist> autocomplete populated from
+   the managed list (navData.topics); typing a NEW value is allowed and gets
+   remembered server-side so it's reusable next time. */
+function openTopicDlg(){
+  if(!curSession) return;
+  const topics = navData?.topics || {};
+  document.getElementById("td-topics").innerHTML =
+    Object.keys(topics).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()))
+      .map(t=>`<option value="${esc(t)}"></option>`).join("");
+  document.getElementById("td-topic").value = curSession.topic || "";
+  document.getElementById("td-subtopic").value = curSession.subtopic || "";
+  refreshSubDatalist();
+  document.getElementById("topicdlg").classList.add("open");
+  ovOpen();
+  document.getElementById("td-topic").focus();
+}
+function refreshSubDatalist(){
+  const topics = navData?.topics || {};
+  const t = document.getElementById("td-topic").value.trim();
+  const subs = topics[t] || [];
+  document.getElementById("td-subs").innerHTML =
+    subs.map(s=>`<option value="${esc(s)}"></option>`).join("");
+}
+function closeTopicDlg(fromPop){
+  const dlg = document.getElementById("topicdlg");
+  if(!dlg.classList.contains("open")) return;
+  dlg.classList.remove("open");
+  if(fromPop !== true) ovDone();
+}
+async function saveTopic(){
+  if(!curSession) return;
+  const topic = document.getElementById("td-topic").value.trim();
+  const subtopic = document.getElementById("td-subtopic").value.trim();
+  actmsg("topic…");
+  const [ok, d] = await post("/api/topic",
+    {session_id: curId, topic: topic || null, subtopic: subtopic || null});
+  closeTopicDlg();
+  if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
+  actmsg(topic ? `topic ${topic}${subtopic?" › "+subtopic:""}` : "topic cleared");
+  await refreshSession(false, true); loadNav();
+}
+async function clearTopic(){
+  document.getElementById("td-topic").value = "";
+  document.getElementById("td-subtopic").value = "";
+  await saveTopic();
 }
 
 /* ---------- angle rail (mined out-of-band by `csd angles-watch`) ---------- */
@@ -1105,11 +1798,12 @@ function setRailTab(t){
   localStorage.setItem("csd.consoleRailTab", t);
   applyRailTab();
   if(t === "git") maybeLoadGit(false);   // lazy: only computed when the tab opens
+  if(t === "timeline") loadTimeline();   // lazy: serve cached (never auto-mines)
 }
 function applyRailTab(){
   document.querySelectorAll("#railtabs .rtab").forEach(el =>
     el.classList.toggle("on", el.dataset.t === railTab));
-  for(const t of ["angles","context","writes","git"])
+  for(const t of ["angles","context","writes","git","timeline"])
     document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
 }
 applyRailTab();
@@ -1135,6 +1829,7 @@ function tldrGroup(s){
 function showTldr(){
   const t = curSession?.tldr;
   if(!t) return;
+  openRailSheet();
   const box = document.getElementById("raildetail");
   box.className = "";
   box.innerHTML = `${RAIL_BACK}<h4>T1 · tldr</h4>
@@ -1378,6 +2073,7 @@ function renderGit(d){
 }
 
 async function showAngle(itemId){
+  openRailSheet();
   const box = document.getElementById("raildetail");
   box.classList.remove("rl-empty");
   box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">loading…</div>`;
@@ -1510,27 +2206,51 @@ function renderSummary(s){
 }
 
 /* ---------- answer / fork ---------- */
+let sending = false;
 async function send(isFork){
   const inp = document.getElementById("cin"); const text = inp.value.trim();
-  if(!text || !curSession) return;
+  if(!text || !curSession || sending) return;
+  // In-flight lock: a second tap on a laggy link must not double-spawn (the
+  // server would 409 it, but the operator would see a confusing refusal).
+  sending = true;
+  const bans = document.getElementById("bans"), bfork = document.getElementById("bfork");
+  const wasAns = bans.disabled, wasFork = bfork.disabled;
+  bans.disabled = bfork.disabled = true;
   const st = document.getElementById("cstatus");
-  st.textContent = isFork ? "forking…" : "answering…";
+  const fail = msg => { st.className = "bad"; st.textContent = "✗ " + msg; toast(msg, true); };
+  st.className = ""; st.textContent = isFork ? "forking…" : "answering…";
   try {
     const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });
-    const d = await r.json();
-    st.textContent = d.error ? "✗ "+d.error
-      : d.action==="point-fork" ? `⑂ forked → ${d.new_session.slice(0,8)} (headless)`
-      : d.action==="fork" ? "⑂ forked from end (headless)"
-      : "✓ answer sent — headless turn running";
-    if(!d.error){
-      inp.value = "";
-      // A plain answer resumes THIS session's file, so we can track it live.
-      // Forks write a new session file — leave their one-shot status as-is.
-      if(d.action === "answer"){ startAwait(); refreshSession(false); }
+    // Guard the body: a bodyless/non-JSON/error response (a spawn that threw, a
+    // 401, an empty 500) must surface as status+text — never be JSON.parse'd
+    // blindly into a masking "SyntaxError: unexpected character".
+    const ct = r.headers.get("content-type") || "";
+    let d = null;
+    if(ct.includes("application/json")){
+      try { d = await r.json(); }
+      catch(e){ fail(r.status+" malformed JSON from server"); return; }
+    } else {
+      const t = (await r.text()).trim();
+      fail(r.status+" "+(t.slice(0,300) || r.statusText || "empty response"));
+      return;
     }
-  } catch(e){ st.textContent = "✗ "+e; }
+    if(!r.ok || d.error){ fail(d.error || (r.status+" "+r.statusText)); return; }
+    // Both fork routes mint & return new_session (fork-session-id fix); surface it.
+    st.className = "ok";
+    st.textContent = d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
+      : "✓ answer sent — headless turn running";
+    inp.value = ""; growComposer();
+    // A plain answer resumes THIS session's file, so we can track it live.
+    // Forks write a new session file — leave their one-shot status as-is.
+    if(d.action === "answer"){ startAwait(); refreshSession(false, true); }
+  } catch(e){ fail("no response (server error?) — "+e); }
+  finally {
+    sending = false;
+    // restore pre-send gating; the next poll re-derives it from server truth
+    bans.disabled = wasAns; bfork.disabled = wasFork;
+  }
 }
 
 /* ---------- subagent back-link: parent session @ the spawning message ------ */
@@ -1544,6 +2264,77 @@ async function openParent(parentId, anchorUuid){
   setTimeout(()=>el.classList.remove("anchor-flash"), 2500);
 }
 
+/* ---------- Timeline rail tab: whole-session catch-up ----------------------
+   The first pre-determined "angle button", living in the right rail beside
+   Angles/Context/Writes/Git. One time-stamped line per user-prompt turn
+   (tool RESULTS omitted), mined by the local model via POST/GET /api/timeline
+   (session_timeline.py). Cached-first: opening the tab NEVER auto-mines — it
+   serves the cached store off disk and offers Generate/⟳; only ⟳/Generate
+   force a run, and we poll only while one is in flight. */
+let tlTimer = null;
+
+function tlClock(t){ if(!t) return "?"; const d = new Date(t);
+  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+
+async function loadTimeline(){
+  clearTimeout(tlTimer); tlTimer = null;
+  const el = document.getElementById("tlinfo");
+  if(!el) return;
+  if(!curId){ el.innerHTML = `<h3>Timeline</h3><div class="rl-empty">Open a session to see its timeline.</div>`; return; }
+  let d; try { d = await (await fetch("/api/timeline?id=" + encodeURIComponent(curId))).json(); }
+  catch(e){ el.innerHTML = `<h3>Timeline</h3><div class="rl-empty">timeline unavailable</div>`; return; }
+  renderTimeline(d && d.timeline);         // null -> not-generated (offer Generate)
+}
+async function genTimeline(){
+  if(!curId) return;
+  document.getElementById("tlinfo").innerHTML =
+    `<h3>Timeline</h3><div class="rl-empty">mining the whole session… one local-model pass per turn.</div>`;
+  const [ok, d] = await post("/api/timeline", {session_id: curId});
+  if(!ok || d.error){
+    document.getElementById("tlinfo").innerHTML =
+      `<h3>Timeline</h3><div class="rl-empty">timeline failed — ${esc(d.error || "?")}</div>`;
+    return;
+  }
+  renderTimeline(d.timeline);
+}
+function renderTimeline(tl){
+  if(railTab !== "timeline") return;         // tab switched away mid-fetch
+  const el = document.getElementById("tlinfo");
+  if(!el) return;
+  const regen = `<span class="re" onclick="genTimeline()" title="regenerate the whole-session timeline">⟳</span>`;
+  if(!tl){                                    // never generated for this session
+    el.innerHTML = `<h3>Timeline</h3>
+      <div class="rl-empty">A whole-session catch-up: one time-stamped line per turn,
+        tool results omitted — mined by the local model on demand.
+        <div class="tlgen"><button class="act" onclick="genTimeline()">⧗ Generate</button></div></div>`;
+    return;
+  }
+  if(tl.error){ el.innerHTML = `<h3>Timeline ${regen}</h3><div class="rl-empty">unavailable — ${esc(tl.error)}</div>`; return; }
+  const rows = tl.rows || [];
+  const body = rows.length
+    ? rows.map(r => {
+        const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
+        return `<div class="tlrow${pending ? " pending" : ""}" title="${esc(mgmtClock(r.t))}">
+          <span class="tm">${esc(tlClock(r.t))}</span>
+          <span class="sm">${esc(r.summary || "…")}</span></div>`;
+      }).join("")
+    : `<div class="rl-empty">${tl.generating ? "mining…" : "no turns to summarize"}</div>`;
+  const bits = [];
+  if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
+  if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
+  if(tl.model) bits.push(esc(tl.model));
+  if(tl.generating){
+    // felt progress: rows fill in as each turn's summary lands
+    const done = rows.filter(r => r.summary && r.summary.indexOf("(unavailable") !== 0).length;
+    if(rows.length) bits.push(`${done}/${rows.length} mined`);
+    bits.push(esc(tl.status || "generating") + "…");
+  } else if(tl.stale) bits.push("stale — ⟳ to refresh");
+  if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
+  el.innerHTML = `<h3>Timeline ${regen}</h3><div class="tlrows">${body}</div>` +
+                 `<div class="tlfoot">${bits.join(" · ")}</div>`;
+  if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+}
+
 /* ---------- threads overlay: the session-management lens -------------------
    The console face of `csd angles sessions` (session_mgmt.py): one row per
    recent main session, TRUE last activity from the archive, verdicts
@@ -1552,12 +2343,18 @@ async function openParent(parentId, anchorUuid){
 let mgmtOpen = false, mgmtAt = 0, mgmtRows = null, mgmtErr = null;
 
 function openMgmt(){ mgmtOpen = true;
-  document.getElementById("mgmt").classList.add("open"); refreshMgmt(true); }
-function closeMgmt(){ mgmtOpen = false; closeMgmtDigest();
-  document.getElementById("mgmt").classList.remove("open"); }
-function closeMgmtDigest(){
-  document.getElementById("mgmtdigest").classList.remove("open");
-  document.getElementById("mgmtdigestpre").textContent = ""; }
+  document.getElementById("mgmt").classList.add("open"); ovOpen(); refreshMgmt(true); }
+function closeMgmt(fromPop){
+  if(!mgmtOpen) return;
+  mgmtOpen = false; closeMgmtDigest();
+  document.getElementById("mgmt").classList.remove("open");
+  if(fromPop !== true) ovDone(); }
+function closeMgmtDigest(fromPop){
+  const dg = document.getElementById("mgmtdigest");
+  const wasOpen = dg.classList.contains("open");
+  dg.classList.remove("open");
+  document.getElementById("mgmtdigestpre").textContent = "";
+  if(wasOpen && fromPop !== true) ovDone(); }
 
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape" || !mgmtOpen) return;
@@ -1637,7 +2434,8 @@ async function showMgmtDigest(id, delta){
   document.getElementById("mgmtdigesttitle").textContent =
     `digest · ${id.slice(0,8)}${delta ? " · delta after summary" : ""}`;
   document.getElementById("mgmtdigestpre").textContent = "loading digest…";
-  document.getElementById("mgmtdigest").classList.add("open");
+  const dg = document.getElementById("mgmtdigest");
+  if(!dg.classList.contains("open")){ dg.classList.add("open"); ovOpen(); }
   try {
     const r = await fetch(`/api/digest?id=${id}&${q}`);
     document.getElementById("mgmtdigestpre").textContent = await r.text();
@@ -1646,10 +2444,32 @@ async function showMgmtDigest(id, delta){
   }
 }
 
-setInterval(()=>refreshMgmt(false), 30000);
+setInterval(() => { if(mgmtOpen && !document.hidden) refreshMgmt(false); }, 30000);
 
-loadNav(); setInterval(loadNav, 5000);
-setInterval(()=>refreshSession(false), 3000);
+/* ---------- poll loops: visibility-aware, backoff on failure ----------
+   A backgrounded phone tab must not poll (battery + LAN churn), and a dead
+   server must not be hammered at full cadence — failStreak (fed by pollDone)
+   stretches the interval 3s→6s→12s→…→30s until the first success resets it. */
+let navT = null, sesT = null;
+function pollDelay(base){
+  return Math.min(base * (failStreak ? 2 ** Math.min(failStreak, 4) : 1), 30000);
+}
+async function navTick(){
+  clearTimeout(navT);
+  await loadNav();
+  navT = setTimeout(navTick, pollDelay(5000));
+}
+async function sesTick(){
+  clearTimeout(sesT);
+  await refreshSession(false);
+  sesT = setTimeout(sesTick, pollDelay(3000));
+}
+function stopPolls(){ clearTimeout(navT); clearTimeout(sesT); }
+document.addEventListener("visibilitychange", () => {
+  if(document.hidden) stopPolls();
+  else { navTick(); sesTick(); }   // immediate catch-up on return
+});
+navTick(); sesTick();
 </script>
 </body>
 </html>

@@ -30,14 +30,20 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
+  POST /api/title                  {session_id, title: str|null} -> set/clear a title
+  POST /api/topic                  {session_id, topic, subtopic} -> set/clear taxonomy
+  GET  /api/topics                 managed topic -> subtopics list (autocomplete)
   POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
+  POST /api/timeline               {session_id} -> force-queue a whole-session timeline
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
 """
+import gzip
 import hmac
 import json
 import os
@@ -57,6 +63,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import tldr
+from .. import session_timeline
 
 ROOT = Path(__file__).parent
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -65,6 +72,32 @@ FULL_MAX_BYTES = 24 * 1024 * 1024  # guard: tail huge transcripts
 MAX_NAV_SESSIONS = 40
 MAX_AGE_H = 72
 ANSWER_LOG = ROOT / "answers.log"
+
+# Unauthenticated *page* loads get this instead of a raw-JSON 401: a phone
+# with an expired cookie needs a paste-the-token form, not a JSON wall it
+# can't act on. API paths keep the JSON 401 (the client guards on it).
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>session console — sign in</title>
+<style>
+  body{background:#0d1117;color:#e6edf3;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100dvh;margin:0;padding:16px;}
+  form{background:#161b22;border:1px solid #2d333b;border-radius:12px;padding:24px;width:min(380px,94vw);}
+  h1{font-size:15px;margin:0 0 6px;}
+  p{color:#9da7b3;font-size:12.5px;margin:0 0 14px;}
+  input{width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2d333b;border-radius:8px;
+        color:#e6edf3;padding:12px 14px;font-size:16px;outline:none;margin-bottom:12px;}
+  input:focus{border-color:#4c8dff;}
+  button{width:100%;min-height:44px;background:#4c8dff;border:none;border-radius:8px;
+         color:#fff;font-size:14px;font-weight:600;cursor:pointer;}
+</style></head><body>
+<form onsubmit="location='/?token='+encodeURIComponent(t.value.trim());return false">
+  <h1>kmcp · session console</h1>
+  <p>This bind requires a token (printed on the console's stdout, or
+     <code>$CSD_CONSOLE_TOKEN</code>). It sets a 7-day cookie.</p>
+  <input id="t" type="password" placeholder="paste token…" autocomplete="off" autofocus>
+  <button type="submit">Sign in</button>
+</form></body></html>"""
 
 KMCP_RE = re.compile(r"^mcp__.+__(?P<base>[a-z_]+)$")
 READ_TOOLS = {"get_entry", "get_section", "get_entries"}
@@ -224,43 +257,171 @@ def set_archived(sid: str, archived: bool, reason: str = "") -> dict:
 
 
 # ----------------------------------------------------------------------------
-# priority — operator triage flag, console state only
+# per-session overlay — title / priority / topic / subtopic (console state only)
 #
-# A small JSON keyed by session id in the console state dir, exactly like the
-# archive index: never a mutation of ~/.claude/projects. The sidebar groups
-# sessions by this flag (critical first); unprioritized sessions fall into a
-# default bucket. Clearing a priority removes the key.
+# ONE JSON keyed by session id in the console state dir, exactly like the
+# archive index: never a mutation of ~/.claude/projects. Every field is
+# operator-set metadata, NOT derived from the transcript — a human title that
+# overrides the derived nav label, a triage priority, and a two-level
+# topic → subtopic taxonomy that groups sessions INDEPENDENT of their cwd/folder
+# (folder still shows on the row, but does NOT define the grouping). Clearing a
+# field drops it; an entry with no fields left is removed entirely. Atomic
+# replace — never a half-written index.
+#
+# The topic/subtopic *values* are a reusable managed list (topics.json) so the
+# UI offers autocomplete from what already exists — anti-drift, so "ControlTech"
+# and "controltech" don't fragment into two groups.
+#
+# Legacy note: priority used to live in its own priority.json (and this branch's
+# earlier titles.json). _migrate_legacy_overlays() seeds meta.json from them once
+# and leaves the old files untouched — nothing is ever destroyed.
 # ----------------------------------------------------------------------------
-PRIORITY_FILE = CONSOLE_STATE / "priority.json"
-_PRIORITY_LOCK = threading.Lock()
 PRIORITIES = ("low", "med", "high", "critical")
+META_FILE = CONSOLE_STATE / "meta.json"
+TOPICS_FILE = CONSOLE_STATE / "topics.json"
+PRIORITY_FILE = CONSOLE_STATE / "priority.json"     # legacy, migrated once
+TITLES_FILE = CONSOLE_STATE / "titles.json"         # legacy, migrated once
+_META_LOCK = threading.Lock()
+_TOPICS_LOCK = threading.Lock()
+META_FIELDS = ("title", "priority", "topic", "subtopic")
+MAX_TITLE_LEN = 200
+MAX_TOPIC_LEN = 80
 
 
-def _read_priority() -> dict:
+def _atomic_write_json(path: Path, obj) -> None:
+    CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, indent=1))
+    tmp.replace(path)                       # atomic; never a half-written index
+
+
+def _read_meta_overlay() -> dict:
     try:
-        return json.loads(PRIORITY_FILE.read_text())
+        d = json.loads(META_FILE.read_text())
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
 
 
-def _priority_of(idx: dict, sid: str):
+def _meta_of(idx: dict, sid: str) -> dict:
     v = idx.get(sid)
-    return v.get("priority") if isinstance(v, dict) else v
+    return v if isinstance(v, dict) else {}
+
+
+def _update_meta(sid: str, **fields) -> dict:
+    """Merge fields into a session's overlay entry (a falsy value clears a
+    field). An entry with no meaningful metadata left is dropped so the file
+    stays tidy. Other fields on the same session are always preserved."""
+    with _META_LOCK:
+        idx = _read_meta_overlay()
+        cur = dict(_meta_of(idx, sid))
+        for k, v in fields.items():
+            if v:
+                cur[k] = v
+            else:
+                cur.pop(k, None)
+        kept = {k: cur[k] for k in META_FIELDS if cur.get(k)}
+        if kept:
+            kept["set_at"] = datetime.now(timezone.utc).isoformat()
+            idx[sid] = kept
+        else:
+            idx.pop(sid, None)
+        _atomic_write_json(META_FILE, idx)
+        return idx.get(sid) or {}
+
+
+def _priority_of(idx: dict, sid: str):
+    """priority for a sid out of an already-read overlay index."""
+    return _meta_of(idx, sid).get("priority")
+
+
+def set_title(sid: str, title) -> dict:
+    title = (title or "").strip()[:MAX_TITLE_LEN]
+    _update_meta(sid, title=title or None)
+    return {"ok": True, "session_id": sid, "title": title or None}
 
 
 def set_priority(sid: str, priority) -> dict:
-    with _PRIORITY_LOCK:
-        idx = _read_priority()
-        if priority:
-            idx[sid] = {"priority": priority,
-                        "set_at": datetime.now(timezone.utc).isoformat()}
-        else:
-            idx.pop(sid, None)
-        CONSOLE_STATE.mkdir(parents=True, exist_ok=True)
-        tmp = PRIORITY_FILE.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(idx, indent=1))
-        tmp.replace(PRIORITY_FILE)         # atomic; never a half-written index
+    _update_meta(sid, priority=priority or None)
     return {"ok": True, "session_id": sid, "priority": priority or None}
+
+
+def set_topic(sid: str, topic, subtopic) -> dict:
+    """Assign (or clear) a session's topic/subtopic, and remember the values in
+    the managed list so they're reusable next time. No topic means no subtopic."""
+    topic = (topic or "").strip()[:MAX_TOPIC_LEN]
+    subtopic = (subtopic or "").strip()[:MAX_TOPIC_LEN]
+    if not topic:
+        subtopic = ""
+    _update_meta(sid, topic=topic or None, subtopic=subtopic or None)
+    if topic:
+        _remember_topic(topic, subtopic)
+    return {"ok": True, "session_id": sid,
+            "topic": topic or None, "subtopic": subtopic or None}
+
+
+# ---- managed topic → subtopics list (reusable across sessions) --------------
+def _read_topics() -> dict:
+    try:
+        d = json.loads(TOPICS_FILE.read_text())
+        return {k: v for k, v in d.items() if isinstance(v, list)} \
+            if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember_topic(topic: str, subtopic: str = "") -> None:
+    """Add topic (and subtopic, if any) to the managed list — the anti-drift
+    memory, so next time the operator picks from a list instead of retyping."""
+    with _TOPICS_LOCK:
+        d = _read_topics()
+        subs = d.get(topic) or []
+        if subtopic and subtopic not in subs:
+            subs.append(subtopic)
+        d[topic] = sorted(subs, key=str.lower)
+        _atomic_write_json(TOPICS_FILE, d)
+
+
+def managed_topics() -> dict:
+    """topic → sorted subtopics, unioning the managed list (topics.json) with
+    what is actually assigned across sessions — self-healing if topics.json
+    ever lags behind the overlay."""
+    d = {k: list(v) for k, v in _read_topics().items()}
+    for _sid, m in _read_meta_overlay().items():
+        if not isinstance(m, dict) or not m.get("topic"):
+            continue
+        subs = d.setdefault(m["topic"], [])
+        st = m.get("subtopic")
+        if st and st not in subs:
+            subs.append(st)
+    return {t: sorted(subs, key=str.lower) for t, subs in d.items()}
+
+
+def _migrate_legacy_overlays() -> None:
+    """One-time seed of meta.json from the pre-unification priority.json /
+    titles.json indexes. Read-only over the legacy files — they are left in
+    place, never deleted; nothing is destroyed."""
+    if META_FILE.exists():
+        return
+    seed: dict = {}
+    for path, field in ((PRIORITY_FILE, "priority"), (TITLES_FILE, "title")):
+        try:
+            legacy = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(legacy, dict):
+            continue
+        for sid, v in legacy.items():
+            val = v.get(field) if isinstance(v, dict) else v
+            if val:
+                seed.setdefault(sid, {})[field] = val
+    if not seed:
+        return
+    for _sid, m in seed.items():
+        m["set_at"] = datetime.now(timezone.utc).isoformat()
+    with _META_LOCK:
+        if not META_FILE.exists():
+            _atomic_write_json(META_FILE, seed)
 
 
 # ----------------------------------------------------------------------------
@@ -338,6 +499,30 @@ def _result_map(records):
                     rec["text"] = txt
                 out[tid] = rec
     return out
+
+
+def pending_tool_ids(records, rmap=None):
+    """tool_use ids that have NO matching tool_result yet — the single source of
+    truth for "in flight". Both the activity-state classifier (does the last
+    assistant have an unresolved tool_use → agent still working) and the
+    live-command-status render (WHICH specific commands are still running) call
+    this, so the two can never drift on what "pending" means.
+
+    `_result_map` keeps the id key even for >64KB results (it drops only the
+    text), so membership here is size-safe — a huge tool_result never makes its
+    tool_use look pending.
+    """
+    rmap = rmap if rmap is not None else _result_map(records)
+    pend = set()
+    for r in records:
+        if r.get("type") != "assistant":
+            continue
+        for b in (r.get("message") or {}).get("content") or []:
+            if isinstance(b, dict) and b.get("type") == "tool_use":
+                tid = b.get("id")
+                if tid and tid not in rmap:
+                    pend.add(tid)
+    return pend
 
 
 def _tool_summary(name, inp):
@@ -527,7 +712,29 @@ def _is_real_user_turn(r, text):
     return True
 
 
-def _state(records, mtime_age):
+# Activity-state ceilings. All code-computed from transcript shape + file mtime
+# (no LLM, no DB — "truth from the ledger"); every ambiguous/failure case
+# degrades to a NON-alarming state, never a stuck "working".
+FRESH_S = 15            # ≤ this since last write → the client may add a pulse
+WORK_CEIL_S = 240      # working with no write past this = likely killed → stale
+WAIT_COLD_S = 900     # waiting quietly past this → idle (not actionable)
+
+
+def _state(records, mtime_age, stoppable=False, agents_live=0):
+    """(state, sub_working) — 4-value activity classification:
+
+      working — agent generating, or a tool in flight
+      waiting — agent ended its turn cleanly; the human's move
+      idle    — open thread, quiet a long time
+      stale   — claims in-flight but the file is frozen past the ceiling
+                (likely a killed process), or a long-dead waiting thread
+
+    Overrides (strongest evidence wins): a console-spawned live run forces
+    working; a live subagent on an otherwise waiting/idle session counts as
+    working and sets sub_working so the UI can annotate it distinctly.
+    """
+    rmap = _result_map(records)
+    pend = pending_tool_ids(records, rmap)
     last = None
     for r in records:
         if r.get("type") in ("user", "assistant") and not r.get("isSidechain"):
@@ -540,15 +747,32 @@ def _state(records, mtime_age):
                     continue
             last = r
     if last is None:
-        return "idle"
-    if last["type"] == "user":
-        st = "running"
+        base = "idle"
+    elif last["type"] == "user":
+        base = "working"                # prompt in, no reply yet → queued
     else:
         stop = (last.get("message") or {}).get("stop_reason")
-        st = "awaiting" if stop in ("end_turn", "stop_sequence") else "running"
-    if st == "running" and mtime_age > 600:
-        st = "stale"
-    return st
+        terminal = stop in ("end_turn", "stop_sequence")
+        # unresolved tool_use on the LAST assistant record = a tool in flight
+        last_pending = any(
+            isinstance(b, dict) and b.get("type") == "tool_use"
+            and b.get("id") in pend
+            for b in (last.get("message") or {}).get("content") or [])
+        base = "waiting" if (terminal and not last_pending) else "working"
+
+    if base == "working":
+        state = "working" if mtime_age <= WORK_CEIL_S else "stale"
+    elif base == "waiting":
+        state = "waiting" if mtime_age <= WAIT_COLD_S else "idle"
+    else:
+        state = base
+
+    sub_working = False
+    if stoppable:                       # a run we spawned is provably live
+        state = "working"
+    elif state in ("waiting", "idle") and agents_live > 0:
+        state, sub_working = "working", True
+    return state, sub_working
 
 
 # ----------------------------------------------------------------------------
@@ -639,6 +863,7 @@ def summarize_nav(path: Path):
     title = cwd = branch = None
     last_user = None
     usage = None
+    last_ts = None
     for r in recs:
         t = r.get("type")
         if t == "ai-title":
@@ -648,6 +873,11 @@ def summarize_nav(path: Path):
         elif t in ("user", "assistant"):
             cwd = r.get("cwd") or cwd
             branch = r.get("gitBranch") or branch
+            # TRUE last activity = the last message record's own timestamp
+            # (records are chronological, so the last one wins) — NOT file
+            # mtime, which only ever lies toward "more recent".
+            if r.get("timestamp"):
+                last_ts = r["timestamp"]
             if t == "user" and not r.get("isSidechain"):
                 txt = _text_of((r.get("message") or {}).get("content"))
                 if _is_real_user_turn(r, txt):
@@ -656,7 +886,7 @@ def summarize_nav(path: Path):
                 u = (r.get("message") or {}).get("usage")
                 if isinstance(u, dict):
                     usage = u
-    mtime_age = time.time() - path.stat().st_mtime
+    mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
     if not title:
         title = (last_user[:70] + "…") if last_user else path.stem[:12]
     label, worktree = _project_identity(cwd, str(path.parent.name))
@@ -666,15 +896,25 @@ def summarize_nav(path: Path):
                       + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0))
     stats = _nav_stats(path)
+    # Activity-state overrides need stoppable + live-subagent count, both cheap
+    # and computed here (discover_sessions reuses these, doesn't recompute).
+    stop = stoppable(path.stem)
+    agents = _agents_glance(path)
+    state, sub_working = _state(recs, mtime_age, stop,
+                                agents["live"] if agents else 0)
     return {
         "session_id": path.stem,
         "project": str(path.parent.name),
         "project_label": label,
         "worktree": worktree,
         "cwd": cwd, "branch": branch, "title": title.strip(),
-        "state": _state(recs, mtime_age),
+        "state": state,
+        "sub_working": sub_working,
+        "stoppable": stop,
+        "agents": agents,
         "mtime": path.stat().st_mtime,
         "mtime_age_s": round(mtime_age),
+        "last_ts": last_ts,
         "started_at": stats["started_at"],
         "msg_count": stats["msg_count"],
         "ctx_tokens": ctx_tokens,
@@ -703,7 +943,7 @@ def discover_sessions(archived=False):
         if m >= cutoff or archived:
             cands.append((m, p))
     cands.sort(reverse=True)
-    pri = _read_priority()
+    meta = _read_meta_overlay()
     out = []
     for _, p in cands[:MAX_NAV_SESSIONS]:
         try:
@@ -711,10 +951,13 @@ def discover_sessions(archived=False):
         except OSError:
             continue
         if s:
+            m = _meta_of(meta, p.stem)
             s["archived"] = p.stem in idx
-            s["stoppable"] = stoppable(p.stem)
-            s["agents"] = _agents_glance(p)
-            s["priority"] = _priority_of(pri, p.stem)
+            # stoppable + agents already computed in summarize_nav (state override)
+            s["priority"] = m.get("priority")
+            s["user_title"] = m.get("title")
+            s["topic"] = m.get("topic")
+            s["subtopic"] = m.get("subtopic")
             # Cached-or-nothing; stale rows queue an async regeneration.
             s["tldr"] = tldr.payload(p.stem, p)
             out.append(s)
@@ -805,6 +1048,7 @@ def build_session(sid: str):
         for r in records:
             r.pop("isSidechain", None)
     rmap = _result_map(records)
+    pend_ids = pending_tool_ids(records, rmap)   # shared "in flight" primitive
     agent_spawns = _agent_result_map(records)
     base_sid = sid.split(":", 1)[0]
 
@@ -906,9 +1150,19 @@ def build_session(sid: str):
                         res = rmap.get(tid) or {}
                         row = {
                             "name": name, "label": label, "detail": detail,
+                            "id": tid,
                             "chars": res.get("chars"),
                             "is_error": res.get("is_error", False),
+                            # A tool_use with no tool_result yet is still in
+                            # flight — the client shows "running…" for such a row
+                            # on a LIVE session. Same primitive the activity-state
+                            # classifier uses (pending_tool_ids), so they can't
+                            # drift. Verbatim command text (never truncated) rides
+                            # along so the row expands to the full command.
+                            "pending": tid in pend_ids,
                         }
+                        if name == "Bash":
+                            row["cmd"] = inp.get("command") or ""
                         spawn = agent_spawns.get(tid)
                         if name in ("Agent", "Task") and spawn \
                                 and spawn.get("agent_id"):
@@ -931,7 +1185,7 @@ def build_session(sid: str):
                 continue
             events.append({"kind": "user", "ts": ts, "uuid": uid, "text": txt})
 
-    mtime_age = time.time() - path.stat().st_mtime
+    mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
     if not title:
         first_user = next((e["text"] for e in events if e["kind"] == "user"), None)
         title = (first_user[:70] + "…") if first_user else sid[:12]
@@ -942,12 +1196,18 @@ def build_session(sid: str):
                       + usage.get("cache_read_input_tokens", 0)
                       + usage.get("cache_creation_input_tokens", 0))
 
+    _m = _meta_of(_read_meta_overlay(), sid)
+    _stop = stoppable(sid)
+    _agents = _agents_glance(path)
+    _state_v, _sub_working = _state(records, mtime_age, _stop,
+                                    _agents["live"] if _agents else 0)
     out = {
         "session_id": sid,
         "project": str(path.parent.name),
         "cwd": cwd, "branch": branch, "title": title.strip(),
         "model": model, "ctx_tokens": ctx_tokens,
-        "state": _state(records, mtime_age),
+        "state": _state_v,
+        "sub_working": _sub_working,
         "mtime_age_s": round(mtime_age),
         "truncated": truncated,
         "counts": {"reads": n_reads, "searches": n_searches,
@@ -956,8 +1216,16 @@ def build_session(sid: str):
         "rail": angle_rail(sid),
         "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
-        "stoppable": stoppable(sid),
-        "priority": _priority_of(_read_priority(), sid),
+        "stoppable": _stop,
+        # off-session summary status (in-memory SUMMARIZING) surfaced in the
+        # DETAIL pane too — not just the nav — so its running→done/failed
+        # transition is visible on the session the operator is watching. Child
+        # sids never summarize, so this is None for them.
+        "summarizing": SUMMARIZING.get(sid),
+        "priority": _m.get("priority"),
+        "user_title": _m.get("title"),
+        "topic": _m.get("topic"),
+        "subtopic": _m.get("subtopic"),
     }
     if is_child:
         from ..subagent import read_agent_meta
@@ -984,15 +1252,38 @@ def build_session(sid: str):
 # ----------------------------------------------------------------------------
 # answer / fork (unchanged behaviour from the prototype)
 # ----------------------------------------------------------------------------
-def spawn_claude(args, cwd, session_id=None):
-    """Spawn a claude run, registering it so Stop can signal its process group."""
-    with open(ANSWER_LOG, "a") as log:
-        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: claude {' '.join(args)} (cwd={cwd})\n")
+def spawn_claude(args, cwd, session_id=None, log_path=None):
+    """Spawn a claude run, registering it so Stop can signal its process group.
+
+    log_path captures this run's output to a DEDICATED file instead of the
+    shared answers.log — used by the summarize action so it can measure whether
+    the child actually produced anything (a zero-output rc==0 child is the
+    observed silent no-op). Default behaviour (shared answers.log) is unchanged.
+    """
+    # Resolve `claude` robustly. A console launched with a minimal PATH (a
+    # launchd/GUI parent hands down `/usr/bin:/bin:/usr/sbin:/sbin`) has no
+    # ~/.local/bin, so a bare Popen(["claude", …]) throws FileNotFoundError —
+    # which /api/answer then turned into a bodyless 500 (the JSON.parse crash).
+    # Mirror the _csd_bin()/shutil.which fallback pattern.
+    claude = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    if not Path(claude).exists():
+        raise FileNotFoundError(
+            f"`claude` binary not found (checked PATH and {claude}); is Claude "
+            "Code installed and on the console's PATH?")
+    # Augment the child PATH so the resumed claude can find its own tools even
+    # when the console itself was started with a truncated PATH.
+    env = dict(os.environ)
+    local_bin = str(Path.home() / ".local" / "bin")
+    if local_bin not in env.get("PATH", "").split(os.pathsep):
+        env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+    log_file = Path(log_path) if log_path else ANSWER_LOG
+    with open(log_file, "a") as log:
+        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(args)} (cwd={cwd})\n")
         log.flush()
         proc = subprocess.Popen(
-            ["claude"] + args, cwd=cwd or str(Path.home()),
+            [claude] + args, cwd=cwd or str(Path.home()),
             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
-            start_new_session=True,
+            start_new_session=True, env=env,
         )
     _register(session_id, proc)
     return proc
@@ -1295,11 +1586,24 @@ def point_fork(session_id: str, at_uuid: str):
 # ----------------------------------------------------------------------------
 SUMMARIZE_PROMPT = "/session-summary"
 SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
+SUMMARY_MIN_OUTPUT_BYTES = 40        # child output past the header ⇒ it ran
+_SUMMARY_LOG_DIR = CONSOLE_STATE / "summaries"
 
 
-def _await_summary(sid: str, proc):
+def _await_summary(sid: str, proc, log_path: Path, base_size: int):
+    """Resolve a dispatched summary. rc!=0 → failed. rc==0 does NOT prove a kmcp
+    write happened — but a child that produced NO output past the spawn header
+    is the observed silent no-op, so it is downgraded rather than called done."""
     rc = proc.wait()
-    SUMMARIZING[sid] = "done" if rc == 0 else f"summary failed (rc={rc})"
+    if rc != 0:
+        SUMMARIZING[sid] = f"summary failed (rc={rc})"
+        return
+    try:
+        produced = log_path.stat().st_size - base_size
+    except OSError:
+        produced = SUMMARY_MIN_OUTPUT_BYTES + 1     # can't measure → don't accuse
+    SUMMARIZING[sid] = ("done" if produced > SUMMARY_MIN_OUTPUT_BYTES
+                        else "summary produced no output")
 
 
 def summarize_session(sid: str, cwd: str) -> dict:
@@ -1307,10 +1611,19 @@ def summarize_session(sid: str, cwd: str) -> dict:
         return {"ok": False, "error": "a summary is already running"}
     # Off-session: fresh `claude -p`, the UUID as the /session-summary argument.
     # No --resume — the original transcript is digested, never appended to.
-    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid)
+    # A dedicated per-summary log lets _await_summary measure real output.
+    _SUMMARY_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = _SUMMARY_LOG_DIR / f"{sid}.log"
+    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
+                        log_path=log_path)
+    try:
+        base_size = log_path.stat().st_size          # header only, pre-output
+    except OSError:
+        base_size = 0
     SUMMARIZING[sid] = "running"
     set_archived(sid, True, reason="session-summary")
-    threading.Thread(target=_await_summary, args=(sid, proc),
+    threading.Thread(target=_await_summary,
+                     args=(sid, proc, log_path, base_size),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
             "note": "independent off-session summary dispatched; session archived"}
@@ -1756,16 +2069,35 @@ def _loopback(host: str) -> bool:
 # HTTP
 # ----------------------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 keep-alive: the client polls every few seconds, and 1.0's
+    # connection-per-request costs a TCP handshake per poll (worst on phone
+    # wifi). Every response path below sends an exact Content-Length, which
+    # keep-alive requires.
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(ROOT), **kw)
 
     def log_message(self, *a):
         pass
 
-    def _json(self, payload, code=200):
-        body = json.dumps(payload).encode()
+    def _maybe_gzip(self, body: bytes):
+        """gzip a response body when the client accepts it and it's worth it."""
+        if len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            return gzip.compress(body, 5), True
+        return body, False
+
+    def _json(self, payload, code=200, extra_headers=None):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        body, gz = self._maybe_gzip(body)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -1790,13 +2122,29 @@ class Handler(SimpleHTTPRequestHandler):
         if tok and hmac.compare_digest(tok, TOKEN):
             self._set_cookie = from_query
             return True
-        self.send_response(401)
-        self.send_header("Content-Type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"401 unauthorized - append ?token=<secret>\n")
+        # A navigational page load gets an HTML login form (a phone can't
+        # hand-edit the URL); API paths keep the JSON 401 so a token-protected
+        # bind's 401 doesn't trip the client-side JSON.parse guard.
+        path = urlparse(self.path).path
+        if (self.command == "GET" and not path.startswith("/api/")
+                and "text/html" in (self.headers.get("Accept") or "")):
+            body = LOGIN_PAGE.encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
+        self._json({"error": "unauthorized — append ?token=<secret>"}, 401)
         return False
 
     def end_headers(self):
+        # no-cache = "store but revalidate before use". Without it, index.html
+        # falls through to SimpleHTTPRequestHandler which sends only
+        # Last-Modified; browsers then apply RFC 7234 heuristic freshness and
+        # serve a stale (old-JS) page WITHOUT revalidating, so a normal reload
+        # runs pre-deploy client code. This forces a conditional GET each load.
+        self.send_header("Cache-Control", "no-cache")
         if getattr(self, "_set_cookie", False):
             self.send_header(
                 "Set-Cookie",
@@ -1804,7 +2152,30 @@ class Handler(SimpleHTTPRequestHandler):
             self._set_cookie = False
         super().end_headers()
 
+    # -- outer safety net -------------------------------------------------
+    # A handler that raises leaves the client with a closed/bodyless response,
+    # which the fetch caller then tries to JSON.parse -> a masking
+    # "SyntaxError: unexpected character". These wrappers guarantee EVERY code
+    # path answers with a JSON body, even an unforeseen exception.
+    def _safe_500(self, exc):
+        try:
+            self._json({"error": str(exc)[:300]}, 500)
+        except Exception:
+            pass          # response already partly sent — nothing else to do
+
     def do_GET(self):
+        try:
+            self._do_GET()
+        except Exception as e:
+            self._safe_500(e)
+
+    def do_POST(self):
+        try:
+            self._do_POST()
+        except Exception as e:
+            self._safe_500(e)
+
+    def _do_GET(self):
         if not self._authed():
             return
         u = urlparse(self.path)
@@ -1814,16 +2185,46 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"sessions": discover_sessions(archived=arch),
                                    "archived_count": len(_read_archive()),
                                    "summarizing": SUMMARIZING,
+                                   "topics": managed_topics(),
                                    "generated_at": time.time()})
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/topics":
+            # The managed topic → subtopics list, for the sidebar autocomplete.
+            try:
+                return self._json({"topics": managed_topics()})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/session":
             sid = (parse_qs(u.query).get("id") or [""])[0]
             if not sid:
                 return self._json({"error": "id required"}, 400)
+            # Conditional poll: the transcript's (mtime, size) is a natural
+            # validator, and a 304 skips both the full JSONL re-parse and the
+            # multi-MB payload the client re-downloads every few seconds. A 30s
+            # time bucket is folded in because parts of the payload move
+            # without the file changing (state/mtime_age_s, tldr cache, angles
+            # rail, SUMMARIZING) — worst-case staleness is one bucket, and
+            # client actions force an unconditional refresh.
+            etag = None
+            p = find_session(sid)
+            if p is not None:
+                try:
+                    st = p.stat()
+                    etag = (f'"{st.st_mtime_ns:x}-{st.st_size:x}-'
+                            f'{int(time.time() // 30):x}"')
+                    if self.headers.get("If-None-Match") == etag:
+                        self.send_response(304)
+                        self.send_header("ETag", etag)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                except OSError:
+                    etag = None
             try:
                 s = build_session(sid)
-                return self._json(s) if s else self._json({"error": "not found"}, 404)
+                return self._json(s, extra_headers={"ETag": etag} if etag else None) \
+                    if s else self._json({"error": "not found"}, 404)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/detail":
@@ -1865,16 +2266,27 @@ class Handler(SimpleHTTPRequestHandler):
                 head=int(q["head"][0]) if "head" in q else None,
                 tail=int(q["tail"][0]) if "tail" in q else None,
                 full=(q.get("full") or ["0"])[0] == "1")
-            body = text.encode()
+            body, gz = self._maybe_gzip(text.encode())
             self.send_response(code)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
+        if u.path == "/api/timeline":
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json({"timeline": session_timeline.payload(sid, p)})
         return super().do_GET()
 
-    def do_POST(self):
+    def _do_POST(self):
         if not self._authed():
             return
         try:
@@ -1906,6 +2318,27 @@ class Handler(SimpleHTTPRequestHandler):
                               "or null to clear"}, 400)
             return self._json(set_priority(sid, pr))
 
+        if route == "/api/title":
+            # Title override is an index-only overlay (meta.json), never a
+            # mutation of ~/.claude/projects. A child (subagent) key inherits
+            # the parent's identity; title the parent instead.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions cannot be titled — "
+                              "title the parent session"}, 400)
+            return self._json(set_title(sid, body.get("title")))
+
+        if route == "/api/topic":
+            # Assign/clear the reusable topic → subtopic taxonomy (overlay only,
+            # never a transcript mutation). Values are remembered in topics.json
+            # so they're offered as autocomplete next time.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions inherit the parent's "
+                              "topic — set it on the parent session"}, 400)
+            return self._json(set_topic(sid, body.get("topic"),
+                                        body.get("subtopic")))
+
         if route == "/api/tldr":
             # Force-queue a regeneration (the per-session refresh affordance).
             # Never blocks: the fresh tldr lands on a later /api/session poll.
@@ -1914,6 +2347,16 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": "not found"}, 404)
             return self._json({"ok": True, "tldr": tldr.payload(sid, p, force=True),
                                "status": tldr.STATUS.get(sid)})
+
+        if route == "/api/timeline":
+            # Button-launched whole-session catch-up. Force-enqueues a
+            # (re)generation; the fresh timeline lands on a later poll of the
+            # GET /api/timeline endpoint. Never blocks.
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json(
+                {"ok": True, "timeline": session_timeline.payload(sid, p, force=True)})
 
         if route == "/api/summarize":
             if ":" in sid:
@@ -1953,7 +2396,13 @@ class Handler(SimpleHTTPRequestHandler):
                     {"error": "session written in the last 15s — answer refused "
                               "(two-writer guard); wait for it to settle, "
                               "or fork"}, 409)
-            spawn_claude(["-p", "--resume", sid, text], cwd, sid)
+            # Spawn can throw (e.g. `claude` unresolved) — must return JSON, not
+            # let the exception close the connection bodyless. Mirror /api/fork.
+            try:
+                spawn_claude(["-p", "--resume", sid, text], cwd, sid)
+            except Exception as e:
+                return self._json(
+                    {"error": f"failed to spawn claude: {str(e)[:250]}"}, 500)
             return self._json({"ok": True, "action": "answer", "session": sid})
 
         if route == "/api/fork":
@@ -1964,9 +2413,16 @@ class Handler(SimpleHTTPRequestHandler):
                     spawn_claude(["-p", "--resume", new_id, text], cwd, new_id)
                     return self._json({"ok": True, "action": "point-fork",
                                        "new_session": new_id})
-                spawn_claude(["-p", "--resume", sid, "--fork-session", text],
-                             cwd, sid)
-                return self._json({"ok": True, "action": "fork"})
+                # Mint the fork's id ourselves rather than let claude assign one
+                # we never learn — same doctrine as point_fork(). Registering the
+                # run under the PARENT sid would aim Stop at the wrong session and
+                # leave the fork unaddressable. `--session-id` is only accepted
+                # alongside --fork-session when resuming (the CLI enforces this).
+                new_id = str(uuidlib.uuid4())
+                spawn_claude(["-p", "--resume", sid, "--fork-session",
+                              "--session-id", new_id, text], cwd, new_id)
+                return self._json({"ok": True, "action": "fork",
+                                   "new_session": new_id})
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
 
@@ -1980,6 +2436,7 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
 
     KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
     CSD_DSN = csd_dsn or os.environ.get("CSD_DATABASE_URL")
+    _migrate_legacy_overlays()      # seed meta.json from legacy priority/titles
 
     if _loopback(host) or no_auth:
         TOKEN = None

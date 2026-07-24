@@ -1,0 +1,440 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>session console — sidebar UX mock</title>
+<style>
+  :root{
+    --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
+    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
+    --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff; --cyan:#39c5cf;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+    --nav-w:412px;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box; margin:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--ink);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    display:grid; grid-template-columns:var(--nav-w) minmax(0,1fr) 300px;
+    height:100vh; overflow:hidden;
+  }
+
+  /* ---------- shell placeholders (dimmed, just for context) ---------- */
+  #main,#rail{min-width:0; overflow:hidden}
+  #main{background:var(--bg); border-right:1px solid var(--border);
+        display:flex; align-items:center; justify-content:center}
+  #rail{background:var(--surface)}
+  .ghost{color:#3b434d; font:12px var(--mono); text-align:center; user-select:none; line-height:2}
+  #rail .ghost{padding:16px; text-align:left}
+
+  /* ---------- left: the mock focus ---------- */
+  #nav{background:var(--surface); border-right:1px solid var(--border);
+       display:flex; flex-direction:column; min-width:0}
+
+  /* top / breadcrumb */
+  .navtop{padding:11px 14px 9px; border-bottom:1px solid var(--border);
+          position:sticky; top:0; background:var(--surface); z-index:3}
+  .navtop .r1{display:flex; align-items:center; gap:8px}
+  .navtop h1{font-size:13px; font-weight:600; letter-spacing:.3px; flex:1;
+             white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  /* top-level tabs: Projects | Archive */
+  .tabs{display:flex; gap:16px; align-items:center}
+  .tab{cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
+       padding:2px 0 6px; border-bottom:2px solid transparent}
+  .tab b{font-weight:600; color:var(--muted); font-size:10.5px; font-family:var(--mono)}
+  .tab:hover{color:var(--ink2)}
+  .tab.on{color:var(--ink); border-bottom-color:var(--accent)}
+  .tab.on b{color:var(--accent)}
+  .cproj{font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .crumb{display:flex; align-items:center; gap:6px; font-size:12.5px; min-width:0}
+  .crumb .back{cursor:pointer; color:var(--accent); font:12px var(--mono);
+               border:1px solid var(--border); border-radius:5px; padding:1px 7px; flex:none}
+  .crumb .back:hover{background:var(--surface2)}
+  .crumb .sep{color:var(--muted)}
+  .crumb .cur{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .crumb .cur .wt{color:var(--purple); font:11px var(--mono)}
+  .navtop .sub{color:var(--muted); font-size:11px; margin-top:3px}
+
+  .search{margin-top:8px; width:100%; background:var(--bg); border:1px solid var(--border);
+          border-radius:6px; padding:5px 9px; color:var(--ink); font-size:12.5px; font-family:inherit}
+  .search::placeholder{color:var(--muted)}
+  .search:focus{outline:none; border-color:var(--accent)}
+
+  .scroll{overflow-y:auto; flex:1; min-height:0}
+
+  /* ---------- project list (level 1) ---------- */
+  .proj{display:flex; align-items:center; gap:10px; padding:9px 14px; cursor:pointer;
+        border-bottom:1px solid #21262d}
+  .proj:hover{background:var(--surface2)}
+  .proj .pico{width:22px; height:22px; border-radius:6px; flex:none; display:grid; place-items:center;
+              background:var(--surface3); color:var(--ink2); font:12px var(--mono)}
+  .proj .pmeta{flex:1; min-width:0}
+  .proj .pname{font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .proj .ppath{color:var(--muted); font:10.5px var(--mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .proj .pcount{flex:none; text-align:right; color:var(--ink2); font:11px var(--mono)}
+  .proj .pcount .live{color:var(--good)}
+  .proj .chev{color:var(--muted); flex:none; font-size:13px}
+
+  /* ---------- session table (level 2) ---------- */
+  .thead{display:grid; grid-template-columns:var(--cols); align-items:center;
+         gap:8px; padding:7px 14px; position:sticky; top:0; z-index:2;
+         background:var(--surface); border-bottom:1px solid var(--border);
+         font-size:10.5px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
+  .th{cursor:pointer; user-select:none; white-space:nowrap; display:flex; align-items:center; gap:3px}
+  .th.num{justify-content:flex-end}
+  .th:hover{color:var(--ink2)}
+  .th.on{color:var(--ink)}
+  .th .ar{font-size:9px; opacity:.9}
+  .th.off .ar{opacity:0}
+
+  .srow{display:grid; grid-template-columns:var(--cols); align-items:center; gap:8px;
+        padding:8px 14px; cursor:pointer; border-bottom:1px solid #21262d}
+  .srow:hover{background:var(--surface2)}
+  .srow.active{background:var(--surface3); box-shadow:inset 2px 0 0 var(--accent)}
+
+  .cstate{display:flex; justify-content:center}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--muted)}
+  .dot.live{background:var(--good); box-shadow:0 0 0 3px rgba(63,185,80,.18)}
+  .dot.working{background:var(--accent); box-shadow:0 0 0 3px rgba(76,141,255,.18)}
+  .dot.open{background:var(--warn)}
+  .dot.closed{background:#3b434d}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .dot.live,.dot.working{animation:pulse 1.6s ease-in-out infinite}
+
+  .ctitle{min-width:0}
+  .ctitle .t{font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .ctitle .m{display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono)}
+  .brc{color:var(--purple)}
+  .agc{color:var(--cyan)}
+  .tmark{color:var(--muted); font-size:9px}
+
+  .cnum{text-align:right; font:12px var(--mono); color:var(--ink2)}
+  .clast{text-align:right; font:11px var(--mono); color:var(--muted); white-space:nowrap}
+
+  /* turns cell: number + faint proportional bar */
+  .turns{display:flex; flex-direction:column; align-items:flex-end; gap:3px}
+  .turns b{font:12px var(--mono); font-weight:600; color:var(--ink)}
+  .turns .tb{width:100%; height:3px; border-radius:2px; background:#21262d; overflow:hidden}
+  .turns .tb i{display:block; height:100%; background:var(--ink2); border-radius:2px}
+
+  /* ===== context representations (the iteration lever) ===== */
+  .ctx{min-width:0}
+  /* A — fill bar */
+  .ctxbar .lab{display:flex; justify-content:space-between; font:10px var(--mono); color:var(--ink2); margin-bottom:3px}
+  .ctxbar .lab .pct{color:var(--muted)}
+  .ctxbar .track{height:5px; border-radius:3px; background:#21262d; overflow:hidden}
+  .ctxbar .track i{display:block; height:100%; border-radius:3px}
+  /* B — ring */
+  .ctxring{display:flex; align-items:center; gap:7px; justify-content:flex-end}
+  .ctxring .ktxt{font:11px var(--mono); color:var(--ink2); text-align:right; line-height:1.15}
+  .ctxring .ktxt small{display:block; color:var(--muted); font-size:9px}
+  .ctxring svg{flex:none}
+  /* C — raw tokens */
+  .ctxraw{text-align:right; font:12px var(--mono)}
+  .ctxraw b{color:var(--ink)}
+  .ctxraw small{color:var(--muted); font-size:9.5px; display:block; letter-spacing:.3px}
+
+  .fill-good{background:var(--good)} .fill-warn{background:var(--warn)} .fill-bad{background:var(--bad)}
+  .ink-good{color:var(--good)} .ink-warn{color:var(--warn)} .ink-bad{color:var(--bad)}
+
+  /* ---------- options footer ---------- */
+  .navfoot{border-top:1px solid var(--border); padding:9px 14px; background:var(--surface);
+           display:flex; flex-direction:column; gap:8px}
+  .optrow{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted)}
+  .optrow .lbl{flex:none; width:64px}
+  .seg{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
+  .seg button{background:transparent; border:none; color:var(--ink2); font:11px var(--mono);
+              padding:3px 9px; cursor:pointer}
+  .seg button+button{border-left:1px solid var(--border)}
+  .seg button.on{background:var(--accent); color:#fff}
+  .empty{padding:30px 14px; text-align:center; color:var(--muted); font-size:12px}
+
+  /* mock banner */
+  .banner{position:fixed; bottom:10px; right:12px; z-index:9; background:var(--surface2);
+          border:1px solid var(--border); border-radius:8px; padding:7px 11px;
+          font:11px var(--mono); color:var(--muted); max-width:260px}
+  .banner b{color:var(--warn)}
+</style>
+</head>
+<body>
+
+<!-- ============ LEFT NAV (the mock) ============ -->
+<aside id="nav">
+  <div class="navtop" id="navtop"></div>
+  <div class="scroll" id="scroll"></div>
+  <div class="navfoot">
+    <div class="optrow">
+      <span class="lbl">Context as</span>
+      <span class="seg" id="ctxseg">
+        <button data-v="bar" class="on">Bar</button>
+        <button data-v="ring">Ring</button>
+        <button data-v="raw">Tokens</button>
+      </span>
+    </div>
+    <div class="optrow">
+      <span class="lbl">Window</span>
+      <span class="seg" id="winseg">
+        <button data-w="200000" class="on">200k</button>
+        <button data-w="1000000">1M</button>
+      </span>
+      <span style="flex:1"></span>
+      <span style="font:10px var(--mono)">click a column header to sort ↕</span>
+    </div>
+  </div>
+</aside>
+
+<!-- ============ dimmed shell context ============ -->
+<main id="main"><div class="ghost">chat transcript<br>(unchanged — not part of this mock)</div></main>
+<aside id="rail"><div class="ghost">angles / context / writes / git rail<br>(unchanged)</div></aside>
+
+<div class="banner">MOCK · <b>not live code</b><br>iterate here → then port to <span style="color:var(--ink2)">console/index.html</span></div>
+
+<script>
+// ------------------------------------------------------------------ mock data
+// window (ctx window in tokens) is a toggle; state: live|working|open|closed
+const PROJECTS = [
+  {id:"claude-session-db", label:"claude-session-db", path:"~/GitHub/claude-session-db"},
+  {id:"knowledge-mcp",     label:"knowledge-mcp",     path:"~/GitHub/knowledge-mcp"},
+  {id:"p6-tools",          label:"p6-tools",          path:"~/GitHub/p6-tools"},
+  {id:"consulting-reg",    label:"consulting-register",path:"~/GitHub/consulting-register-db"},
+];
+// ctx = tokens in context; turns = user↔assistant exchanges; age = minutes since last msg
+// arch = summarized+archived: hidden from project lists, lives in the Archive tab
+const SESSIONS = [
+  {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:184000, turns:96, age:2,   state:"working", wt:"console-sidebar-ux", agents:0},
+  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, age:38,  state:"open",    wt:"console-angles-merge", agents:2},
+  {p:"claude-session-db", title:"PR membership + full PR status in Git tab",        ctx:97000,  turns:44, age:190, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"claude-session-db", title:"timeline rail tab",                                ctx:58000,  turns:33, age:320, state:"closed",  wt:null, agents:1, arch:true},
+  {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, age:26,  state:"open",    wt:null, agents:0},
+  {p:"claude-session-db", title:"sortable columns + titles",                        ctx:41000,  turns:19, age:410, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"claude-session-db", title:"cache-control on nav fetch",                       ctx:31000,  turns:14, age:520, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, age:95,  state:"closed",  wt:null, agents:3},
+
+  {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:158000, turns:64, age:4,   state:"live",    wt:null, agents:0},
+  {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, age:60,  state:"open",    wt:null, agents:1},
+  {p:"knowledge-mcp", title:"import_entries YAML footgun hardening",                ctx:52000,  turns:27, age:240, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"knowledge-mcp", title:"embedding backfill batch sizing",                      ctx:34000,  turns:16, age:600, state:"closed",  wt:null, agents:0, arch:true},
+
+  {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:171000, turns:83, age:15,  state:"working", wt:"p6-migration", agents:0},
+  {p:"p6-tools", title:"layouts export round-trip",                                 ctx:64000,  turns:29, age:150, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, age:70,  state:"open",    wt:null, agents:2},
+
+  {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, age:200, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, age:12,  state:"open",    wt:null, agents:1},
+];
+
+// ------------------------------------------------------------------ state
+let tab = "projects";        // projects | archive
+let curProj = null;          // null = project list; else project id (projects tab only)
+let sort = "recent";         // recent | turns | ctx | title | state
+let dir  = "desc";
+let ctxMode = "bar";         // bar | ring | raw
+let ctxWindow = 200000;
+let query = "";
+let active = null;           // selected session (for active-row styling)
+
+const LIVE = SESSIONS.filter(s=>!s.arch);   // main lists never show archived
+const ARCH = SESSIONS.filter(s=>s.arch);    // Archive tab only
+
+const STATE_RANK = {live:0, working:1, open:2, closed:3};
+const CMP = {
+  recent:  (a,b)=> b.age - a.age,                 // desc dir → most-recent first
+  turns:   (a,b)=> a.turns - b.turns,
+  ctx:     (a,b)=> a.ctx - b.ctx,
+  title:   (a,b)=> a.title.localeCompare(b.title),
+  state:   (a,b)=> STATE_RANK[a.state]-STATE_RANK[b.state],
+  project: (a,b)=> a.p.localeCompare(b.p) || (b.age - a.age),
+};
+
+// ------------------------------------------------------------------ helpers
+const esc = s => (s||"").replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function relAge(m){
+  if(m<1) return "now";
+  if(m<60) return m+"m";
+  if(m<1440) return Math.round(m/60)+"h";
+  return Math.round(m/1440)+"d";
+}
+function level(frac){ return frac<0.55 ? "good" : frac<0.8 ? "warn" : "bad"; }
+function kfmt(t){ return (t/1000).toFixed(0)+"k"; }
+
+// context cell renders in the currently-selected representation
+function ctxCell(tok){
+  const frac = Math.min(1, tok/ctxWindow), pct = Math.round(frac*100), lv = level(frac);
+  if(ctxMode==="bar"){
+    return `<div class="ctxbar">
+      <div class="lab"><span>${kfmt(tok)}</span><span class="pct">${pct}%</span></div>
+      <div class="track"><i class="fill-${lv}" style="width:${pct}%"></i></div>
+    </div>`;
+  }
+  if(ctxMode==="ring"){
+    const R=9, C=2*Math.PI*R, off=C*(1-frac);
+    return `<div class="ctxring">
+      <div class="ktxt">${kfmt(tok)}<small>${pct}%</small></div>
+      <svg width="24" height="24" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="${R}" fill="none" stroke="#21262d" stroke-width="3"/>
+        <circle cx="12" cy="12" r="${R}" fill="none" class="ink-${lv}" stroke="currentColor"
+          stroke-width="3" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}"
+          stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 12 12)"/>
+      </svg>
+    </div>`;
+  }
+  // raw
+  return `<div class="ctxraw"><b class="ink-${lv}">${tok.toLocaleString()}</b><small>${pct}% of ${kfmt(ctxWindow)}</small></div>`;
+}
+
+// ------------------------------------------------------------------ render
+function bodyHTML(){
+  if(tab === "archive") return renderSessions(ARCH, true);
+  return curProj ? renderSessions(LIVE.filter(s=>s.p===curProj), false) : renderProjects();
+}
+function render(){
+  renderTop();
+  const sc = document.getElementById("scroll");
+  // archive/project-session tables get an extra Project column
+  sc.style.setProperty("--cols", tab==="archive"
+    ? "14px minmax(0,1fr) 96px 52px 92px 44px"
+    : "14px minmax(0,1fr) 52px 96px 46px");
+  sc.innerHTML = bodyHTML();
+}
+function renderBodyOnly(){ document.getElementById("scroll").innerHTML = bodyHTML(); }
+
+function tabstrip(){
+  const t = (id,lbl,n) =>
+    `<span class="tab ${tab===id?"on":""}" onclick="setTab('${id}')">${lbl} <b>${n}</b></span>`;
+  return `<div class="tabs">${t("projects","Projects",PROJECTS.length)}${t("archive","Archive",ARCH.length)}</div>`;
+}
+
+function renderTop(){
+  const top = document.getElementById("navtop");
+  if(tab === "archive"){
+    top.innerHTML = tabstrip() +
+      `<div class="sub" id="csub"></div>
+       <input class="search" id="q" placeholder="filter archived sessions…" value="${esc(query)}">`;
+  } else if(!curProj){
+    top.innerHTML = tabstrip() +
+      `<div class="sub">${PROJECTS.length} projects · select one to see its sessions</div>
+       <input class="search" id="q" placeholder="filter projects…" value="${esc(query)}">`;
+  } else {
+    const p = PROJECTS.find(x=>x.id===curProj);
+    top.innerHTML = tabstrip() +
+      `<div class="crumb">
+        <span class="back" onclick="goProjects()">‹ Projects</span>
+        <span class="sep">/</span>
+        <span class="cur">${esc(p.label)}</span>
+      </div>
+      <div class="sub" id="csub"></div>
+      <input class="search" id="q" placeholder="filter sessions in ${esc(p.label)}…" value="${esc(query)}">`;
+  }
+  const q = document.getElementById("q");
+  if(q) q.oninput = e=>{ query = e.target.value; renderBodyOnly(); };
+}
+
+function renderProjects(){
+  const q = query.toLowerCase();
+  const rows = PROJECTS.filter(p=>p.label.toLowerCase().includes(q)).map(p=>{
+    const ss = LIVE.filter(s=>s.p===p.id);
+    const live = ss.filter(s=>s.state==="live"||s.state==="working").length;
+    const initials = p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
+    return `<div class="proj" onclick="openProject('${p.id}')">
+      <div class="pico">${initials}</div>
+      <div class="pmeta">
+        <div class="pname">${esc(p.label)}</div>
+        <div class="ppath">${esc(p.path)}</div>
+      </div>
+      <div class="pcount">${ss.length} sess${live?` · <span class="live">${live}▶</span>`:""}</div>
+      <div class="chev">›</div>
+    </div>`;
+  }).join("");
+  return rows || `<div class="empty">no projects match “${esc(query)}”</div>`;
+}
+
+function th(key, label, num){
+  const on = sort===key;
+  const ar = on ? (dir==="asc"?"▲":"▼") : "▲";
+  return `<div class="th ${num?"num":""} ${on?"on":"off"}" onclick="setSort('${key}')">${label}<span class="ar">${ar}</span></div>`;
+}
+
+function renderSessions(source, showProject){
+  const q = query.toLowerCase();
+  let list = source.filter(s=>s.title.toLowerCase().includes(q));
+  const sign = dir==="asc" ? 1 : -1;
+  list = [...list].sort((a,b)=> sign * CMP[sort](a,b));
+
+  const sub = document.getElementById("csub");
+  if(sub) sub.textContent = `${list.length} ${showProject?"archived ":""}session${list.length!==1?"s":""}`;
+
+  const projTh = showProject ? th("project","Project") : "";
+  const head = `<div class="thead">
+    <div class="th off" onclick="setSort('state')" title="sort by state">•</div>
+    ${th("title","Title")}
+    ${projTh}
+    ${th("turns","Turns",true)}
+    ${th("ctx","Context",true)}
+    ${th("recent","Last",true)}
+  </div>`;
+
+  const maxTurns = Math.max(...list.map(s=>s.turns), 1);
+  const rows = list.map((s,i)=>{
+    const id = s.p+"#"+i;
+    const wt = s.wt ? `<span class="brc">⌥${esc(s.wt)}</span>` : "";
+    const ag = s.agents ? `<span class="agc">⇲${s.agents}</span>` : "";
+    const meta = (wt||ag) ? `${wt}${ag}` : `<span style="color:#3b434d">—</span>`;
+    const tw = Math.round(s.turns/maxTurns*100);
+    const plabel = PROJECTS.find(p=>p.id===s.p)?.label || s.p;
+    const projCell = showProject ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>` : "";
+    return `<div class="srow ${active===id?"active":""}" onclick="selectRow('${id}')">
+      <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
+      <div class="ctitle">
+        <div class="t">${esc(s.title)}</div>
+        <div class="m">${meta}</div>
+      </div>
+      ${projCell}
+      <div class="turns"><b>${s.turns}</b><div class="tb"><i style="width:${tw}%"></i></div></div>
+      <div class="ctx">${ctxCell(s.ctx)}</div>
+      <div class="clast">${relAge(s.age)}</div>
+    </div>`;
+  }).join("");
+
+  const empty = tab==="archive"
+    ? `<div class="empty">nothing archived yet.<br><span style="font:11px var(--mono)">“Summarize + archive” lands sessions here.</span></div>`
+    : `<div class="empty">no sessions match “${esc(query)}”</div>`;
+  return head + (rows || empty);
+}
+
+// ------------------------------------------------------------------ actions
+function setTab(t){
+  if(tab===t) return;
+  tab=t; query=""; curProj=null;
+  if(t==="archive"){ sort="recent"; dir="desc"; }
+  render();
+}
+function openProject(id){ curProj=id; query=""; render(); }
+function goProjects(){ curProj=null; query=""; render(); }
+function selectRow(id){ active=id; renderBodyOnly(); }
+function setSort(key){
+  if(sort===key){ dir = dir==="asc"?"desc":"asc"; }
+  else { sort=key; dir = key==="title" ? "asc" : "desc"; }
+  renderBodyOnly();
+}
+
+// footer segmented controls
+document.getElementById("ctxseg").onclick = e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  ctxMode=b.dataset.v;
+  [...e.currentTarget.children].forEach(x=>x.classList.toggle("on",x===b));
+  renderBodyOnly();
+};
+document.getElementById("winseg").onclick = e=>{
+  const b=e.target.closest("button"); if(!b) return;
+  ctxWindow=+b.dataset.w;
+  [...e.currentTarget.children].forEach(x=>x.classList.toggle("on",x===b));
+  renderBodyOnly();
+};
+
+render();
+</script>
+</body>
+</html>

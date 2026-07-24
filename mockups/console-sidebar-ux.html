@@ -10,7 +10,7 @@
     --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
     --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff; --cyan:#39c5cf;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-    --nav-w:412px;
+    --nav-w:466px;
     color-scheme:dark;
   }
   *{box-sizing:border-box; margin:0}
@@ -34,13 +34,9 @@
   #nav{background:var(--surface); border-right:1px solid var(--border);
        display:flex; flex-direction:column; min-width:0}
 
-  /* top / breadcrumb */
+  /* top / tabs */
   .navtop{padding:11px 14px 9px; border-bottom:1px solid var(--border);
-          position:sticky; top:0; background:var(--surface); z-index:3}
-  .navtop .r1{display:flex; align-items:center; gap:8px}
-  .navtop h1{font-size:13px; font-weight:600; letter-spacing:.3px; flex:1;
-             white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-  /* top-level tabs: Projects | Archive */
+          position:sticky; top:0; background:var(--surface); z-index:4}
   .tabs{display:flex; gap:16px; align-items:center}
   .tab{cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
        padding:2px 0 6px; border-bottom:2px solid transparent}
@@ -48,15 +44,8 @@
   .tab:hover{color:var(--ink2)}
   .tab.on{color:var(--ink); border-bottom-color:var(--accent)}
   .tab.on b{color:var(--accent)}
-  .cproj{font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-  .crumb{display:flex; align-items:center; gap:6px; font-size:12.5px; min-width:0}
-  .crumb .back{cursor:pointer; color:var(--accent); font:12px var(--mono);
-               border:1px solid var(--border); border-radius:5px; padding:1px 7px; flex:none}
-  .crumb .back:hover{background:var(--surface2)}
-  .crumb .sep{color:var(--muted)}
-  .crumb .cur{font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-  .crumb .cur .wt{color:var(--purple); font:11px var(--mono)}
-  .navtop .sub{color:var(--muted); font-size:11px; margin-top:3px}
+  .navtop .sub{color:var(--muted); font-size:11px; margin-top:5px}
+  .navtop .sub .w{color:var(--warn); font-weight:600}
 
   .search{margin-top:8px; width:100%; background:var(--bg); border:1px solid var(--border);
           border-radius:6px; padding:5px 9px; color:var(--ink); font-size:12.5px; font-family:inherit}
@@ -65,24 +54,30 @@
 
   .scroll{overflow-y:auto; flex:1; min-height:0}
 
-  /* ---------- project list (level 1) ---------- */
-  .proj{display:flex; align-items:center; gap:10px; padding:9px 14px; cursor:pointer;
-        border-bottom:1px solid #21262d}
-  .proj:hover{background:var(--surface2)}
-  .proj .pico{width:22px; height:22px; border-radius:6px; flex:none; display:grid; place-items:center;
-              background:var(--surface3); color:var(--ink2); font:12px var(--mono)}
-  .proj .pmeta{flex:1; min-width:0}
-  .proj .pname{font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-  .proj .ppath{color:var(--muted); font:10.5px var(--mono); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
-  .proj .pcount{flex:none; text-align:right; color:var(--ink2); font:11px var(--mono)}
-  .proj .pcount .live{color:var(--good)}
-  .proj .chev{color:var(--muted); flex:none; font-size:13px}
+  /* ---------- project accordion (always visible) ---------- */
+  .pblock{border-bottom:1px solid #21262d}
+  .phead{display:flex; align-items:center; gap:8px; padding:9px 14px; cursor:pointer}
+  .phead:hover{background:var(--surface2)}
+  .phead.open{background:var(--surface2)}
+  .phead .chev{color:var(--muted); width:10px; flex:none; font-size:10px; text-align:center}
+  .phead .pico{width:20px; height:20px; border-radius:6px; flex:none; display:grid; place-items:center;
+               background:var(--surface3); color:var(--ink2); font:11px var(--mono)}
+  .phead .pname{font-size:13px; font-weight:600; flex:1; min-width:0;
+                white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .phead.open .pname{color:var(--ink)}
+  .wbadge{flex:none; background:rgba(210,153,34,.15); color:var(--warn);
+          border:1px solid rgba(210,153,34,.4); font:10px var(--mono); font-weight:600;
+          padding:1px 7px; border-radius:10px; display:inline-flex; align-items:center; gap:4px}
+  .wbadge i{width:5px; height:5px; border-radius:50%; background:var(--warn); display:block}
+  .wk{flex:none; color:var(--accent); font:10px var(--mono); font-weight:600}
+  .pcount{flex:none; color:var(--muted); font:11px var(--mono); min-width:20px; text-align:right}
 
-  /* ---------- session table (level 2) ---------- */
-  .thead{display:grid; grid-template-columns:var(--cols); align-items:center;
-         gap:8px; padding:7px 14px; position:sticky; top:0; z-index:2;
-         background:var(--surface); border-bottom:1px solid var(--border);
-         font-size:10.5px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
+  /* ---------- session table ---------- */
+  .thead{display:grid; grid-template-columns:var(--cols); align-items:end;
+         gap:8px; padding:6px 14px 6px 26px;
+         background:var(--bg); border-bottom:1px solid var(--border);
+         font-size:10px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted)}
+  .thead.arch{padding-left:14px}
   .th{cursor:pointer; user-select:none; white-space:nowrap; display:flex; align-items:center; gap:3px}
   .th.num{justify-content:flex-end}
   .th:hover{color:var(--ink2)}
@@ -91,68 +86,49 @@
   .th.off .ar{opacity:0}
 
   .srow{display:grid; grid-template-columns:var(--cols); align-items:center; gap:8px;
-        padding:8px 14px; cursor:pointer; border-bottom:1px solid #21262d}
+        padding:8px 14px 8px 26px; cursor:pointer; border-bottom:1px solid #1a1f27}
+  .srow.arch{padding-left:14px}
   .srow:hover{background:var(--surface2)}
   .srow.active{background:var(--surface3); box-shadow:inset 2px 0 0 var(--accent)}
+  .srow:last-child{border-bottom:none}
 
   .cstate{display:flex; justify-content:center}
-  .dot{width:8px; height:8px; border-radius:50%; background:var(--muted)}
-  .dot.live{background:var(--good); box-shadow:0 0 0 3px rgba(63,185,80,.18)}
+  .dot{width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none}
   .dot.working{background:var(--accent); box-shadow:0 0 0 3px rgba(76,141,255,.18)}
-  .dot.open{background:var(--warn)}
-  .dot.closed{background:#3b434d}
-  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  .dot.live,.dot.working{animation:pulse 1.6s ease-in-out infinite}
+  .dot.waiting{background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.18)}
+  .dot.idle{background:var(--muted)}
+  .dot.closed{background:transparent; border:1.5px solid #3b434d}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .dot.working{animation:pulse 1.6s ease-in-out infinite}
 
   .ctitle{min-width:0}
   .ctitle .t{font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .ctitle .m{display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono)}
   .brc{color:var(--purple)}
   .agc{color:var(--cyan)}
-  .tmark{color:var(--muted); font-size:9px}
+  .cproj{font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
-  .cnum{text-align:right; font:12px var(--mono); color:var(--ink2)}
-  .clast{text-align:right; font:11px var(--mono); color:var(--muted); white-space:nowrap}
-
-  /* turns cell: number + faint proportional bar */
   .turns{display:flex; flex-direction:column; align-items:flex-end; gap:3px}
   .turns b{font:12px var(--mono); font-weight:600; color:var(--ink)}
   .turns .tb{width:100%; height:3px; border-radius:2px; background:#21262d; overflow:hidden}
   .turns .tb i{display:block; height:100%; background:var(--ink2); border-radius:2px}
 
-  /* ===== context representations (the iteration lever) ===== */
-  .ctx{min-width:0}
-  /* A — fill bar */
-  .ctxbar .lab{display:flex; justify-content:space-between; font:10px var(--mono); color:var(--ink2); margin-bottom:3px}
-  .ctxbar .lab .pct{color:var(--muted)}
-  .ctxbar .track{height:5px; border-radius:3px; background:#21262d; overflow:hidden}
-  .ctxbar .track i{display:block; height:100%; border-radius:3px}
-  /* B — ring */
-  .ctxring{display:flex; align-items:center; gap:7px; justify-content:flex-end}
-  .ctxring .ktxt{font:11px var(--mono); color:var(--ink2); text-align:right; line-height:1.15}
-  .ctxring .ktxt small{display:block; color:var(--muted); font-size:9px}
-  .ctxring svg{flex:none}
-  /* C — raw tokens */
-  .ctxraw{text-align:right; font:12px var(--mono)}
-  .ctxraw b{color:var(--ink)}
-  .ctxraw small{color:var(--muted); font-size:9.5px; display:block; letter-spacing:.3px}
+  .ck{text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink)}
+  .ck.warn{color:var(--warn)} .ck.bad{color:var(--bad)}
 
-  .fill-good{background:var(--good)} .fill-warn{background:var(--warn)} .fill-bad{background:var(--bad)}
-  .ink-good{color:var(--good)} .ink-warn{color:var(--warn)} .ink-bad{color:var(--bad)}
+  .cdt{font-family:var(--mono); line-height:1.15; text-align:left}
+  .cdt b{font-size:11px; font-weight:600; color:var(--ink2); display:block}
+  .cdt small{font-size:10px; color:var(--muted)}
+  .cdt.hot b{color:var(--accent)}
 
-  /* ---------- options footer ---------- */
+  /* ---------- footer legend ---------- */
   .navfoot{border-top:1px solid var(--border); padding:9px 14px; background:var(--surface);
-           display:flex; flex-direction:column; gap:8px}
-  .optrow{display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted)}
-  .optrow .lbl{flex:none; width:64px}
-  .seg{display:inline-flex; border:1px solid var(--border); border-radius:6px; overflow:hidden}
-  .seg button{background:transparent; border:none; color:var(--ink2); font:11px var(--mono);
-              padding:3px 9px; cursor:pointer}
-  .seg button+button{border-left:1px solid var(--border)}
-  .seg button.on{background:var(--accent); color:#fff}
-  .empty{padding:30px 14px; text-align:center; color:var(--muted); font-size:12px}
+           display:flex; flex-direction:column; gap:6px}
+  .legend{display:flex; gap:13px; align-items:center; font-size:11px; color:var(--muted); flex-wrap:wrap}
+  .legend span{display:inline-flex; align-items:center; gap:5px}
+  .hint{font:10px var(--mono); color:var(--muted); line-height:1.5}
+  .empty{padding:22px 14px; text-align:center; color:var(--muted); font-size:12px}
 
-  /* mock banner */
   .banner{position:fixed; bottom:10px; right:12px; z-index:9; background:var(--surface2);
           border:1px solid var(--border); border-radius:8px; padding:7px 11px;
           font:11px var(--mono); color:var(--muted); max-width:260px}
@@ -161,32 +137,20 @@
 </head>
 <body>
 
-<!-- ============ LEFT NAV (the mock) ============ -->
 <aside id="nav">
   <div class="navtop" id="navtop"></div>
   <div class="scroll" id="scroll"></div>
   <div class="navfoot">
-    <div class="optrow">
-      <span class="lbl">Context as</span>
-      <span class="seg" id="ctxseg">
-        <button data-v="bar" class="on">Bar</button>
-        <button data-v="ring">Ring</button>
-        <button data-v="raw">Tokens</button>
-      </span>
+    <div class="legend">
+      <span><i class="dot working"></i> working</span>
+      <span><i class="dot waiting"></i> waiting</span>
+      <span><i class="dot idle"></i> idle</span>
+      <span><i class="dot closed"></i> closed</span>
     </div>
-    <div class="optrow">
-      <span class="lbl">Window</span>
-      <span class="seg" id="winseg">
-        <button data-w="200000" class="on">200k</button>
-        <button data-w="1000000">1M</button>
-      </span>
-      <span style="flex:1"></span>
-      <span style="font:10px var(--mono)">click a column header to sort ↕</span>
-    </div>
+    <div class="hint">Started = first message · Last msg = most recent user turn · click a column header to sort ↕</div>
   </div>
 </aside>
 
-<!-- ============ dimmed shell context ============ -->
 <main id="main"><div class="ghost">chat transcript<br>(unchanged — not part of this mock)</div></main>
 <aside id="rail"><div class="ghost">angles / context / writes / git rail<br>(unchanged)</div></aside>
 
@@ -194,112 +158,82 @@
 
 <script>
 // ------------------------------------------------------------------ mock data
-// window (ctx window in tokens) is a toggle; state: live|working|open|closed
 const PROJECTS = [
   {id:"claude-session-db", label:"claude-session-db", path:"~/GitHub/claude-session-db"},
   {id:"knowledge-mcp",     label:"knowledge-mcp",     path:"~/GitHub/knowledge-mcp"},
   {id:"p6-tools",          label:"p6-tools",          path:"~/GitHub/p6-tools"},
   {id:"consulting-reg",    label:"consulting-register",path:"~/GitHub/consulting-register-db"},
 ];
-// ctx = tokens in context; turns = user↔assistant exchanges; age = minutes since last msg
-// arch = summarized+archived: hidden from project lists, lives in the Archive tab
+// state: working (agent busy) | waiting (your move) | idle | closed
+// ctx tokens · turns · start (first msg) · last (most recent user turn) · arch = archived
 const SESSIONS = [
-  {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:184000, turns:96, age:2,   state:"working", wt:"console-sidebar-ux", agents:0},
-  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, age:38,  state:"open",    wt:"console-angles-merge", agents:2},
-  {p:"claude-session-db", title:"PR membership + full PR status in Git tab",        ctx:97000,  turns:44, age:190, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"claude-session-db", title:"timeline rail tab",                                ctx:58000,  turns:33, age:320, state:"closed",  wt:null, agents:1, arch:true},
-  {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, age:26,  state:"open",    wt:null, agents:0},
-  {p:"claude-session-db", title:"sortable columns + titles",                        ctx:41000,  turns:19, age:410, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"claude-session-db", title:"cache-control on nav fetch",                       ctx:31000,  turns:14, age:520, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, age:95,  state:"closed",  wt:null, agents:3},
+  {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:372000, turns:96, state:"working", wt:"console-sidebar-ux", agents:0, start:"2026-07-24T15:40", last:"2026-07-24T17:18"},
+  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, state:"waiting", wt:"console-angles-merge", agents:2, start:"2026-07-24T14:05", last:"2026-07-24T16:42"},
+  {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, state:"waiting", wt:null, agents:0, start:"2026-07-24T16:02", last:"2026-07-24T16:54"},
+  {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, state:"idle",    wt:null, agents:3, start:"2026-07-24T13:10", last:"2026-07-24T15:45"},
+  {p:"claude-session-db", title:"PR membership + full PR status in Git tab",        ctx:97000,  turns:44, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T21:30", last:"2026-07-24T14:10"},
+  {p:"claude-session-db", title:"timeline rail tab",                                ctx:58000,  turns:33, state:"closed",  wt:null, agents:1, arch:true, start:"2026-07-24T10:15", last:"2026-07-24T12:30"},
+  {p:"claude-session-db", title:"sortable columns + titles",                        ctx:41000,  turns:19, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T19:40", last:"2026-07-24T10:30"},
+  {p:"claude-session-db", title:"cache-control on nav fetch",                       ctx:31000,  turns:14, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T18:20", last:"2026-07-24T08:40"},
 
-  {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:158000, turns:64, age:4,   state:"live",    wt:null, agents:0},
-  {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, age:60,  state:"open",    wt:null, agents:1},
-  {p:"knowledge-mcp", title:"import_entries YAML footgun hardening",                ctx:52000,  turns:27, age:240, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"knowledge-mcp", title:"embedding backfill batch sizing",                      ctx:34000,  turns:16, age:600, state:"closed",  wt:null, agents:0, arch:true},
+  {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:258000, turns:64, state:"working", wt:null, agents:0, start:"2026-07-24T16:30", last:"2026-07-24T17:16"},
+  {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, state:"waiting", wt:null, agents:1, start:"2026-07-24T15:00", last:"2026-07-24T16:20"},
+  {p:"knowledge-mcp", title:"import_entries YAML footgun hardening",                ctx:52000,  turns:27, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T22:10", last:"2026-07-24T13:20"},
+  {p:"knowledge-mcp", title:"embedding backfill batch sizing",                      ctx:34000,  turns:16, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T20:00", last:"2026-07-24T07:20"},
 
-  {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:171000, turns:83, age:15,  state:"working", wt:"p6-migration", agents:0},
-  {p:"p6-tools", title:"layouts export round-trip",                                 ctx:64000,  turns:29, age:150, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, age:70,  state:"open",    wt:null, agents:2},
+  {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:231000, turns:83, state:"working", wt:"p6-migration", agents:0, start:"2026-07-24T14:50", last:"2026-07-24T17:05"},
+  {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, state:"waiting", wt:null, agents:2, start:"2026-07-24T14:20", last:"2026-07-24T16:10"},
+  {p:"p6-tools", title:"layouts export round-trip",                                 ctx:64000,  turns:29, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-24T12:30", last:"2026-07-24T14:50"},
 
-  {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, age:200, state:"closed",  wt:null, agents:0, arch:true},
-  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, age:12,  state:"open",    wt:null, agents:1},
+  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, state:"waiting", wt:null, agents:1, start:"2026-07-24T15:30", last:"2026-07-24T17:08"},
+  {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T16:30", last:"2026-07-24T14:00"},
 ];
 
 // ------------------------------------------------------------------ state
 let tab = "projects";        // projects | archive
-let curProj = null;          // null = project list; else project id (projects tab only)
-let sort = "recent";         // recent | turns | ctx | title | state
+let openProj = "claude-session-db";  // which project is expanded (accordion); null = all collapsed
+let sort = "recent";         // recent | started | turns | ctx | title | state | project
 let dir  = "desc";
-let ctxMode = "bar";         // bar | ring | raw
-let ctxWindow = 200000;
 let query = "";
-let active = null;           // selected session (for active-row styling)
+let active = null;
 
-const LIVE = SESSIONS.filter(s=>!s.arch);   // main lists never show archived
-const ARCH = SESSIONS.filter(s=>s.arch);    // Archive tab only
+const LIVE = SESSIONS.filter(s=>!s.arch);
+const ARCH = SESSIONS.filter(s=>s.arch);
 
-const STATE_RANK = {live:0, working:1, open:2, closed:3};
+const ms = s => Date.parse(s);
+const STATE_RANK = {working:0, waiting:1, idle:2, closed:3};
 const CMP = {
-  recent:  (a,b)=> b.age - a.age,                 // desc dir → most-recent first
+  recent:  (a,b)=> ms(a.last)  - ms(b.last),
+  started: (a,b)=> ms(a.start) - ms(b.start),
   turns:   (a,b)=> a.turns - b.turns,
   ctx:     (a,b)=> a.ctx - b.ctx,
   title:   (a,b)=> a.title.localeCompare(b.title),
   state:   (a,b)=> STATE_RANK[a.state]-STATE_RANK[b.state],
-  project: (a,b)=> a.p.localeCompare(b.p) || (b.age - a.age),
+  project: (a,b)=> a.p.localeCompare(b.p) || (ms(b.last)-ms(a.last)),
 };
 
 // ------------------------------------------------------------------ helpers
 const esc = s => (s||"").replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-function relAge(m){
-  if(m<1) return "now";
-  if(m<60) return m+"m";
-  if(m<1440) return Math.round(m/60)+"h";
-  return Math.round(m/1440)+"d";
+const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function dtCell(iso, hot){
+  const d = new Date(iso), p = n => String(n).padStart(2,"0");
+  return `<div class="cdt${hot?" hot":""}">
+    <b>${MON[d.getMonth()]} ${d.getDate()}</b><small>${p(d.getHours())}:${p(d.getMinutes())}</small></div>`;
 }
-function level(frac){ return frac<0.55 ? "good" : frac<0.8 ? "warn" : "bad"; }
-function kfmt(t){ return (t/1000).toFixed(0)+"k"; }
-
-// context cell renders in the currently-selected representation
-function ctxCell(tok){
-  const frac = Math.min(1, tok/ctxWindow), pct = Math.round(frac*100), lv = level(frac);
-  if(ctxMode==="bar"){
-    return `<div class="ctxbar">
-      <div class="lab"><span>${kfmt(tok)}</span><span class="pct">${pct}%</span></div>
-      <div class="track"><i class="fill-${lv}" style="width:${pct}%"></i></div>
-    </div>`;
-  }
-  if(ctxMode==="ring"){
-    const R=9, C=2*Math.PI*R, off=C*(1-frac);
-    return `<div class="ctxring">
-      <div class="ktxt">${kfmt(tok)}<small>${pct}%</small></div>
-      <svg width="24" height="24" viewBox="0 0 24 24">
-        <circle cx="12" cy="12" r="${R}" fill="none" stroke="#21262d" stroke-width="3"/>
-        <circle cx="12" cy="12" r="${R}" fill="none" class="ink-${lv}" stroke="currentColor"
-          stroke-width="3" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}"
-          stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 12 12)"/>
-      </svg>
-    </div>`;
-  }
-  // raw
-  return `<div class="ctxraw"><b class="ink-${lv}">${tok.toLocaleString()}</b><small>${pct}% of ${kfmt(ctxWindow)}</small></div>`;
-}
+const kfmt = t => Math.round(t/1000)+"k";
+// context load colours: green <200k · yellow 200–350k · red ≥350k
+const ckClass = t => t>=350000 ? "bad" : t>=200000 ? "warn" : "";
+const waitingCount = pid => LIVE.filter(s=>s.p===pid && s.state==="waiting").length;
 
 // ------------------------------------------------------------------ render
-function bodyHTML(){
-  if(tab === "archive") return renderSessions(ARCH, true);
-  return curProj ? renderSessions(LIVE.filter(s=>s.p===curProj), false) : renderProjects();
-}
 function render(){
   renderTop();
   const sc = document.getElementById("scroll");
-  // archive/project-session tables get an extra Project column
   sc.style.setProperty("--cols", tab==="archive"
-    ? "14px minmax(0,1fr) 96px 52px 92px 44px"
-    : "14px minmax(0,1fr) 52px 96px 46px");
-  sc.innerHTML = bodyHTML();
+    ? "12px minmax(0,1fr) 92px 46px 60px 60px"    // state title project ctx started last
+    : "12px minmax(0,1fr) 44px 46px 60px 60px");  // state title turns   ctx started last
+  sc.innerHTML = tab==="archive" ? renderArchive() : renderProjects();
 }
-function renderBodyOnly(){ document.getElementById("scroll").innerHTML = bodyHTML(); }
 
 function tabstrip(){
   const t = (id,lbl,n) =>
@@ -311,44 +245,19 @@ function renderTop(){
   const top = document.getElementById("navtop");
   if(tab === "archive"){
     top.innerHTML = tabstrip() +
-      `<div class="sub" id="csub"></div>
+      `<div class="sub">${ARCH.length} archived sessions</div>
        <input class="search" id="q" placeholder="filter archived sessions…" value="${esc(query)}">`;
-  } else if(!curProj){
-    top.innerHTML = tabstrip() +
-      `<div class="sub">${PROJECTS.length} projects · select one to see its sessions</div>
-       <input class="search" id="q" placeholder="filter projects…" value="${esc(query)}">`;
   } else {
-    const p = PROJECTS.find(x=>x.id===curProj);
+    const totalWait = LIVE.filter(s=>s.state==="waiting").length;
     top.innerHTML = tabstrip() +
-      `<div class="crumb">
-        <span class="back" onclick="goProjects()">‹ Projects</span>
-        <span class="sep">/</span>
-        <span class="cur">${esc(p.label)}</span>
-      </div>
-      <div class="sub" id="csub"></div>
-      <input class="search" id="q" placeholder="filter sessions in ${esc(p.label)}…" value="${esc(query)}">`;
+      `<div class="sub">${PROJECTS.length} projects · <span class="w">${totalWait} waiting for you</span></div>
+       <input class="search" id="q" placeholder="filter projects & sessions…" value="${esc(query)}">`;
   }
   const q = document.getElementById("q");
-  if(q) q.oninput = e=>{ query = e.target.value; renderBodyOnly(); };
+  if(q) q.oninput = e=>{ query = e.target.value; renderBody(); };
 }
-
-function renderProjects(){
-  const q = query.toLowerCase();
-  const rows = PROJECTS.filter(p=>p.label.toLowerCase().includes(q)).map(p=>{
-    const ss = LIVE.filter(s=>s.p===p.id);
-    const live = ss.filter(s=>s.state==="live"||s.state==="working").length;
-    const initials = p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
-    return `<div class="proj" onclick="openProject('${p.id}')">
-      <div class="pico">${initials}</div>
-      <div class="pmeta">
-        <div class="pname">${esc(p.label)}</div>
-        <div class="ppath">${esc(p.path)}</div>
-      </div>
-      <div class="pcount">${ss.length} sess${live?` · <span class="live">${live}▶</span>`:""}</div>
-      <div class="chev">›</div>
-    </div>`;
-  }).join("");
-  return rows || `<div class="empty">no projects match “${esc(query)}”</div>`;
+function renderBody(){
+  document.getElementById("scroll").innerHTML = tab==="archive" ? renderArchive() : renderProjects();
 }
 
 function th(key, label, num){
@@ -357,82 +266,90 @@ function th(key, label, num){
   return `<div class="th ${num?"num":""} ${on?"on":"off"}" onclick="setSort('${key}')">${label}<span class="ar">${ar}</span></div>`;
 }
 
-function renderSessions(source, showProject){
+// projects always visible; the open one expands its session table in place
+function renderProjects(){
   const q = query.toLowerCase();
-  let list = source.filter(s=>s.title.toLowerCase().includes(q));
+  const blocks = PROJECTS.map(p=>{
+    const all = LIVE.filter(s=>s.p===p.id);
+    const nameMatch = p.label.toLowerCase().includes(q);
+    const matched = q ? all.filter(s=>s.title.toLowerCase().includes(q)) : all;
+    if(q && !matched.length && !nameMatch) return "";           // hide non-matching projects while searching
+    const open = q ? true : openProj===p.id;                    // searching auto-expands matches
+    const wait = all.filter(s=>s.state==="waiting").length;
+    const work = all.filter(s=>s.state==="working").length;
+    const initials = p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
+    const badge = wait ? `<span class="wbadge" title="${wait} session(s) waiting for you"><i></i>${wait}</span>` : "";
+    const workchip = work ? `<span class="wk" title="${work} agent(s) working">${work}▶</span>` : "";
+    const header = `<div class="phead ${open?"open":""}" onclick="toggleProj('${p.id}')">
+        <span class="chev">${open?"▾":"▸"}</span>
+        <span class="pico">${initials}</span>
+        <span class="pname">${esc(p.label)}</span>
+        ${badge}${workchip}
+        <span class="pcount">${all.length}</span>
+      </div>`;
+    const body = open ? sessionTable(q ? matched : all, false) : "";
+    return `<div class="pblock">${header}${body}</div>`;
+  }).join("");
+  return blocks || `<div class="empty">no projects or sessions match “${esc(query)}”</div>`;
+}
+
+function renderArchive(){
+  const q = query.toLowerCase();
+  const list = ARCH.filter(s=>s.title.toLowerCase().includes(q) ||
+                              (PROJECTS.find(p=>p.id===s.p)?.label||"").toLowerCase().includes(q));
+  return sessionTable(list, true);
+}
+
+// returns thead + rows for a list. showProject swaps the Turns column for Project.
+function sessionTable(source, showProject){
   const sign = dir==="asc" ? 1 : -1;
-  list = [...list].sort((a,b)=> sign * CMP[sort](a,b));
-
-  const sub = document.getElementById("csub");
-  if(sub) sub.textContent = `${list.length} ${showProject?"archived ":""}session${list.length!==1?"s":""}`;
-
-  const projTh = showProject ? th("project","Project") : "";
-  const head = `<div class="thead">
+  const list = [...source].sort((a,b)=> sign * CMP[sort](a,b));
+  const cls = showProject ? " arch" : "";
+  const col3 = showProject ? th("project","Project") : th("turns","Turns",true);
+  const head = `<div class="thead${cls}">
     <div class="th off" onclick="setSort('state')" title="sort by state">•</div>
     ${th("title","Title")}
-    ${projTh}
-    ${th("turns","Turns",true)}
-    ${th("ctx","Context",true)}
-    ${th("recent","Last",true)}
+    ${col3}
+    ${th("ctx","Ctx",true)}
+    ${th("started","Started")}
+    ${th("recent","Last msg")}
   </div>`;
 
   const maxTurns = Math.max(...list.map(s=>s.turns), 1);
   const rows = list.map((s,i)=>{
-    const id = s.p+"#"+i;
+    const id = s.p+"#"+s.start;
     const wt = s.wt ? `<span class="brc">⌥${esc(s.wt)}</span>` : "";
     const ag = s.agents ? `<span class="agc">⇲${s.agents}</span>` : "";
     const meta = (wt||ag) ? `${wt}${ag}` : `<span style="color:#3b434d">—</span>`;
-    const tw = Math.round(s.turns/maxTurns*100);
     const plabel = PROJECTS.find(p=>p.id===s.p)?.label || s.p;
-    const projCell = showProject ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>` : "";
-    return `<div class="srow ${active===id?"active":""}" onclick="selectRow('${id}')">
+    const col3cell = showProject
+      ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>`
+      : `<div class="turns"><b>${s.turns}</b><div class="tb"><i style="width:${Math.round(s.turns/maxTurns*100)}%"></i></div></div>`;
+    return `<div class="srow${cls} ${active===id?"active":""}" onclick="selectRow('${id}')">
       <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
-      <div class="ctitle">
-        <div class="t">${esc(s.title)}</div>
-        <div class="m">${meta}</div>
-      </div>
-      ${projCell}
-      <div class="turns"><b>${s.turns}</b><div class="tb"><i style="width:${tw}%"></i></div></div>
-      <div class="ctx">${ctxCell(s.ctx)}</div>
-      <div class="clast">${relAge(s.age)}</div>
+      <div class="ctitle"><div class="t">${esc(s.title)}</div><div class="m">${meta}</div></div>
+      ${col3cell}
+      <div class="ck ${ckClass(s.ctx)}" title="${s.ctx.toLocaleString()} tokens">${kfmt(s.ctx)}</div>
+      ${dtCell(s.start)}
+      ${dtCell(s.last, s.state==="working")}
     </div>`;
   }).join("");
 
   const empty = tab==="archive"
-    ? `<div class="empty">nothing archived yet.<br><span style="font:11px var(--mono)">“Summarize + archive” lands sessions here.</span></div>`
-    : `<div class="empty">no sessions match “${esc(query)}”</div>`;
+    ? `<div class="empty">nothing archived yet — “Summarize + archive” lands sessions here.</div>`
+    : `<div class="empty">no sessions in this project</div>`;
   return head + (rows || empty);
 }
 
 // ------------------------------------------------------------------ actions
-function setTab(t){
-  if(tab===t) return;
-  tab=t; query=""; curProj=null;
-  if(t==="archive"){ sort="recent"; dir="desc"; }
-  render();
-}
-function openProject(id){ curProj=id; query=""; render(); }
-function goProjects(){ curProj=null; query=""; render(); }
-function selectRow(id){ active=id; renderBodyOnly(); }
+function setTab(t){ if(tab===t) return; tab=t; query=""; render(); }
+function toggleProj(id){ openProj = (openProj===id ? null : id); renderBody(); }
+function selectRow(id){ active=id; renderBody(); }
 function setSort(key){
   if(sort===key){ dir = dir==="asc"?"desc":"asc"; }
-  else { sort=key; dir = key==="title" ? "asc" : "desc"; }
-  renderBodyOnly();
+  else { sort=key; dir = (key==="title"||key==="project") ? "asc" : "desc"; }
+  renderBody();
 }
-
-// footer segmented controls
-document.getElementById("ctxseg").onclick = e=>{
-  const b=e.target.closest("button"); if(!b) return;
-  ctxMode=b.dataset.v;
-  [...e.currentTarget.children].forEach(x=>x.classList.toggle("on",x===b));
-  renderBodyOnly();
-};
-document.getElementById("winseg").onclick = e=>{
-  const b=e.target.closest("button"); if(!b) return;
-  ctxWindow=+b.dataset.w;
-  [...e.currentTarget.children].forEach(x=>x.classList.toggle("on",x===b));
-  renderBodyOnly();
-};
 
 render();
 </script>

@@ -22,6 +22,10 @@
     height:100vh; overflow:hidden;
   }
   body.navmin{ --nav-w:56px }
+  /* mobile preview: sidebar becomes the whole viewport (phone-width) */
+  body.phone{ grid-template-columns:390px }
+  body.phone #main, body.phone #rail, body.phone .banner{ display:none }
+  body.phone #nav{ border-right:1px solid var(--border) }
 
   /* ---------- shell placeholders ---------- */
   #main,#rail{min-width:0; overflow:hidden}
@@ -73,6 +77,10 @@
           border-radius:6px; padding:5px 9px; color:var(--ink); font-size:12.5px; font-family:inherit}
   .search::placeholder{color:var(--muted)}
   .search:focus{outline:none; border-color:var(--accent)}
+  .scoperow{margin-top:7px; font:11px var(--mono); color:var(--muted); display:flex; align-items:center; gap:6px}
+  .sc{cursor:pointer; padding:1px 8px; border:1px solid var(--border); border-radius:10px; color:var(--ink2)}
+  .sc:hover{color:var(--ink)}
+  .sc.on{background:var(--accent); color:#fff; border-color:var(--accent)}
 
   .scroll{overflow-y:auto; flex:1; min-height:0}
 
@@ -139,6 +147,14 @@
   .ctitle .m{display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono)}
   .brc{color:var(--purple)}
   .agc{color:var(--cyan)}
+  .snip{margin-top:2px; font:10px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .snip mark{background:rgba(210,153,34,.25); color:var(--warn); border-radius:2px; padding:0 1px}
+  /* mobile: per-row expander + revealed detail strip */
+  .cexp{display:flex; justify-content:center; color:var(--muted); cursor:pointer; font-size:10px}
+  .cexp:hover{color:var(--ink)}
+  .sdetail{display:flex; flex-wrap:wrap; gap:6px 16px; padding:2px 14px 10px 26px;
+           border-bottom:1px solid #1a1f27; font:10.5px var(--mono); color:var(--muted); background:#12161d}
+  .sdetail b{color:var(--ink2); font-weight:600}
   .cproj{font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
   .cnum{text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink)}
@@ -165,6 +181,10 @@
   .legend{display:flex; gap:12px; align-items:center; font-size:11px; color:var(--muted); flex-wrap:wrap}
   .legend span{display:inline-flex; align-items:center; gap:5px}
   .hint{font:10px var(--mono); color:var(--muted); line-height:1.5}
+  .mtoggle{align-self:flex-start; margin-top:2px; background:var(--surface2); border:1px solid var(--border);
+           border-radius:6px; color:var(--ink2); font:10.5px var(--mono); padding:3px 9px; cursor:pointer}
+  .mtoggle:hover{color:var(--ink); border-color:var(--accent)}
+  body.phone .mtoggle{background:var(--accent); color:#fff; border-color:var(--accent)}
   .empty{padding:22px 14px; text-align:center; color:var(--muted); font-size:12px}
 
   .banner{position:fixed; bottom:10px; right:12px; z-index:9; background:var(--surface2);
@@ -189,6 +209,7 @@
         <span><i class="dot closed"></i> closed</span>
       </div>
       <div class="hint">Idle for = time since last message · ⚑ priority (click to change) · click a header to sort ↕</div>
+      <button class="mtoggle" onclick="toggleMobile()" id="mtoggle">📱 preview mobile layout</button>
     </div>
   </div>
 </aside>
@@ -231,15 +252,41 @@ const SESSIONS = [
   {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T16:30", last:"2026-07-24T14:00"},
 ];
 
+// transcript-body excerpt per session (what "search content" matches against).
+// keywords here deliberately differ from the titles so content search is visible.
+const CONTENT = {
+  "console sidebar UX — columns + project drill-in": "accordion of projects, sortable column headers, waiting vs your-move badge, context shown in k tokens, priority flag, idle-for column, collapsible rail",
+  "≈#N equivalence badge for cherry-picked PRs": "cherry-pick detection via git patch-id, PR merge commit, equivalence hash, backport, upstream branch",
+  "mobile UX pass on the console": "responsive layout, viewport dvh, off-canvas drawer, touch targets, safe-area inset, bottom sheet",
+  "angles session-management lens": "open-thread inventory, delta-after-summary verdict, digest tail, reconcile gate, watermark",
+  "PR membership + full PR status in Git tab": "gh pr view, mergeStateStatus, review decision, checks, base branch, draft state",
+  "timeline rail tab": "per-turn segment map, small ollama call, memoized by prompt uuid, cached-first pull",
+  "sortable columns + titles": "SORT_CMP comparator, ascending descending arrow, localStorage persistence",
+  "cache-control on nav fetch": "ETag validator, 304 not modified, 30s bucket, conditional request",
+  "asyncpg pool exhaustion under sweep convoy": "connection pool exhausted, idle in transaction, lock convoy, pg_terminate_backend, blocking pids, sweep heartbeat",
+  "hybrid_search rerank weighting": "bm25 lexical score, pgvector cosine, rerank blend, embedding backfill, alpha weighting",
+  "import_entries YAML footgun hardening": "unquoted hash truncation, bare timestamp coercion, angle-bracket placeholder, dry_run validate",
+  "embedding backfill batch sizing": "batch size tuning, throughput, ollama embed, vacuum, pgvector index",
+  "P6 API activity codes migration": "activity codes, WBS hierarchy, XER export, Primavera REST, EPS node",
+  "operator schedule steward wiring": "schedule steward, launchd timer, heartbeat file, liveness pidfile, quiesce gate",
+  "layouts export round-trip": "layout XML, column set, filter, sort spec, import verify",
+  "salesforce ops sync reconcile": "opportunity records, SOQL query, bulk API, upsert, external id, reconcile drift",
+  "register-db schema for engagements": "engagement table, client, rate card, invoice, foreign key, migration",
+};
+SESSIONS.forEach(s => s.content = CONTENT[s.title] || "");
+
 // ------------------------------------------------------------------ state
 let tab = "projects";        // projects | archive
 let openProj = "claude-session-db";  // single-open accordion; null = all collapsed
 let sort = "recent";         // recent | started | turns | ctx | title | state | project — GLOBAL
 let dir  = "desc";           // default: last-msg desc
 let query = "";
+let scope = "both";          // search scope: title | content | both
 let active = null;
 let editing = null;          // session id being renamed inline
 let navCollapsed = false;    // whole-sidebar collapse
+let mobile = false;          // mobile-preview mode (reduced columns)
+let expandedRows = new Set();// rows expanded to reveal hidden columns (mobile)
 
 const LIVE = SESSIONS.filter(s=>!s.arch);
 const ARCH = SESSIONS.filter(s=>s.arch);
@@ -282,18 +329,39 @@ function idleFmt(iso){
 }
 const initialsOf = p => p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
 const countState = (pid,st) => LIVE.filter(s=>s.p===pid && s.state===st).length;
+const dstr = iso => { const d=new Date(iso),p=n=>String(n).padStart(2,"0");
+  return `${MON[d.getMonth()]} ${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+
+// search: match a session by title and/or content per the current scope
+function matchHit(s, q){
+  const inT = scope!=="content" && s.title.toLowerCase().includes(q);
+  const inC = scope!=="title"   && (s.content||"").toLowerCase().includes(q);
+  return { hit: inT||inC, inT, inC };
+}
+// a highlighted excerpt around the first content match
+function snippet(content, q){
+  const i = content.toLowerCase().indexOf(q); if(i<0) return "";
+  const a = Math.max(0, i-24), b = Math.min(content.length, i+q.length+34);
+  return (a>0?"…":"") + esc(content.slice(a,i)) + `<mark>${esc(content.slice(i,i+q.length))}</mark>` +
+         esc(content.slice(i+q.length,b)) + (b<content.length?"…":"");
+}
 
 // ------------------------------------------------------------------ render
 function render(){
-  document.body.classList.toggle("navmin", navCollapsed);
-  if(navCollapsed){ renderRail(); return; }
+  document.body.classList.toggle("navmin", navCollapsed && !mobile);
+  document.body.classList.toggle("phone", mobile);
+  if(navCollapsed && !mobile){ renderRail(); return; }
   renderTop();
   const sc = document.getElementById("scroll");
-  // state | title | (turns|project) | ctx | prio | started | last | idle
-  sc.style.setProperty("--cols", tab==="archive"
-    ? "12px minmax(0,1fr) 84px 44px 30px 54px 54px 46px"
-    : "12px minmax(0,1fr) 38px 44px 30px 54px 54px 46px");
+  // mobile: state | title | prio | idle | expander.  desktop: full 8-col set
+  sc.style.setProperty("--cols", mobile
+    ? "12px minmax(0,1fr) 26px 46px 16px"
+    : tab==="archive"
+      ? "12px minmax(0,1fr) 84px 44px 30px 54px 54px 46px"   // state title project ctx prio started last idle
+      : "12px minmax(0,1fr) 38px 44px 30px 54px 54px 46px"); // state title turns   ctx prio started last idle
   renderBody();
+  const mt = document.getElementById("mtoggle");
+  if(mt) mt.textContent = mobile ? "🖥 back to desktop" : "📱 preview mobile layout";
 }
 function renderBody(){
   document.getElementById("scroll").innerHTML = tab==="archive" ? renderArchive() : renderProjects();
@@ -316,17 +384,23 @@ function tabstrip(){
           <button class="collapse" onclick="toggleNav()" title="Collapse sidebar">«</button></div>`;
 }
 
+function scopeRow(){
+  const c = (v,lbl) => `<span class="sc ${scope===v?"on":""}" onclick="setScope('${v}')">${lbl}</span>`;
+  return `<div class="scoperow">search in ${c("title","titles")}${c("content","content")}${c("both","both")}</div>`;
+}
 function renderTop(){
   const top = document.getElementById("navtop");
   if(tab === "archive"){
     top.innerHTML = tabstrip() +
       `<div class="sub">${ARCH.length} archived sessions</div>
-       <input class="search" id="q" placeholder="filter archived sessions…" value="${esc(query)}">`;
+       <input class="search" id="q" placeholder="search archived — titles & content…" value="${esc(query)}">
+       ${scopeRow()}`;
   } else {
     const mv = LIVE.filter(s=>s.state==="move").length, wt = LIVE.filter(s=>s.state==="wait").length;
     top.innerHTML = tabstrip() +
       `<div class="sub">${PROJECTS.length} projects · <span class="mv">${mv} your move</span> · <span class="wt">${wt} waiting</span></div>
-       <input class="search" id="q" placeholder="filter projects & sessions…" value="${esc(query)}">`;
+       <input class="search" id="q" placeholder="search projects — titles & content…" value="${esc(query)}">
+       ${scopeRow()}`;
   }
   const q = document.getElementById("q");
   if(q) q.oninput = e=>{ query = e.target.value; renderBody(); };
@@ -342,7 +416,7 @@ function renderProjects(){
   const blocks = PROJECTS.map(p=>{
     const all = LIVE.filter(s=>s.p===p.id);
     const nameMatch = p.label.toLowerCase().includes(q);
-    const matched = q ? all.filter(s=>s.title.toLowerCase().includes(q)) : all;
+    const matched = q ? all.filter(s=>matchHit(s,q).hit) : all;
     if(q && !matched.length && !nameMatch) return "";
     const open = q ? true : openProj===p.id;
     const mv = all.filter(s=>s.state==="move").length, wt = all.filter(s=>s.state==="wait").length;
@@ -365,7 +439,7 @@ function renderProjects(){
 
 function renderArchive(){
   const q = query.toLowerCase();
-  const list = ARCH.filter(s=>s.title.toLowerCase().includes(q) ||
+  const list = ARCH.filter(s=> !q || matchHit(s,q).hit ||
                               (PROJECTS.find(p=>p.id===s.p)?.label||"").toLowerCase().includes(q));
   return sessionTable(list, true);
 }
@@ -374,17 +448,24 @@ function sessionTable(source, showProject){
   const sign = dir==="asc" ? 1 : -1;
   const list = [...source].sort((a,b)=> sign * CMP[sort](a,b));
   const cls = showProject ? " arch" : "";
+  const q = query.trim().toLowerCase();
+
   const col3 = showProject ? th("project","Project") : th("turns","Turns",true);
-  const head = `<div class="thead${cls}">
-    <div class="th off" onclick="setSort('state')" title="sort by state">•</div>
-    ${th("title","Title")}
-    ${col3}
-    ${th("ctx","Ctx",true)}
-    ${th("prio","Prio")}
-    ${th("started","Started")}
-    ${th("recent","Last")}
-    ${th("idle","Idle",true)}
-  </div>`;
+  const head = mobile
+    ? `<div class="thead${cls}">
+        <div class="th off" onclick="setSort('state')" title="sort by state">•</div>
+        ${th("title","Title")}${th("prio","Prio")}${th("idle","Idle",true)}<div class="th off"></div>
+      </div>`
+    : `<div class="thead${cls}">
+        <div class="th off" onclick="setSort('state')" title="sort by state">•</div>
+        ${th("title","Title")}
+        ${col3}
+        ${th("ctx","Ctx",true)}
+        ${th("prio","Prio")}
+        ${th("started","Started")}
+        ${th("recent","Last")}
+        ${th("idle","Idle",true)}
+      </div>`;
 
   const rows = list.map(s=>{
     const id = sid(s);
@@ -392,15 +473,14 @@ function sessionTable(source, showProject){
     const ag = s.agents ? `<span class="agc">⇲${s.agents}</span>` : "";
     const meta = (wt||ag) ? `${wt}${ag}` : `<span style="color:#3b434d">—</span>`;
     const plabel = PROJECTS.find(p=>p.id===s.p)?.label || s.p;
-    const col3cell = showProject
-      ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>`
-      : `<div class="cnum">${s.turns}</div>`;
+    // content-match snippet under the title (only when the hit was in content)
+    const snip = (q && matchHit(s,q).inC) ? `<div class="snip">${snippet(s.content,q)}</div>` : "";
     const titleCell = editing===id
       ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.title)}"
              onclick="event.stopPropagation()" onkeydown="editKey(event,'${id}')" onblur="commitEdit('${id}',this.value)"></div></div>`
       : `<div class="ctitle">
            <div class="t"><span class="ttxt">${esc(s.title)}</span><span class="edit" title="rename" onclick="startEdit(event,'${id}')">✎</span></div>
-           <div class="m">${meta}</div>
+           <div class="m">${meta}</div>${snip}
          </div>`;
     const pr = s.prio || "none";
     const prioCell = `<div class="cprio"><span class="prio ${pr}" title="priority: ${pr} — click to change"
@@ -408,10 +488,28 @@ function sessionTable(source, showProject){
     const idleCell = s.state==="working"
       ? `<div class="cidle active" title="agent active now">active</div>`
       : `<div class="cidle" title="idle ${idleFmt(s.last)} (since last message)">${idleFmt(s.last)}</div>`;
+
+    if(mobile){
+      const open = expandedRows.has(id);
+      const detail = open ? `<div class="sdetail">
+          <span>Turns <b>${s.turns}</b></span>
+          <span>Ctx <b class="ck ${ckClass(s.ctx)}">${kfmt(s.ctx)}</b></span>
+          <span>Started <b>${dstr(s.start)}</b></span>
+          <span>Last <b>${dstr(s.last)}</b></span>
+          ${showProject?`<span>Project <b>${esc(plabel)}</b></span>`:""}
+        </div>` : "";
+      return `<div class="srow${cls} ${active===id?"active":""}" onclick="selectRow('${id}')">
+        <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
+        ${titleCell}
+        ${prioCell}
+        ${idleCell}
+        <div class="cexp" title="show more columns" onclick="toggleRow(event,'${id}')">${open?"▾":"▸"}</div>
+      </div>${detail}`;
+    }
     return `<div class="srow${cls} ${active===id?"active":""}" onclick="selectRow('${id}')">
       <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
       ${titleCell}
-      ${col3cell}
+      ${showProject ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>` : `<div class="cnum">${s.turns}</div>`}
       <div class="ck ${ckClass(s.ctx)}" title="${s.ctx.toLocaleString()} tokens">${kfmt(s.ctx)}</div>
       ${prioCell}
       ${dtCell(s.start)}
@@ -428,6 +526,9 @@ function sessionTable(source, showProject){
 
 // ------------------------------------------------------------------ actions
 function setTab(t){ if(tab===t) return; tab=t; query=""; editing=null; render(); }
+function setScope(v){ scope=v; renderTop(); renderBody(); }
+function toggleMobile(){ mobile=!mobile; navCollapsed=false; render(); }
+function toggleRow(e,id){ e.stopPropagation(); expandedRows.has(id)?expandedRows.delete(id):expandedRows.add(id); renderBody(); }
 function toggleProj(id){ openProj = (openProj===id ? null : id); renderBody(); }
 function selectRow(id){ if(editing) return; active=id; renderBody(); }
 function setSort(key){

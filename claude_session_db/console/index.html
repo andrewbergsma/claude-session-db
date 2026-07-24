@@ -16,10 +16,11 @@
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
     --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
     --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
+    --cyan:#39c5cf;
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
-    --rail-w:320px; --nav-w:270px;
+    --rail-w:320px; --nav-w:440px;
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
@@ -57,60 +58,121 @@
   body.raildrag { user-select:none; cursor:col-resize; }
   #nav, #main, #rail { min-height:0; }
 
-  /* ---- left: projects + sessions ---- */
+  /* ---- left: projects + sessions (accordion + sortable columns) ---- */
   #nav { background:var(--surface); border-right:1px solid var(--border);
          overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
-  #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
-              border-bottom:1px solid var(--border); z-index:2; }
+  #nav .top { padding:10px 14px 9px; position:sticky; top:0; background:var(--surface);
+              border-bottom:1px solid var(--border); z-index:4; }
   #nav .top .toprow { display:flex; align-items:center; justify-content:space-between; gap:8px; }
-  #nav .top h1 { font-size:13px; font-weight:600; letter-spacing:.3px; white-space:nowrap;
-                 overflow:hidden; text-overflow:ellipsis; }
-  #nav .top .sub { color:var(--muted); font-size:11px; margin-top:2px; }
   .navbtn { cursor:pointer; color:var(--muted); font:13px var(--mono); flex:none;
             padding:1px 5px; border-radius:4px; }
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
-  body.navmin #nav .top { padding:12px 0 8px; border-bottom:none; text-align:center; }
+  /* top-level tabs: Projects | Archive */
+  .navtabs { display:flex; gap:16px; align-items:center; }
+  .navtab { cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
+            padding:1px 0 5px; border-bottom:2px solid transparent; }
+  .navtab b { font-weight:600; color:var(--muted); font-size:10.5px; font-family:var(--mono); }
+  .navtab:hover { color:var(--ink2); }
+  .navtab.on { color:var(--ink); border-bottom-color:var(--accent); }
+  .navtab.on b { color:var(--accent); }
+  #nav .top .sub { color:var(--muted); font-size:11px; margin-top:5px; }
+  #nav .top .sub .mv { color:var(--warn); font-weight:600; }
+  #nav .top .sub .wt { color:var(--warn); opacity:.8; }
+  #nav .top .sub a.navtog { color:var(--accent); cursor:pointer; margin-left:6px; }
+  .search { margin-top:8px; width:100%; background:var(--bg); border:1px solid var(--border);
+            border-radius:6px; padding:5px 9px; color:var(--ink); font-size:12.5px; font-family:inherit; }
+  .search::placeholder { color:var(--muted); }
+  .search:focus { outline:none; border-color:var(--accent); }
+  .scoperow { margin-top:7px; font:11px var(--mono); color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .sc { cursor:pointer; padding:1px 8px; border:1px solid var(--border); border-radius:10px; color:var(--ink2); }
+  .sc:hover { color:var(--ink); }
+  .sc.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+
+  /* collapsed rail: project initials + waiting dots */
+  body.navmin #nav .top { padding:10px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
-  body.navmin #nav .top h1, body.navmin #nav .top .sub, body.navmin #navlist,
-  body.navmin #navsort { display:none; }
-  /* view toggle + sort columns + topic filter: stacked rows of clickable keys */
-  .navsort { display:flex; flex-direction:column; gap:4px; margin-top:7px; }
-  .navrow { display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
-  .navrow .lbl { font:9px var(--mono); text-transform:uppercase; letter-spacing:.4px;
-                 color:var(--muted); align-self:center; margin-right:1px; width:34px; }
-  .sortchip { font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.3px;
-              color:var(--muted); cursor:pointer; padding:1px 5px; border-radius:4px;
-              border:1px solid transparent; user-select:none; white-space:nowrap; }
-  .sortchip:hover { color:var(--ink2); }
-  .sortchip.on { color:var(--ink); border-color:var(--border); background:var(--surface2); }
-  .navfilter { font:10px var(--mono); background:var(--bg); color:var(--ink);
-               border:1px solid var(--border); border-radius:4px; padding:1px 4px;
-               max-width:160px; }
-  /* group-view tree headers reuse .sec/.proj; topic accented, subtopic indented */
-  .sec.topicsec { color:var(--ink2); }
-  .proj.subtopicsec { padding-left:26px; }
-  .tw { color:var(--muted); font-size:9px; width:10px; flex:none; }
-  /* group headers: quiet separators — sessions are the dominant content */
-  .sec, .proj { display:flex; align-items:baseline; gap:4px; padding:9px 14px 2px;
-                cursor:pointer; user-select:none; font-size:10px; font-weight:600;
-                letter-spacing:.3px; color:var(--muted); }
-  .sec .n, .proj .n { color:var(--muted); font-weight:400; opacity:.75; }
-  .sec.pri-critical { color:var(--bad); }
-  .sec.pri-high { color:var(--warn); }
-  .sec.pri-med { color:var(--accent); }
-  .sec.pri-low { color:var(--muted); }
-  .proj:hover, .sec:hover { color:var(--ink2); }
-  .ptag { color:var(--muted); font-weight:400; font-size:11px; margin-right:6px; }
-  .wtag { color:var(--muted); font-weight:400; font-size:10.5px; margin-right:6px; }
-  .prig { flex:none; font-size:10px; margin-right:4px; }
-  .prig.p-critical { color:var(--bad); }
-  .prig.p-high { color:var(--warn); }
-  .prig.p-med { color:var(--accent); }
-  .prig.p-low { color:var(--muted); }
-  .sess { display:flex; gap:8px; align-items:baseline; padding:7px 14px; cursor:pointer;
-          border-left:2px solid transparent; }
+  body.navmin .navtabs, body.navmin #nav .top .sub, body.navmin .search,
+  body.navmin .scoperow, body.navmin #navlist { display:none; }
+  body.navmin #navrail { display:flex; }
+  #navrail { display:none; flex-direction:column; align-items:center; gap:8px; padding:10px 0; }
+  .railproj { position:relative; width:34px; height:34px; border-radius:8px; background:var(--surface3);
+              color:var(--ink2); display:grid; place-items:center; font:11px var(--mono); cursor:pointer; }
+  .railproj:hover { background:var(--surface2); color:var(--ink); }
+  .railproj.on { box-shadow:inset 0 0 0 1.5px var(--accent); color:var(--ink); }
+  .raildot { position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+             border-radius:7px; background:var(--warn); color:#0d1117; font:8px var(--mono); font-weight:700;
+             display:grid; place-items:center; border:1.5px solid var(--surface); }
+
+  /* project accordion */
+  .pblock { border-bottom:1px solid #21262d; }
+  .phead { display:flex; align-items:center; gap:8px; padding:9px 14px; cursor:pointer; }
+  .phead:hover, .phead.open { background:var(--surface2); }
+  .phead .chev { color:var(--muted); width:10px; flex:none; font-size:10px; text-align:center; }
+  .phead .pico { width:20px; height:20px; border-radius:6px; flex:none; display:grid; place-items:center;
+                 background:var(--surface3); color:var(--ink2); font:11px var(--mono); }
+  .phead .pname { font-size:13px; font-weight:600; flex:1; min-width:0;
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .phead.open .pname { color:var(--ink); }
+  .wbadge { flex:none; font:10px var(--mono); font-weight:600; padding:1px 7px; border-radius:10px;
+            display:inline-flex; align-items:center; gap:4px; background:rgba(210,153,34,.16);
+            color:var(--warn); border:1px solid rgba(210,153,34,.45); }
+  .wbadge i { width:5px; height:5px; border-radius:50%; display:block; background:var(--warn); }
+  .wk { flex:none; color:var(--accent); font:10px var(--mono); font-weight:600; }
+  .pcount { flex:none; color:var(--muted); font:11px var(--mono); min-width:18px; text-align:right; }
+
+  /* session table */
+  .thead { display:grid; grid-template-columns:var(--cols); align-items:end; gap:8px;
+           padding:6px 14px 6px 26px; background:var(--bg); border-bottom:1px solid var(--border);
+           font-size:10px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted); }
+  .thead.arch { padding-left:14px; }
+  .th { cursor:pointer; user-select:none; white-space:nowrap; display:flex; align-items:center; gap:3px; }
+  .th.num { justify-content:flex-end; }
+  .th:hover { color:var(--ink2); }
+  .th.on { color:var(--ink); }
+  .th .ar { font-size:9px; opacity:.9; }
+  .th.off .ar { opacity:0; }
+  .sess { display:grid; grid-template-columns:var(--cols); align-items:center; gap:8px;
+          padding:8px 14px 8px 26px; cursor:pointer; border-bottom:1px solid #1a1f27; }
+  .sess.arch { padding-left:14px; }
   .sess:hover { background:var(--surface2); }
-  .sess.active { background:var(--surface2); border-left-color:var(--accent); }
+  .sess.active { background:var(--surface3); box-shadow:inset 2px 0 0 var(--accent); }
+  .cstate { display:flex; justify-content:center; align-items:center; }
+  .cstate .dot { margin-top:0; }
+  .ctitle { min-width:0; }
+  .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; }
+  .ctitle .ttxt { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tmark { color:var(--muted); font-size:9px; }
+  .edit { flex:none; color:var(--muted); font-size:11px; cursor:pointer; opacity:0; transition:opacity .1s; }
+  .sess:hover .edit { opacity:.55; }
+  .edit:hover { opacity:1; color:var(--accent); }
+  .tedit { width:100%; background:var(--bg); border:1px solid var(--accent); border-radius:4px;
+           color:var(--ink); font:12.5px inherit; padding:2px 5px; }
+  .tedit:focus { outline:none; }
+  .ctitle .m { display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono); }
+  .brc { color:var(--purple); } .agc { color:var(--cyan); }
+  .snip { margin-top:2px; font:10px var(--mono); color:var(--ink2);
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .snip mark { background:rgba(210,153,34,.25); color:var(--warn); border-radius:2px; padding:0 1px; }
+  .cproj { font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .cnum { text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink); }
+  .ck { text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink); }
+  .ck.warn { color:var(--warn); } .ck.bad { color:var(--bad); }
+  .cdt { font-family:var(--mono); line-height:1.15; text-align:left; }
+  .cdt b { font-size:11px; font-weight:600; color:var(--ink2); display:block; }
+  .cdt small { font-size:10px; color:var(--muted); }
+  .cdt.hot b { color:var(--accent); }
+  .cidle { text-align:right; font:11px var(--mono); color:var(--muted); white-space:nowrap; }
+  .cidle.active { color:var(--accent); font-weight:600; }
+  .cprio { display:flex; justify-content:center; }
+  .prio { cursor:pointer; font-size:13px; line-height:1; }
+  .prio.critical { color:var(--bad); } .prio.high { color:var(--warn); }
+  .prio.med { color:var(--accent); } .prio.low { color:var(--ink2); }
+  .prio.normal { color:#3b434d; } .prio.normal:hover { color:var(--muted); }
+  .cexp { display:flex; justify-content:center; color:var(--muted); cursor:pointer; font-size:10px; }
+  .cexp:hover { color:var(--ink); }
+  .sdetail { display:flex; flex-wrap:wrap; gap:6px 16px; padding:2px 14px 10px 26px;
+             border-bottom:1px solid #1a1f27; font:10.5px var(--mono); color:var(--muted); background:#12161d; }
+  .sdetail b { color:var(--ink2); font-weight:600; }
   /* activity dot — palette makes the OPERATOR-ACTIONABLE state ("waiting for
      you") draw the eye. Deliberate inversion of the old green=done/orange=busy:
      amber now means "your move", blue means an agent is working. */
@@ -127,12 +189,7 @@
   .dot.stale { background:transparent; border-color:var(--muted); box-shadow:none; }
   .navcensus { font:10px var(--mono); color:var(--muted); margin-top:3px; }
   .navcensus b { color:var(--warn); font-weight:600; }
-  .sess .meta { min-width:0; flex:1; }
-  .sess .ttl { font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .sess .ttl .tmark { color:var(--muted); font-size:9px; margin-left:4px; vertical-align:1px; }
-  .sess .sub { color:var(--muted); font-size:10.5px; font-family:var(--mono);
-               white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  /* context-size gauge: three bars, filled count = size bucket */
+  /* context-size gauge — still used by the rail Context pane (renderContext) */
   .ctx { flex:none; display:inline-flex; align-items:flex-end; gap:2px; height:11px;
          align-self:center; }
   .ctx i { width:3px; background:var(--border); border-radius:1px; display:block; }
@@ -649,12 +706,14 @@
   <nav id="nav">
     <div class="top">
       <div class="toprow">
-        <h1>kmcp · session console</h1>
+        <div class="navtabs" id="navtabs"></div>
         <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
       </div>
       <div class="sub" id="navsub">loading…</div>
-      <div class="navsort" id="navsort"></div>
+      <input class="search" id="navq" placeholder="search — titles & content…" autocomplete="off">
+      <div class="scoperow" id="navscope"></div>
     </div>
+    <div id="navrail"></div>
     <div id="navlist"></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
@@ -783,7 +842,7 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 /* ---------- expandable left sidebar: drag its right edge, « to collapse ---------- */
 (function(){
   const WKEY = "csd.consoleNavW", MKEY = "csd.consoleNavMin";
-  const MIN = 200, MAX = 560, DEF = 270, SLIM = 40;
+  const MIN = 260, MAX = 680, DEF = 440, SLIM = 48;
   const root = document.documentElement;
   let width = parseInt(localStorage.getItem(WKEY), 10) || DEF;
   let min = localStorage.getItem(MKEY) === "1";
@@ -804,6 +863,8 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
     }
     min = !min; localStorage.setItem(MKEY, min ? "1" : "0"); apply();
   };
+  // rail → expand the sidebar (used when a collapsed project initial is clicked)
+  window.expandNav = () => { if(min){ min = false; localStorage.setItem(MKEY, "0"); apply(); } };
   apply();
   const grip = document.getElementById("navgrip");
   let dragging = false;
@@ -988,10 +1049,17 @@ const PRI_GLYPH = {critical:"‼", high:"▲", med:"●", low:"▽"};
    flat list. Folder shows on every row but never DEFINES the grouping — the
    topic taxonomy does. */
 const PRI_RANK = {critical:5, high:4, med:3, normal:2, low:1};
-let navView = localStorage.getItem("csd.consoleNavView") || "sort";   // sort | group
-let navSort = localStorage.getItem("csd.consoleNavSort") || "recent";
-let navDir  = localStorage.getItem("csd.consoleNavDir")  || "desc";
-let navTopicFilter = localStorage.getItem("csd.consoleNavTopicFilter") || "";
+// sidebar model: project accordion + sortable columns + Archive tab + content search
+let navTab   = "projects";                                          // projects | archive
+let navSort  = localStorage.getItem("csd.navSort2") || "recent";    // column sort key
+let navDir   = localStorage.getItem("csd.navDir2")  || "desc";
+let navOpenProj = localStorage.getItem("csd.navOpenProj") || null;  // single-open accordion
+let navScope = localStorage.getItem("csd.navScope") || "both";      // title | content | both
+let navQuery = "";
+let navSearchMatches = null;   // {session_id: snippet} from /api/search, or null while pending
+let navExpanded = new Set();   // mobile: rows expanded to reveal hidden columns
+let navEditing = null;         // session_id being renamed inline
+let navMobile = matchMedia("(max-width:760px)").matches;
 
 function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
                                      : (s.mtime ? s.mtime*1000 : 0); }
@@ -1018,169 +1086,232 @@ function stateTitle(s){
 }
 function stateDot(s){ return `<span class="${dotClass(s)}" title="${esc(stateTitle(s))}"></span>`; }
 
-const SORT_CMP = {
-  recent:   (a,b) => lastMs(a) - lastMs(b),
-  priority: (a,b) => (priRank(a) - priRank(b)) || (lastMs(a) - lastMs(b)),
-  title:    (a,b) => dispTitle(a).localeCompare(dispTitle(b)),
-  project:  (a,b) => projName(a).localeCompare(projName(b)) || (lastMs(b) - lastMs(a)),
-  topic:    (a,b) => topicName(a).localeCompare(topicName(b)) || (lastMs(b) - lastMs(a)),
-  subtopic: (a,b) => subName(a).localeCompare(subName(b)) || (lastMs(b) - lastMs(a)),
-  activity: (a,b) => (stateRank(a) - stateRank(b)) || (lastMs(b) - lastMs(a)),
+/* ---------- sidebar helpers (project accordion + sortable columns) ---------- */
+function startMs(s){ return s.started_at ? new Date(s.started_at).getTime() : lastMs(s); }
+const NAVCMP = {
+  recent:  (a,b)=> lastMs(a)-lastMs(b),
+  started: (a,b)=> startMs(a)-startMs(b),
+  idle:    (a,b)=> lastMs(b)-lastMs(a),
+  turns:   (a,b)=> (a.msg_count||0)-(b.msg_count||0),
+  ctx:     (a,b)=> (a.ctx_tokens||0)-(b.ctx_tokens||0),
+  prio:    (a,b)=> priRank(a)-priRank(b),
+  title:   (a,b)=> dispTitle(a).localeCompare(dispTitle(b)),
+  state:   (a,b)=> stateRank(a)-stateRank(b),
+  project: (a,b)=> projName(a).localeCompare(projName(b)) || (lastMs(b)-lastMs(a)),
 };
-const SORT_COLS = [["recent","date"],["activity","activity"],["priority","priority"],
-                   ["title","title"],["project","folder"],["topic","topic"],
-                   ["subtopic","subtopic"]];
 
-function setNavView(v){ navView = v; localStorage.setItem("csd.consoleNavView", v); renderNav(); }
-function setTopicFilter(v){ navTopicFilter = v;
-  localStorage.setItem("csd.consoleNavTopicFilter", v); renderNav(); }
-
-function setNavSort(key){
-  if(key === navSort) navDir = navDir === "desc" ? "asc" : "desc";   // re-click flips
-  else { navSort = key;
-         navDir = ["title","project","topic","subtopic","activity"].includes(key) ? "asc" : "desc"; }
-  localStorage.setItem("csd.consoleNavSort", navSort);
-  localStorage.setItem("csd.consoleNavDir", navDir);
-  renderNav();
+const NAV_MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function dtCell(ms, hot){
+  if(!ms) return `<div class="cdt"><b>—</b></div>`;
+  const d = new Date(ms), p = n => String(n).padStart(2,"0");
+  return `<div class="cdt${hot?" hot":""}"><b>${NAV_MON[d.getMonth()]} ${d.getDate()}</b><small>${p(d.getHours())}:${p(d.getMinutes())}</small></div>`;
 }
-
-function navControls(d){
-  const topics = (d && d.topics) || {};
-  const vchip = (v,lbl,tip) =>
-    `<span class="sortchip ${navView===v?"on":""}" onclick="setNavView('${v}')" title="${tip}">${lbl}</span>`;
-  let html = `<div class="navrow"><span class="lbl">view</span>
-    ${vchip("sort","sort","Flat, sortable columns")}${vchip("group","group","Topic › subtopic tree")}</div>`;
-  if(navView === "sort"){
-    const chip = ([key,label]) => {
-      const on = navSort === key, arr = on ? (navDir==="desc"?" ↓":" ↑") : "";
-      return `<span class="sortchip ${on?"on":""}" onclick="setNavSort('${key}')"
-        title="sort by ${label}${on?" ("+navDir+") — click to flip":""}">${label}${arr}</span>`;
-    };
-    html += `<div class="navrow"><span class="lbl">sort</span>${SORT_COLS.map(chip).join("")}</div>`;
-    const tnames = Object.keys(topics).sort((a,b)=>a.toLowerCase().localeCompare(b.toLowerCase()));
-    if(tnames.length)
-      html += `<div class="navrow"><span class="lbl">topic</span>
-        <select class="navfilter" onchange="setTopicFilter(this.value)">
-          <option value="" ${navTopicFilter===""?"selected":""}>all</option>
-          ${tnames.map(t=>`<option value="${esc(t)}" ${navTopicFilter===t?"selected":""}>${esc(t)}</option>`).join("")}
-          <option value="__none__" ${navTopicFilter==="__none__"?"selected":""}>(untopiced)</option>
-        </select></div>`;
-  }
-  return html;
+function dtStr(ms){ if(!ms) return "—"; const d=new Date(ms),p=n=>String(n).padStart(2,"0");
+  return `${NAV_MON[d.getMonth()]} ${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+function idleTxt(s){
+  const t = lastMs(s); if(!t) return "—";
+  const m = Math.max(0, Math.round((Date.now()-t)/60000));
+  if(m<60) return m+"m";
+  if(m<1440) return Math.floor(m/60)+"h"+(m%60?` ${m%60}m`:"");
+  return Math.floor(m/1440)+"d "+Math.floor((m%1440)/60)+"h";
 }
-
-function setNavSub(d){
-  const nproj = new Set(d.sessions.map(s => s.project_label || s.project)).size;
-  // one-line activity census — "waiting for you" is emphasised (it's your move)
-  const c = {working:0, waiting:0, idle:0, stale:0};
-  for(const s of d.sessions) if(c[s.state] != null) c[s.state]++;
-  const bits = [];
-  if(c.working) bits.push(`${c.working} working`);
-  if(c.waiting) bits.push(`<b>${c.waiting} waiting for you</b>`);
-  if(c.idle) bits.push(`${c.idle} idle`);
-  if(c.stale) bits.push(`${c.stale} stale`);
-  const census = bits.length ? `<div class="navcensus">${bits.join(" · ")}</div>` : "";
-  document.getElementById("navsub").innerHTML =
-    `${d.sessions.length} ${showArchived?"archived":"sessions"} · ${nproj} projects
-     <a class="navtog" onclick="toggleArchived()">${showArchived?"← live":`archived (${d.archived_count||0})`}</a>${census}`;
-}
-
-/* Group view: Topic › Subtopic collapsible tree. Untopiced sessions fall under
-   an "(untopiced)" group (last); topic-but-no-subtopic under "(no subtopic)"
-   inside the topic. Rows inside a group keep the active flat sort. */
-const UNT = "__untopiced__", NOSUB = "__nosub__";
-function renderNavGroup(d){
-  const dir = navDir === "asc" ? 1 : -1;
-  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
-  const byTopic = new Map();
-  for(const s of d.sessions){
-    const t = s.topic || UNT;
-    const st = s.topic ? (s.subtopic || NOSUB) : NOSUB;
-    if(!byTopic.has(t)) byTopic.set(t, new Map());
-    const sm = byTopic.get(t);
-    if(!sm.has(st)) sm.set(st, []);
-    sm.get(st).push(s);
-  }
-  const alpha = (a,b,sentinel) => a===sentinel ? 1 : b===sentinel ? -1
-    : a.toLowerCase().localeCompare(b.toLowerCase());
-  let html = "";
-  for(const t of [...byTopic.keys()].sort((a,b)=>alpha(a,b,UNT))){
-    const sm = byTopic.get(t);
-    const tcount = [...sm.values()].reduce((n,a)=>n+a.length,0);
-    const tkey = "t:"+t, tcol = !!navSec[tkey];
-    html += `<div class="sec topicsec" data-k="${esc(tkey)}" onclick="toggleSec(this)">
-      <span class="tw">${tcol?"▸":"▾"}</span>▦ ${esc(t===UNT?"(untopiced)":t)}
-      <span class="n">· ${tcount}</span></div>`;
-    if(tcol) continue;
-    for(const st of [...sm.keys()].sort((a,b)=>alpha(a,b,NOSUB))){
-      const rows = sm.get(st).slice().sort((a,b)=>dir*cmp(a,b));
-      if(t === UNT){ for(const s of rows) html += sessRow(s, d, true); continue; }
-      const stkey = "ts:"+t+"|"+st, stcol = !!navSec[stkey];
-      html += `<div class="proj subtopicsec" data-k="${esc(stkey)}" onclick="toggleSec(this)">
-        <span class="tw">${stcol?"▸":"▾"}</span>${esc(st===NOSUB?"(no subtopic)":st)}
-        <span class="n">· ${rows.length}</span></div>`;
-      if(!stcol) for(const s of rows) html += sessRow(s, d, true);
-    }
-  }
-  document.getElementById("navlist").innerHTML =
-    html || `<div class="empty">${showArchived?"nothing archived":"no recent sessions"}</div>`;
-}
-
-/* Per-section collapse state, persisted. Keys: "b:<pri>" | "p:<proj>".
-   Everything is EXPANDED by default; only explicit user collapses are stored.
-   (v2 key: the v1 scheme nested priority→project and could poison first paint
-   into a headers-only view.) */
-let navSec = {};
-try { navSec = JSON.parse(localStorage.getItem("csd.consoleNavSec2") || "{}"); }
-catch(e){ navSec = {}; }
-function toggleSec(el){
-  const k = el.dataset.k;
-  navSec[k] = !navSec[k];
-  localStorage.setItem("csd.consoleNavSec2", JSON.stringify(navSec));
-  renderNav();
-}
-
-function dshort(ts){
-  if(!ts) return "—";
-  const d = new Date(ts);
-  const t = d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"});
-  return d.toDateString() === new Date().toDateString()
-    ? t : d.toLocaleDateString([], {month:"short", day:"numeric"}) + " " + t;
-}
-
-/* Context size as a bucketed gauge, not printed text; tooltip has the number. */
+const kfmt = t => Math.round(t/1000)+"k";
+const ckCls = t => t>=350000 ? "bad" : t>=200000 ? "warn" : "";
+/* three-bar context gauge — still used by the rail Context pane (renderContext) */
 function ctxGauge(tok){
   if(tok == null) return "";
   const lvl = tok < 70000 ? 1 : tok < 140000 ? 2 : 3;
   return `<span class="ctx c${lvl}" title="context ≈ ${(tok/1000).toFixed(0)}k tokens (${tok.toLocaleString()})"><i></i><i></i><i></i></span>`;
 }
+function initialsOf(label){ return (label||"?").split(/[-_ ]/).filter(Boolean).slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
-function sessRow(s, d, tagProject){
-  const busy = d.summarizing?.[s.session_id] === "running";
-  const pri = PRI_ORDER.includes(s.priority) ? s.priority : null;
-  const pg = pri ? `<span class="prig p-${pri}" title="priority: ${pri}">${PRI_GLYPH[pri]}</span>` : "";
-  // Project identity lives on the row when the row isn't under its own
-  // project header; a worktree session always shows its worktree leaf.
-  const ptag = tagProject && s.project_label
-    ? `<span class="ptag">${esc(s.project_label)}${s.worktree?" ⌥"+esc(s.worktree):""} ·</span>` : "";
-  const wtag = !tagProject && s.worktree
-    ? `<span class="wtag">⌥${esc(s.worktree)} ·</span>` : "";
-  // TRUE last activity for the recency stamp (last_ts), file mtime as fallback.
-  const last = s.last_ts || new Date(s.mtime*1000).toISOString();
-  const msgs = s.msg_count != null ? ` · ${s.msg_count}` : "";
-  const ab = s.agents ? ` · <span class="abadge" title="${s.agents.total} subagent sidechain(s)${s.agents.live?", "+s.agents.live+" live":""}">⇲${s.agents.total}${s.agents.live?`<span class="alive"> ${s.agents.live}▶</span>`:""}</span>` : "";
-  // The tldr rides as the row's hover line — the compact layout stays intact.
-  const tl = s.tldr?.headline ? ` title="tl;dr — ${esc(s.tldr.headline)}"` : "";
-  // A user-set title overrides the derived one; ✎ marks that it's hand-set.
-  const disp = s.user_title ? `${esc(s.user_title)}<span class="tmark" title="custom title">✎</span>`
-                            : esc(s.title);
-  return `<div class="sess ${s.session_id===curId?"active":""}" onclick="openSession('${s.session_id}')">
-    ${stateDot(s)}
-    <span class="meta">
-      <div class="ttl"${tl}>${pg}${ptag}${wtag}${disp}${busy?' <span class="tag">summarizing</span>':""}</div>
-      <div class="sub" title="started ${esc(s.started_at||"?")} · last message ${last}${s.msg_count!=null?" · "+s.msg_count+" message records":""}">${dshort(s.started_at)} → ${rel(last)}${msgs}${ab}</div>
-    </span>
-    ${ctxGauge(s.ctx_tokens)}</div>`;
+function navMatch(s){
+  const q = navQuery.trim().toLowerCase();
+  if(!q) return {hit:true, snip:""};
+  const inT = navScope!=="content" && dispTitle(s).includes(q);
+  const inC = navScope!=="title" && navSearchMatches && Object.prototype.hasOwnProperty.call(navSearchMatches, s.session_id);
+  return {hit: inT||inC, inC, snip: inC ? navSearchMatches[s.session_id] : ""};
+}
+
+/* priority flag cycle: normal(none) → low → med → high → critical → normal */
+const PRIO_CYCLE = ["normal","low","med","high","critical"];
+function prioOf(s){ return PRI_ORDER.includes(s.priority) ? s.priority : "normal"; }
+function cyclePrio(e, id){
+  e.stopPropagation();
+  const s = (navData && navData.sessions || []).find(x=>x.session_id===id); if(!s) return;
+  const nxt = PRIO_CYCLE[(PRIO_CYCLE.indexOf(prioOf(s))+1) % PRIO_CYCLE.length];
+  s.priority = nxt==="normal" ? null : nxt;
+  renderNav();
+  post("/api/priority", {session_id:id, priority: nxt==="normal" ? null : nxt});
+}
+
+/* inline title editing */
+function startTitleEdit(e, id){ e.stopPropagation(); navEditing = id; renderNav(); }
+function titleKey(e, id){
+  if(e.key==="Enter"){ e.preventDefault(); e.target.blur(); }
+  else if(e.key==="Escape"){ navEditing=null; renderNav(); }
+}
+function commitTitle(id, val){
+  const s = (navData && navData.sessions || []).find(x=>x.session_id===id);
+  const v = (val||"").trim();
+  navEditing = null;
+  if(s) s.user_title = v || null;
+  renderNav();
+  post("/api/title", {session_id:id, title: v || null});
+}
+
+/* mobile per-row expand */
+function toggleRowExpand(e, id){ e.stopPropagation(); navExpanded.has(id) ? navExpanded.delete(id) : navExpanded.add(id); renderNav(); }
+
+/* ---------- tabs / scope / sub / rail ---------- */
+function renderNavTabs(d){
+  const nproj = navTab==="projects" ? new Set((d.sessions||[]).map(s=>s.project_label||s.project)).size : null;
+  const arch = d.archived_count!=null ? d.archived_count : (navTab==="archive" ? (d.sessions||[]).length : 0);
+  const tab = (id,lbl,n) => `<span class="navtab ${navTab===id?"on":""}" onclick="setNavTab('${id}')">${lbl}${n!=null?` <b>${n}</b>`:""}</span>`;
+  document.getElementById("navtabs").innerHTML = tab("projects","Projects",nproj) + tab("archive","Archive",arch);
+}
+function renderNavScope(){
+  const c = (v,lbl)=>`<span class="sc ${navScope===v?"on":""}" onclick="setNavScope('${v}')">${lbl}</span>`;
+  document.getElementById("navscope").innerHTML = `search in ${c("title","titles")}${c("content","content")}${c("both","both")}`;
+}
+function setNavSubBar(d){
+  const el = document.getElementById("navsub");
+  if(navTab==="archive"){ el.textContent = `${(d.sessions||[]).length} archived sessions`; return; }
+  const nproj = new Set((d.sessions||[]).map(s=>s.project_label||s.project)).size;
+  const waiting = (d.sessions||[]).filter(s=>s.state==="waiting").length;
+  el.innerHTML = `${nproj} projects${waiting?` · <span class="mv">${waiting} waiting for you</span>`:""}`;
+}
+function renderNavRail(d){
+  const html = groupByProject(d.sessions||[]).map(g=>{
+    const n = g.sessions.filter(s=>s.state==="waiting").length;
+    return `<div class="railproj ${navOpenProj===g.key?"on":""}" title="${esc(g.label)}${n?` · ${n} waiting for you`:""}" onclick="railOpen('${esc(g.key)}')">${initialsOf(g.label)}${n?`<span class="raildot">${n}</span>`:""}</div>`;
+  }).join("");
+  document.getElementById("navrail").innerHTML = html;
+}
+function railOpen(key){ expandNav(); navTab="projects"; navOpenProj=key; localStorage.setItem("csd.navOpenProj", key); renderNav(); }
+
+/* ---------- grouping + rendering ---------- */
+function groupByProject(sessions){
+  const m = new Map();
+  for(const s of sessions){
+    const key = s.project_label || s.project || "?";
+    if(!m.has(key)) m.set(key, {key, label:key, sessions:[]});
+    m.get(key).sessions.push(s);
+  }
+  return [...m.values()].sort((a,b)=> a.label.toLowerCase().localeCompare(b.label.toLowerCase()));
+}
+
+function navCols(){
+  if(navMobile) return "12px minmax(0,1fr) 26px 46px 16px";
+  return navTab==="archive"
+    ? "12px minmax(0,1fr) 92px 44px 30px 54px 54px 46px"
+    : "12px minmax(0,1fr) 38px 44px 30px 54px 54px 46px";
+}
+function navTh(key, label, num){
+  const on = navSort===key, ar = on ? (navDir==="asc"?"▲":"▼") : "▲";
+  return `<div class="th ${num?"num":""} ${on?"on":"off"}" onclick="setNavSortKey('${key}')">${label}<span class="ar">${ar}</span></div>`;
+}
+
+function sessRow(s, showProject){
+  const id = s.session_id;
+  const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
+  const wt = s.worktree ? `<span class="brc">⌥${esc(s.worktree)}</span>` : "";
+  const ag = s.agents && s.agents.total ? `<span class="agc" title="${s.agents.total} subagent(s)${s.agents.live?`, ${s.agents.live} live`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>` : "";
+  const parts = [wt, ag].filter(Boolean);
+  const meta = parts.length ? parts.join(" ") : `<span style="color:#3b434d">—</span>`;
+  const m = navMatch(s);
+  const snip = (navQuery.trim() && m.inC && m.snip) ? `<div class="snip">${m.snip}</div>` : "";
+  const disp = s.user_title || s.title || id.slice(0,12);
+  const mark = s.user_title ? `<span class="tmark" title="custom title">✎</span>` : "";
+  const titleCell = navEditing===id
+    ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div></div>`
+    : `<div class="ctitle">
+         <div class="t"><span class="ttxt">${esc(disp)}${mark}</span>${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span></div>
+         <div class="m">${meta}</div>${snip}
+       </div>`;
+  const p = prioOf(s);
+  const prioCell = `<div class="cprio"><span class="prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span></div>`;
+  const working = s.state==="working";
+  const idleCell = working ? `<div class="cidle active" title="agent active now">active</div>`
+                           : `<div class="cidle" title="idle since last message">${idleTxt(s)}</div>`;
+  const arc = showProject ? " arch" : "";
+
+  if(navMobile){
+    const open = navExpanded.has(id);
+    const detail = open ? `<div class="sdetail">
+        <span>Turns <b>${s.msg_count!=null?s.msg_count:"—"}</b></span>
+        <span>Ctx <b class="ck ${ckCls(s.ctx_tokens||0)}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</b></span>
+        <span>Started <b>${s.started_at?dtStr(startMs(s)):"—"}</b></span>
+        <span>Last <b>${dtStr(lastMs(s))}</b></span>
+        ${showProject?`<span>Project <b>${esc(s.project_label||s.project||"")}</b></span>`:""}
+      </div>` : "";
+    return `<div class="sess${arc} ${id===curId?"active":""}" onclick="openSession('${id}')">
+      <div class="cstate">${stateDot(s)}</div>
+      ${titleCell}
+      ${prioCell}
+      ${idleCell}
+      <div class="cexp" title="show more" onclick="toggleRowExpand(event,'${id}')">${open?"▾":"▸"}</div>
+    </div>${detail}`;
+  }
+  return `<div class="sess${arc} ${id===curId?"active":""}" onclick="openSession('${id}')">
+    <div class="cstate">${stateDot(s)}</div>
+    ${titleCell}
+    ${showProject ? `<div class="cproj" title="${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</div>` : `<div class="cnum">${s.msg_count!=null?s.msg_count:"—"}</div>`}
+    <div class="ck ${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?s.ctx_tokens.toLocaleString()+' tokens':''}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</div>
+    ${prioCell}
+    ${dtCell(s.started_at?startMs(s):0)}
+    ${dtCell(lastMs(s), working)}
+    ${idleCell}
+  </div>`;
+}
+
+function sessionTable(list, showProject){
+  const sign = navDir==="asc" ? 1 : -1;
+  const rows = [...list].sort((a,b)=> sign * (NAVCMP[navSort]||NAVCMP.recent)(a,b));
+  const cls = showProject ? " arch" : "";
+  const col3 = navMobile ? "" : (showProject ? navTh("project","Project") : navTh("turns","Turns",true));
+  const head = navMobile
+    ? `<div class="thead${cls}"><div class="th off">•</div>${navTh("title","Title")}${navTh("prio","Prio")}${navTh("idle","Idle",true)}<div class="th off"></div></div>`
+    : `<div class="thead${cls}"><div class="th off" onclick="setNavSortKey('state')" title="sort by state">•</div>${navTh("title","Title")}${col3}${navTh("ctx","Ctx",true)}${navTh("prio","Prio")}${navTh("started","Started")}${navTh("recent","Last")}${navTh("idle","Idle",true)}</div>`;
+  return head + rows.map(s=>sessRow(s, showProject)).join("");
+}
+
+function renderProjects(d){
+  const q = navQuery.trim().toLowerCase();
+  let html = "";
+  for(const g of groupByProject(d.sessions||[])){
+    const nameMatch = g.label.toLowerCase().includes(q);
+    const matched = q ? g.sessions.filter(s=>navMatch(s).hit) : g.sessions;
+    if(q && !matched.length && !nameMatch) continue;
+    const open = q ? true : navOpenProj===g.key;
+    const waiting = g.sessions.filter(s=>s.state==="waiting").length;
+    const working = g.sessions.filter(s=>s.state==="working").length;
+    const badge = waiting ? `<span class="wbadge" title="${waiting} session(s) waiting for you"><i></i>${waiting}</span>` : "";
+    const workchip = working ? `<span class="wk" title="${working} agent(s) working">${working}▶</span>` : "";
+    html += `<div class="pblock"><div class="phead ${open?"open":""}" onclick="toggleProj('${esc(g.key)}')">
+        <span class="chev">${open?"▾":"▸"}</span>
+        <span class="pico">${initialsOf(g.label)}</span>
+        <span class="pname">${esc(g.label)}</span>
+        ${badge}${workchip}
+        <span class="pcount">${g.sessions.length}</span>
+      </div>${open ? sessionTable(q?matched:g.sessions, false) : ""}</div>`;
+  }
+  return html || `<div class="empty">${q?`no projects or sessions match “${esc(navQuery)}”`:"no recent sessions"}</div>`;
+}
+
+function renderArchiveList(d){
+  const q = navQuery.trim().toLowerCase();
+  const list = (d.sessions||[]).filter(s=> !q || navMatch(s).hit || (s.project_label||s.project||"").toLowerCase().includes(q));
+  return list.length ? sessionTable(list, true)
+                     : `<div class="empty">${q?"no archived sessions match":"nothing archived — “Summarize + archive” lands sessions here"}</div>`;
+}
+
+function toggleProj(key){ navOpenProj = (navOpenProj===key ? null : key); localStorage.setItem("csd.navOpenProj", navOpenProj||""); renderNav(); }
+function setNavSortKey(key){
+  if(navSort===key) navDir = navDir==="asc" ? "desc" : "asc";
+  else { navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc"; }
+  localStorage.setItem("csd.navSort2", navSort); localStorage.setItem("csd.navDir2", navDir);
+  renderNav();
 }
 
 async function loadNav(){
@@ -1201,25 +1332,58 @@ async function loadNav(){
 function renderNav(){
   if(!navData) return;
   const d = navData;
-  document.getElementById("navsort").innerHTML = navControls(d);
-
-  if(navView === "group"){ renderNavGroup(d); setNavSub(d); return; }
-
-  // Sort view: flat list, one sort column, asc/desc, optional topic filter.
-  let list = d.sessions;
-  if(navTopicFilter === "__none__") list = list.filter(s => !s.topic);
-  else if(navTopicFilter) list = list.filter(s => s.topic === navTopicFilter);
-  const dir = navDir === "asc" ? 1 : -1;
-  const cmp = SORT_CMP[navSort] || SORT_CMP.recent;
-  const rows = [...list].sort((a,b) => dir * cmp(a,b));
-  document.getElementById("navlist").innerHTML = rows.length
-    ? rows.map(s => sessRow(s, d, true)).join("")
-    : `<div class="empty">${showArchived ? "nothing archived"
-        : navTopicFilter ? "no sessions match this topic filter" : "no recent sessions"}</div>`;
-  setNavSub(d);
+  renderNavTabs(d);
+  renderNavScope();
+  setNavSubBar(d);
+  renderNavRail(d);
+  const list = document.getElementById("navlist");
+  list.style.setProperty("--cols", navCols());
+  list.innerHTML = navTab==="archive" ? renderArchiveList(d) : renderProjects(d);
+  const q = document.getElementById("navq");
+  if(q) q.placeholder = navTab==="archive" ? "search archived — titles & content…" : "search — titles & content…";
+  if(navEditing){ const el = document.querySelector("#navlist .tedit"); if(el){ el.focus(); el.select(); } }
 }
 
-function toggleArchived(){ showArchived = !showArchived; loadNav(); }
+function setNavTab(t){
+  if(navTab===t) return;
+  navTab = t; navQuery = ""; navSearchMatches = null; navEditing = null;
+  const q = document.getElementById("navq"); if(q) q.value = "";
+  showArchived = (t==="archive");
+  loadNav();                       // re-fetch with the right archived flag; renderNav paints
+}
+function setNavScope(v){
+  navScope = v; localStorage.setItem("csd.navScope", v); navSearchMatches = null; renderNav();
+  if(navScope!=="title" && navQuery.trim().length>=2) scheduleContentSearch();
+}
+
+let navSearchTimer=null, navSearchSeq=0;
+function onNavSearch(v){
+  navQuery = v; navSearchMatches = null; renderNav();
+  if(navScope!=="title" && v.trim().length>=2) scheduleContentSearch();
+}
+function scheduleContentSearch(){ clearTimeout(navSearchTimer); navSearchTimer = setTimeout(runContentSearch, 260); }
+async function runContentSearch(){
+  const q = navQuery.trim(); if(q.length<2) return;
+  const seq = ++navSearchSeq;
+  const ids = (navData && navData.sessions || []).map(s=>s.session_id);
+  let d;
+  try { const r = await post("/api/search", {q, ids, archived: showArchived}); d = r[1]; }
+  catch(e){ return; }
+  if(seq!==navSearchSeq) return;   // superseded by a newer keystroke
+  navSearchMatches = (d && d.matches) ? d.matches : {};
+  renderNav();
+}
+
+// the archived toggle name is still referenced elsewhere — map it to the tab
+function toggleArchived(){ setNavTab(navTab==="archive" ? "projects" : "archive"); }
+
+// wire the persistent search box + react to viewport (mobile) changes, once
+(function(){
+  const q = document.getElementById("navq");
+  if(q) q.addEventListener("input", e => onNavSearch(e.target.value));
+  try { matchMedia("(max-width:760px)").addEventListener("change", e => { navMobile = e.matches; renderNav(); }); }
+  catch(_){ /* older Safari */ }
+})();
 
 /* ---------- session detail ---------- */
 async function openSession(id){

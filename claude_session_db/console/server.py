@@ -2296,6 +2296,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "bad JSON"}, 400)
         # Route on the PATH alone: a POST may legitimately carry ?token=.
         route = urlparse(self.path).path
+
+        # Content search is session-independent: it matches the archive DB text
+        # (assistant content_blocks + user prompts) scoped to the visible ids.
+        if route == "/api/search":
+            q = (body.get("q") or "").strip()
+            ids = body.get("ids") or []
+            ids = ids[:500] if isinstance(ids, list) else []
+            if len(q) < 2 or not ids or not CSD_DSN:
+                return self._json({"matches": {}})
+            from .. import session_mgmt as mgmt
+            try:
+                return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q)})
+            except Exception as e:              # DB unreachable → degrade, never 500
+                return self._json({"matches": {}, "error": str(e)})
+
         sid = body.get("session_id", "")
         cwd = body.get("cwd")
         if not sid:

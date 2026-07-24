@@ -43,6 +43,7 @@ Endpoints
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
 """
+import gzip
 import hmac
 import json
 import os
@@ -71,6 +72,32 @@ FULL_MAX_BYTES = 24 * 1024 * 1024  # guard: tail huge transcripts
 MAX_NAV_SESSIONS = 40
 MAX_AGE_H = 72
 ANSWER_LOG = ROOT / "answers.log"
+
+# Unauthenticated *page* loads get this instead of a raw-JSON 401: a phone
+# with an expired cookie needs a paste-the-token form, not a JSON wall it
+# can't act on. API paths keep the JSON 401 (the client guards on it).
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark"><title>session console — sign in</title>
+<style>
+  body{background:#0d1117;color:#e6edf3;font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       display:flex;align-items:center;justify-content:center;min-height:100dvh;margin:0;padding:16px;}
+  form{background:#161b22;border:1px solid #2d333b;border-radius:12px;padding:24px;width:min(380px,94vw);}
+  h1{font-size:15px;margin:0 0 6px;}
+  p{color:#9da7b3;font-size:12.5px;margin:0 0 14px;}
+  input{width:100%;box-sizing:border-box;background:#0d1117;border:1px solid #2d333b;border-radius:8px;
+        color:#e6edf3;padding:12px 14px;font-size:16px;outline:none;margin-bottom:12px;}
+  input:focus{border-color:#4c8dff;}
+  button{width:100%;min-height:44px;background:#4c8dff;border:none;border-radius:8px;
+         color:#fff;font-size:14px;font-weight:600;cursor:pointer;}
+</style></head><body>
+<form onsubmit="location='/?token='+encodeURIComponent(t.value.trim());return false">
+  <h1>kmcp · session console</h1>
+  <p>This bind requires a token (printed on the console's stdout, or
+     <code>$CSD_CONSOLE_TOKEN</code>). It sets a 7-day cookie.</p>
+  <input id="t" type="password" placeholder="paste token…" autocomplete="off" autofocus>
+  <button type="submit">Sign in</button>
+</form></body></html>"""
 
 KMCP_RE = re.compile(r"^mcp__.+__(?P<base>[a-z_]+)$")
 READ_TOOLS = {"get_entry", "get_section", "get_entries"}
@@ -2042,16 +2069,35 @@ def _loopback(host: str) -> bool:
 # HTTP
 # ----------------------------------------------------------------------------
 class Handler(SimpleHTTPRequestHandler):
+    # HTTP/1.1 keep-alive: the client polls every few seconds, and 1.0's
+    # connection-per-request costs a TCP handshake per poll (worst on phone
+    # wifi). Every response path below sends an exact Content-Length, which
+    # keep-alive requires.
+    protocol_version = "HTTP/1.1"
+
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(ROOT), **kw)
 
     def log_message(self, *a):
         pass
 
-    def _json(self, payload, code=200):
-        body = json.dumps(payload).encode()
+    def _maybe_gzip(self, body: bytes):
+        """gzip a response body when the client accepts it and it's worth it."""
+        if len(body) > 1024 and "gzip" in (self.headers.get("Accept-Encoding") or ""):
+            return gzip.compress(body, 5), True
+        return body, False
+
+    def _json(self, payload, code=200, extra_headers=None):
+        body = json.dumps(payload, separators=(",", ":")).encode()
+        body, gz = self._maybe_gzip(body)
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        if gz:
+            self.send_header("Content-Encoding", "gzip")
+            self.send_header("Vary", "Accept-Encoding")
+        if extra_headers:
+            for k, v in extra_headers.items():
+                self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -2076,8 +2122,19 @@ class Handler(SimpleHTTPRequestHandler):
         if tok and hmac.compare_digest(tok, TOKEN):
             self._set_cookie = from_query
             return True
-        # JSON (not plain text) so a token-protected bind's 401 doesn't trip the
-        # same client-side JSON.parse crash the API paths guard against.
+        # A navigational page load gets an HTML login form (a phone can't
+        # hand-edit the URL); API paths keep the JSON 401 so a token-protected
+        # bind's 401 doesn't trip the client-side JSON.parse guard.
+        path = urlparse(self.path).path
+        if (self.command == "GET" and not path.startswith("/api/")
+                and "text/html" in (self.headers.get("Accept") or "")):
+            body = LOGIN_PAGE.encode()
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return False
         self._json({"error": "unauthorized — append ?token=<secret>"}, 401)
         return False
 
@@ -2142,9 +2199,32 @@ class Handler(SimpleHTTPRequestHandler):
             sid = (parse_qs(u.query).get("id") or [""])[0]
             if not sid:
                 return self._json({"error": "id required"}, 400)
+            # Conditional poll: the transcript's (mtime, size) is a natural
+            # validator, and a 304 skips both the full JSONL re-parse and the
+            # multi-MB payload the client re-downloads every few seconds. A 30s
+            # time bucket is folded in because parts of the payload move
+            # without the file changing (state/mtime_age_s, tldr cache, angles
+            # rail, SUMMARIZING) — worst-case staleness is one bucket, and
+            # client actions force an unconditional refresh.
+            etag = None
+            p = find_session(sid)
+            if p is not None:
+                try:
+                    st = p.stat()
+                    etag = (f'"{st.st_mtime_ns:x}-{st.st_size:x}-'
+                            f'{int(time.time() // 30):x}"')
+                    if self.headers.get("If-None-Match") == etag:
+                        self.send_response(304)
+                        self.send_header("ETag", etag)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
+                except OSError:
+                    etag = None
             try:
                 s = build_session(sid)
-                return self._json(s) if s else self._json({"error": "not found"}, 404)
+                return self._json(s, extra_headers={"ETag": etag} if etag else None) \
+                    if s else self._json({"error": "not found"}, 404)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/detail":
@@ -2186,9 +2266,12 @@ class Handler(SimpleHTTPRequestHandler):
                 head=int(q["head"][0]) if "head" in q else None,
                 tail=int(q["tail"][0]) if "tail" in q else None,
                 full=(q.get("full") or ["0"])[0] == "1")
-            body = text.encode()
+            body, gz = self._maybe_gzip(text.encode())
             self.send_response(code)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
+            if gz:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

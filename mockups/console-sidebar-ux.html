@@ -21,8 +21,9 @@
     display:grid; grid-template-columns:var(--nav-w) minmax(0,1fr) 300px;
     height:100vh; overflow:hidden;
   }
+  body.navmin{ --nav-w:56px }
 
-  /* ---------- shell placeholders (dimmed, just for context) ---------- */
+  /* ---------- shell placeholders ---------- */
   #main,#rail{min-width:0; overflow:hidden}
   #main{background:var(--bg); border-right:1px solid var(--border);
         display:flex; align-items:center; justify-content:center}
@@ -30,13 +31,30 @@
   .ghost{color:#3b434d; font:12px var(--mono); text-align:center; user-select:none; line-height:2}
   #rail .ghost{padding:16px; text-align:left}
 
-  /* ---------- left: the mock focus ---------- */
-  #nav{background:var(--surface); border-right:1px solid var(--border);
-       display:flex; flex-direction:column; min-width:0}
+  /* ---------- left nav ---------- */
+  #nav{background:var(--surface); border-right:1px solid var(--border); min-width:0}
+  #navfull{display:flex; flex-direction:column; height:100%; min-width:0}
+  body.navmin #navfull{display:none}
+
+  /* collapsed rail */
+  #navrail{display:none; flex-direction:column; align-items:center; gap:8px; padding:10px 0}
+  body.navmin #navrail{display:flex}
+  .railbtn{width:36px; height:30px; border:1px solid var(--border); border-radius:7px;
+           background:transparent; color:var(--ink2); cursor:pointer; font-size:15px;
+           display:grid; place-items:center}
+  .railbtn:hover{background:var(--surface2); color:var(--ink)}
+  .railproj{position:relative; width:34px; height:34px; border-radius:8px; background:var(--surface3);
+            color:var(--ink2); display:grid; place-items:center; font:11px var(--mono); cursor:pointer}
+  .railproj:hover{background:var(--surface2); color:var(--ink)}
+  .railproj.on{box-shadow:inset 0 0 0 1.5px var(--accent); color:var(--ink)}
+  .raildot{position:absolute; top:-3px; right:-3px; min-width:14px; height:14px; padding:0 3px;
+           border-radius:7px; background:var(--warn); color:#0d1117; font:8px var(--mono); font-weight:700;
+           display:grid; place-items:center; border:1.5px solid var(--surface)}
 
   /* top / tabs */
-  .navtop{padding:11px 14px 9px; border-bottom:1px solid var(--border);
+  .navtop{padding:10px 14px 9px; border-bottom:1px solid var(--border);
           position:sticky; top:0; background:var(--surface); z-index:4}
+  .tabrow{display:flex; align-items:center; justify-content:space-between}
   .tabs{display:flex; gap:16px; align-items:center}
   .tab{cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
        padding:2px 0 6px; border-bottom:2px solid transparent}
@@ -44,8 +62,12 @@
   .tab:hover{color:var(--ink2)}
   .tab.on{color:var(--ink); border-bottom-color:var(--accent)}
   .tab.on b{color:var(--accent)}
+  .collapse{background:transparent; border:none; color:var(--muted); font-size:16px; cursor:pointer;
+            padding:0 2px; line-height:1}
+  .collapse:hover{color:var(--ink)}
   .navtop .sub{color:var(--muted); font-size:11px; margin-top:5px}
-  .navtop .sub .w{color:var(--warn); font-weight:600}
+  .navtop .sub .mv{color:var(--warn); font-weight:600}
+  .navtop .sub .wt{color:var(--warn); opacity:.8}
 
   .search{margin-top:8px; width:100%; background:var(--bg); border:1px solid var(--border);
           border-radius:6px; padding:5px 9px; color:var(--ink); font-size:12.5px; font-family:inherit}
@@ -54,7 +76,7 @@
 
   .scroll{overflow-y:auto; flex:1; min-height:0}
 
-  /* ---------- project accordion (always visible) ---------- */
+  /* ---------- project accordion ---------- */
   .pblock{border-bottom:1px solid #21262d}
   .phead{display:flex; align-items:center; gap:8px; padding:9px 14px; cursor:pointer}
   .phead:hover{background:var(--surface2)}
@@ -65,12 +87,15 @@
   .phead .pname{font-size:13px; font-weight:600; flex:1; min-width:0;
                 white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
   .phead.open .pname{color:var(--ink)}
-  .wbadge{flex:none; background:rgba(210,153,34,.15); color:var(--warn);
-          border:1px solid rgba(210,153,34,.4); font:10px var(--mono); font-weight:600;
-          padding:1px 7px; border-radius:10px; display:inline-flex; align-items:center; gap:4px}
-  .wbadge i{width:5px; height:5px; border-radius:50%; background:var(--warn); display:block}
+  .wbadge{flex:none; font:10px var(--mono); font-weight:600; padding:1px 7px; border-radius:10px;
+          display:inline-flex; align-items:center; gap:4px}
+  .wbadge i{width:5px; height:5px; border-radius:50%; display:block}
+  .wbadge.move{background:rgba(210,153,34,.16); color:var(--warn); border:1px solid rgba(210,153,34,.45)}
+  .wbadge.move i{background:var(--warn)}
+  .wbadge.wait{background:transparent; color:var(--warn); opacity:.85; border:1px solid rgba(210,153,34,.3)}
+  .wbadge.wait i{background:transparent; border:1px solid var(--warn)}
   .wk{flex:none; color:var(--accent); font:10px var(--mono); font-weight:600}
-  .pcount{flex:none; color:var(--muted); font:11px var(--mono); min-width:20px; text-align:right}
+  .pcount{flex:none; color:var(--muted); font:11px var(--mono); min-width:18px; text-align:right}
 
   /* ---------- session table ---------- */
   .thead{display:grid; grid-template-columns:var(--cols); align-items:end;
@@ -95,24 +120,28 @@
   .cstate{display:flex; justify-content:center}
   .dot{width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none}
   .dot.working{background:var(--accent); box-shadow:0 0 0 3px rgba(76,141,255,.18)}
-  .dot.waiting{background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.18)}
+  .dot.move{background:var(--warn); box-shadow:0 0 0 3px rgba(210,153,34,.18)}
+  .dot.wait{background:transparent; border:1.5px solid var(--warn)}
   .dot.idle{background:var(--muted)}
   .dot.closed{background:transparent; border:1.5px solid #3b434d}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
   .dot.working{animation:pulse 1.6s ease-in-out infinite}
 
   .ctitle{min-width:0}
-  .ctitle .t{font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .ctitle .t{display:flex; align-items:center; gap:5px; font-size:12.5px}
+  .ctitle .ttxt{white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .edit{flex:none; color:var(--muted); font-size:11px; cursor:pointer; opacity:0; transition:opacity .1s}
+  .srow:hover .edit{opacity:.55}
+  .edit:hover{opacity:1; color:var(--accent)}
+  .tedit{width:100%; background:var(--bg); border:1px solid var(--accent); border-radius:4px;
+         color:var(--ink); font:12.5px inherit; padding:2px 5px}
+  .tedit:focus{outline:none}
   .ctitle .m{display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono)}
   .brc{color:var(--purple)}
   .agc{color:var(--cyan)}
   .cproj{font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
 
-  .turns{display:flex; flex-direction:column; align-items:flex-end; gap:3px}
-  .turns b{font:12px var(--mono); font-weight:600; color:var(--ink)}
-  .turns .tb{width:100%; height:3px; border-radius:2px; background:#21262d; overflow:hidden}
-  .turns .tb i{display:block; height:100%; background:var(--ink2); border-radius:2px}
-
+  .cnum{text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink)}
   .ck{text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink)}
   .ck.warn{color:var(--warn)} .ck.bad{color:var(--bad)}
 
@@ -121,10 +150,10 @@
   .cdt small{font-size:10px; color:var(--muted)}
   .cdt.hot b{color:var(--accent)}
 
-  /* ---------- footer legend ---------- */
+  /* footer legend */
   .navfoot{border-top:1px solid var(--border); padding:9px 14px; background:var(--surface);
            display:flex; flex-direction:column; gap:6px}
-  .legend{display:flex; gap:13px; align-items:center; font-size:11px; color:var(--muted); flex-wrap:wrap}
+  .legend{display:flex; gap:12px; align-items:center; font-size:11px; color:var(--muted); flex-wrap:wrap}
   .legend span{display:inline-flex; align-items:center; gap:5px}
   .hint{font:10px var(--mono); color:var(--muted); line-height:1.5}
   .empty{padding:22px 14px; text-align:center; color:var(--muted); font-size:12px}
@@ -138,16 +167,20 @@
 <body>
 
 <aside id="nav">
-  <div class="navtop" id="navtop"></div>
-  <div class="scroll" id="scroll"></div>
-  <div class="navfoot">
-    <div class="legend">
-      <span><i class="dot working"></i> working</span>
-      <span><i class="dot waiting"></i> waiting</span>
-      <span><i class="dot idle"></i> idle</span>
-      <span><i class="dot closed"></i> closed</span>
+  <div id="navrail"></div>
+  <div id="navfull">
+    <div class="navtop" id="navtop"></div>
+    <div class="scroll" id="scroll"></div>
+    <div class="navfoot">
+      <div class="legend">
+        <span><i class="dot working"></i> working</span>
+        <span><i class="dot move"></i> your move</span>
+        <span><i class="dot wait"></i> waiting</span>
+        <span><i class="dot idle"></i> idle</span>
+        <span><i class="dot closed"></i> closed</span>
+      </div>
+      <div class="hint">Started = first message · Last msg = most recent user turn · click a header to sort ↕</div>
     </div>
-    <div class="hint">Started = first message · Last msg = most recent user turn · click a column header to sort ↕</div>
   </div>
 </aside>
 
@@ -164,12 +197,12 @@ const PROJECTS = [
   {id:"p6-tools",          label:"p6-tools",          path:"~/GitHub/p6-tools"},
   {id:"consulting-reg",    label:"consulting-register",path:"~/GitHub/consulting-register-db"},
 ];
-// state: working (agent busy) | waiting (your move) | idle | closed
-// ctx tokens · turns · start (first msg) · last (most recent user turn) · arch = archived
+// state: working (agent busy) | move (your move — agent handed back / asked you)
+//      | wait (agent done, no explicit ask) | idle | closed
 const SESSIONS = [
   {p:"claude-session-db", title:"console sidebar UX — columns + project drill-in", ctx:372000, turns:96, state:"working", wt:"console-sidebar-ux", agents:0, start:"2026-07-24T15:40", last:"2026-07-24T17:18"},
-  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, state:"waiting", wt:"console-angles-merge", agents:2, start:"2026-07-24T14:05", last:"2026-07-24T16:42"},
-  {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, state:"waiting", wt:null, agents:0, start:"2026-07-24T16:02", last:"2026-07-24T16:54"},
+  {p:"claude-session-db", title:"≈#N equivalence badge for cherry-picked PRs",     ctx:142000, turns:71, state:"move",    wt:"console-angles-merge", agents:2, start:"2026-07-24T14:05", last:"2026-07-24T16:42"},
+  {p:"claude-session-db", title:"mobile UX pass on the console",                    ctx:120000, turns:52, state:"wait",    wt:null, agents:0, start:"2026-07-24T16:02", last:"2026-07-24T16:54"},
   {p:"claude-session-db", title:"angles session-management lens",                   ctx:76000,  turns:38, state:"idle",    wt:null, agents:3, start:"2026-07-24T13:10", last:"2026-07-24T15:45"},
   {p:"claude-session-db", title:"PR membership + full PR status in Git tab",        ctx:97000,  turns:44, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T21:30", last:"2026-07-24T14:10"},
   {p:"claude-session-db", title:"timeline rail tab",                                ctx:58000,  turns:33, state:"closed",  wt:null, agents:1, arch:true, start:"2026-07-24T10:15", last:"2026-07-24T12:30"},
@@ -177,31 +210,35 @@ const SESSIONS = [
   {p:"claude-session-db", title:"cache-control on nav fetch",                       ctx:31000,  turns:14, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T18:20", last:"2026-07-24T08:40"},
 
   {p:"knowledge-mcp", title:"asyncpg pool exhaustion under sweep convoy",           ctx:258000, turns:64, state:"working", wt:null, agents:0, start:"2026-07-24T16:30", last:"2026-07-24T17:16"},
-  {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, state:"waiting", wt:null, agents:1, start:"2026-07-24T15:00", last:"2026-07-24T16:20"},
+  {p:"knowledge-mcp", title:"hybrid_search rerank weighting",                       ctx:88000,  turns:41, state:"move",    wt:null, agents:1, start:"2026-07-24T15:00", last:"2026-07-24T16:20"},
   {p:"knowledge-mcp", title:"import_entries YAML footgun hardening",                ctx:52000,  turns:27, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T22:10", last:"2026-07-24T13:20"},
   {p:"knowledge-mcp", title:"embedding backfill batch sizing",                      ctx:34000,  turns:16, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T20:00", last:"2026-07-24T07:20"},
 
   {p:"p6-tools", title:"P6 API activity codes migration",                          ctx:231000, turns:83, state:"working", wt:"p6-migration", agents:0, start:"2026-07-24T14:50", last:"2026-07-24T17:05"},
-  {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, state:"waiting", wt:null, agents:2, start:"2026-07-24T14:20", last:"2026-07-24T16:10"},
+  {p:"p6-tools", title:"operator schedule steward wiring",                          ctx:112000, turns:48, state:"wait",    wt:null, agents:2, start:"2026-07-24T14:20", last:"2026-07-24T16:10"},
   {p:"p6-tools", title:"layouts export round-trip",                                 ctx:64000,  turns:29, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-24T12:30", last:"2026-07-24T14:50"},
 
-  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, state:"waiting", wt:null, agents:1, start:"2026-07-24T15:30", last:"2026-07-24T17:08"},
+  {p:"consulting-reg", title:"salesforce ops sync reconcile",                       ctx:129000, turns:55, state:"move",    wt:null, agents:1, start:"2026-07-24T15:30", last:"2026-07-24T17:08"},
   {p:"consulting-reg", title:"register-db schema for engagements",                  ctx:47000,  turns:22, state:"closed",  wt:null, agents:0, arch:true, start:"2026-07-23T16:30", last:"2026-07-24T14:00"},
 ];
 
 // ------------------------------------------------------------------ state
 let tab = "projects";        // projects | archive
-let openProj = "claude-session-db";  // which project is expanded (accordion); null = all collapsed
-let sort = "recent";         // recent | started | turns | ctx | title | state | project
-let dir  = "desc";
+let openProj = "claude-session-db";  // single-open accordion; null = all collapsed
+let sort = "recent";         // recent | started | turns | ctx | title | state | project — GLOBAL
+let dir  = "desc";           // default: last-msg desc
 let query = "";
 let active = null;
+let editing = null;          // session id being renamed inline
+let navCollapsed = false;    // whole-sidebar collapse
 
 const LIVE = SESSIONS.filter(s=>!s.arch);
 const ARCH = SESSIONS.filter(s=>s.arch);
+const sid  = s => s.p+"#"+s.start;
+const byId = id => SESSIONS.find(s=>sid(s)===id);
 
 const ms = s => Date.parse(s);
-const STATE_RANK = {working:0, waiting:1, idle:2, closed:3};
+const STATE_RANK = {working:0, move:1, wait:2, idle:3, closed:4};
 const CMP = {
   recent:  (a,b)=> ms(a.last)  - ms(b.last),
   started: (a,b)=> ms(a.start) - ms(b.start),
@@ -213,32 +250,48 @@ const CMP = {
 };
 
 // ------------------------------------------------------------------ helpers
-const esc = s => (s||"").replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const esc = s => (s||"").replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 function dtCell(iso, hot){
   const d = new Date(iso), p = n => String(n).padStart(2,"0");
-  return `<div class="cdt${hot?" hot":""}">
-    <b>${MON[d.getMonth()]} ${d.getDate()}</b><small>${p(d.getHours())}:${p(d.getMinutes())}</small></div>`;
+  return `<div class="cdt${hot?" hot":""}"><b>${MON[d.getMonth()]} ${d.getDate()}</b><small>${p(d.getHours())}:${p(d.getMinutes())}</small></div>`;
 }
 const kfmt = t => Math.round(t/1000)+"k";
 // context load colours: green <200k · yellow 200–350k · red ≥350k
 const ckClass = t => t>=350000 ? "bad" : t>=200000 ? "warn" : "";
-const waitingCount = pid => LIVE.filter(s=>s.p===pid && s.state==="waiting").length;
+const initialsOf = p => p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
+const countState = (pid,st) => LIVE.filter(s=>s.p===pid && s.state===st).length;
 
 // ------------------------------------------------------------------ render
 function render(){
+  document.body.classList.toggle("navmin", navCollapsed);
+  if(navCollapsed){ renderRail(); return; }
   renderTop();
   const sc = document.getElementById("scroll");
   sc.style.setProperty("--cols", tab==="archive"
     ? "12px minmax(0,1fr) 92px 46px 60px 60px"    // state title project ctx started last
     : "12px minmax(0,1fr) 44px 46px 60px 60px");  // state title turns   ctx started last
-  sc.innerHTML = tab==="archive" ? renderArchive() : renderProjects();
+  renderBody();
+}
+function renderBody(){
+  document.getElementById("scroll").innerHTML = tab==="archive" ? renderArchive() : renderProjects();
+  if(editing){ const el = document.querySelector(".tedit"); if(el){ el.focus(); el.select(); } }
+}
+
+function renderRail(){
+  const items = PROJECTS.map(p=>{
+    const n = countState(p.id,"move") + countState(p.id,"wait");
+    return `<div class="railproj ${openProj===p.id?"on":""}" title="${esc(p.label)}${n?` · ${n} need you`:""}"
+              onclick="railOpen('${p.id}')">${initialsOf(p)}${n?`<span class="raildot">${n}</span>`:""}</div>`;
+  }).join("");
+  document.getElementById("navrail").innerHTML =
+    `<button class="railbtn" onclick="toggleNav()" title="Expand sidebar">»</button>${items}`;
 }
 
 function tabstrip(){
-  const t = (id,lbl,n) =>
-    `<span class="tab ${tab===id?"on":""}" onclick="setTab('${id}')">${lbl} <b>${n}</b></span>`;
-  return `<div class="tabs">${t("projects","Projects",PROJECTS.length)}${t("archive","Archive",ARCH.length)}</div>`;
+  const t = (id,lbl,n) => `<span class="tab ${tab===id?"on":""}" onclick="setTab('${id}')">${lbl} <b>${n}</b></span>`;
+  return `<div class="tabrow"><div class="tabs">${t("projects","Projects",PROJECTS.length)}${t("archive","Archive",ARCH.length)}</div>
+          <button class="collapse" onclick="toggleNav()" title="Collapse sidebar">«</button></div>`;
 }
 
 function renderTop(){
@@ -248,47 +301,42 @@ function renderTop(){
       `<div class="sub">${ARCH.length} archived sessions</div>
        <input class="search" id="q" placeholder="filter archived sessions…" value="${esc(query)}">`;
   } else {
-    const totalWait = LIVE.filter(s=>s.state==="waiting").length;
+    const mv = LIVE.filter(s=>s.state==="move").length, wt = LIVE.filter(s=>s.state==="wait").length;
     top.innerHTML = tabstrip() +
-      `<div class="sub">${PROJECTS.length} projects · <span class="w">${totalWait} waiting for you</span></div>
+      `<div class="sub">${PROJECTS.length} projects · <span class="mv">${mv} your move</span> · <span class="wt">${wt} waiting</span></div>
        <input class="search" id="q" placeholder="filter projects & sessions…" value="${esc(query)}">`;
   }
   const q = document.getElementById("q");
   if(q) q.oninput = e=>{ query = e.target.value; renderBody(); };
 }
-function renderBody(){
-  document.getElementById("scroll").innerHTML = tab==="archive" ? renderArchive() : renderProjects();
-}
 
 function th(key, label, num){
-  const on = sort===key;
-  const ar = on ? (dir==="asc"?"▲":"▼") : "▲";
+  const on = sort===key, ar = on ? (dir==="asc"?"▲":"▼") : "▲";
   return `<div class="th ${num?"num":""} ${on?"on":"off"}" onclick="setSort('${key}')">${label}<span class="ar">${ar}</span></div>`;
 }
 
-// projects always visible; the open one expands its session table in place
 function renderProjects(){
   const q = query.toLowerCase();
   const blocks = PROJECTS.map(p=>{
     const all = LIVE.filter(s=>s.p===p.id);
     const nameMatch = p.label.toLowerCase().includes(q);
     const matched = q ? all.filter(s=>s.title.toLowerCase().includes(q)) : all;
-    if(q && !matched.length && !nameMatch) return "";           // hide non-matching projects while searching
-    const open = q ? true : openProj===p.id;                    // searching auto-expands matches
-    const wait = all.filter(s=>s.state==="waiting").length;
+    if(q && !matched.length && !nameMatch) return "";
+    const open = q ? true : openProj===p.id;
+    const mv = all.filter(s=>s.state==="move").length, wt = all.filter(s=>s.state==="wait").length;
     const work = all.filter(s=>s.state==="working").length;
-    const initials = p.label.split(/[-_]/).slice(0,2).map(w=>w[0]).join("").toUpperCase();
-    const badge = wait ? `<span class="wbadge" title="${wait} session(s) waiting for you"><i></i>${wait}</span>` : "";
+    const badges =
+      (mv ? `<span class="wbadge move" title="${mv} waiting on your reply (your move)"><i></i>${mv}</span>` : "") +
+      (wt ? `<span class="wbadge wait" title="${wt} done, no explicit ask (waiting)"><i></i>${wt}</span>` : "");
     const workchip = work ? `<span class="wk" title="${work} agent(s) working">${work}▶</span>` : "";
     const header = `<div class="phead ${open?"open":""}" onclick="toggleProj('${p.id}')">
         <span class="chev">${open?"▾":"▸"}</span>
-        <span class="pico">${initials}</span>
+        <span class="pico">${initialsOf(p)}</span>
         <span class="pname">${esc(p.label)}</span>
-        ${badge}${workchip}
+        ${badges}${workchip}
         <span class="pcount">${all.length}</span>
       </div>`;
-    const body = open ? sessionTable(q ? matched : all, false) : "";
-    return `<div class="pblock">${header}${body}</div>`;
+    return `<div class="pblock">${header}${open ? sessionTable(q ? matched : all, false) : ""}</div>`;
   }).join("");
   return blocks || `<div class="empty">no projects or sessions match “${esc(query)}”</div>`;
 }
@@ -300,7 +348,6 @@ function renderArchive(){
   return sessionTable(list, true);
 }
 
-// returns thead + rows for a list. showProject swaps the Turns column for Project.
 function sessionTable(source, showProject){
   const sign = dir==="asc" ? 1 : -1;
   const list = [...source].sort((a,b)=> sign * CMP[sort](a,b));
@@ -315,19 +362,25 @@ function sessionTable(source, showProject){
     ${th("recent","Last msg")}
   </div>`;
 
-  const maxTurns = Math.max(...list.map(s=>s.turns), 1);
-  const rows = list.map((s,i)=>{
-    const id = s.p+"#"+s.start;
+  const rows = list.map(s=>{
+    const id = sid(s);
     const wt = s.wt ? `<span class="brc">⌥${esc(s.wt)}</span>` : "";
     const ag = s.agents ? `<span class="agc">⇲${s.agents}</span>` : "";
     const meta = (wt||ag) ? `${wt}${ag}` : `<span style="color:#3b434d">—</span>`;
     const plabel = PROJECTS.find(p=>p.id===s.p)?.label || s.p;
     const col3cell = showProject
       ? `<div class="cproj" title="${esc(plabel)}">${esc(plabel)}</div>`
-      : `<div class="turns"><b>${s.turns}</b><div class="tb"><i style="width:${Math.round(s.turns/maxTurns*100)}%"></i></div></div>`;
+      : `<div class="cnum">${s.turns}</div>`;
+    const titleCell = editing===id
+      ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.title)}"
+             onclick="event.stopPropagation()" onkeydown="editKey(event,'${id}')" onblur="commitEdit('${id}',this.value)"></div></div>`
+      : `<div class="ctitle">
+           <div class="t"><span class="ttxt">${esc(s.title)}</span><span class="edit" title="rename" onclick="startEdit(event,'${id}')">✎</span></div>
+           <div class="m">${meta}</div>
+         </div>`;
     return `<div class="srow${cls} ${active===id?"active":""}" onclick="selectRow('${id}')">
       <div class="cstate"><span class="dot ${s.state}" title="${s.state}"></span></div>
-      <div class="ctitle"><div class="t">${esc(s.title)}</div><div class="m">${meta}</div></div>
+      ${titleCell}
       ${col3cell}
       <div class="ck ${ckClass(s.ctx)}" title="${s.ctx.toLocaleString()} tokens">${kfmt(s.ctx)}</div>
       ${dtCell(s.start)}
@@ -342,13 +395,27 @@ function sessionTable(source, showProject){
 }
 
 // ------------------------------------------------------------------ actions
-function setTab(t){ if(tab===t) return; tab=t; query=""; render(); }
+function setTab(t){ if(tab===t) return; tab=t; query=""; editing=null; render(); }
 function toggleProj(id){ openProj = (openProj===id ? null : id); renderBody(); }
-function selectRow(id){ active=id; renderBody(); }
+function selectRow(id){ if(editing) return; active=id; renderBody(); }
 function setSort(key){
   if(sort===key){ dir = dir==="asc"?"desc":"asc"; }
   else { sort=key; dir = (key==="title"||key==="project") ? "asc" : "desc"; }
   renderBody();
+}
+function toggleNav(){ navCollapsed = !navCollapsed; render(); }
+function railOpen(id){ navCollapsed=false; tab="projects"; openProj=id; render(); }
+
+// inline title editing
+function startEdit(e,id){ e.stopPropagation(); editing=id; renderBody(); }
+function commitEdit(id,val){
+  const s = byId(id); const v = (val||"").trim();
+  if(s && v) s.title = v;
+  editing=null; renderBody();
+}
+function editKey(e,id){
+  if(e.key==="Enter"){ e.preventDefault(); e.target.blur(); }
+  else if(e.key==="Escape"){ editing=null; renderBody(); }
 }
 
 render();

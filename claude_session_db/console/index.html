@@ -1876,7 +1876,35 @@ function renderContext(s){
       <span class="v">${s.counts?.events ?? "—"}</span></div>
     <div class="kv"><span class="k">kmcp reads</span>
       <span class="v">${s.counts?.reads ?? 0} · ${s.counts?.searches ?? 0} searches</span></div>
-    ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}`;
+    ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}` +
+    claudeMdGroup(s);
+}
+
+/* CLAUDE.md memory files — always-loaded context, resolved server-side from
+   the session's own cwd (global ~/.claude/CLAUDE.md + the project chain).
+   Missing files never reach the payload, so absent rows are simply absent. */
+function claudeMdGroup(s){
+  const mem = s.claudemd || [];
+  if(!mem.length) return "";
+  return `<div class="ang-g"><div class="ang-h">≡ memory (CLAUDE.md)</div>
+    ${mem.map((f,i)=>`<div class="ang-i" onclick="showClaudeMd(${i})" title="${esc(f.path)}">
+      <span class="ang-id">${f.scope==="global"?"G":"P"}</span> ${esc(shortPath(f.path))}
+      <span class="k" style="float:right">${kb(f.chars)}</span></div>`).join("")}</div>`;
+}
+
+async function showClaudeMd(n){
+  openRailSheet();
+  const box = document.getElementById("raildetail");
+  box.classList.remove("rl-empty");
+  box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">loading…</div>`;
+  let d;
+  try { d = await (await fetch(`/api/claudemd?id=${curId}&n=${n}`)).json(); }
+  catch(e){ box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">unavailable</div>`; return; }
+  if(d.error){ box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">${esc(d.error)}</div>`; return; }
+  box.innerHTML = `${RAIL_BACK}<h4>${d.scope==="global"?"Global":"Project"} CLAUDE.md</h4>
+    <div class="kv"><span class="k">path</span><span class="v">${esc(shortPath(d.path))}</span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${kb(d.chars)}${d.truncated?" · truncated":""}</span></div>
+    <pre class="ang-detail">${esc(d.content||"(empty)")}</pre>`;
 }
 
 /* Writes tab: the files/kmcp angle groups + every write-shaped tool call

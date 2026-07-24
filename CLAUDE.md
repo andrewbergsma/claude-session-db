@@ -124,10 +124,16 @@ Three commands, one seam — **the state dir**. Nothing serves what it mines.
 
 The console is **Direction A**: it renders a session's own transcript (chat
 turns, kmcp reads joined to their `tool_result` by `tool_use_id`) plus the angle
-headlines it reads *off disk*. Answer resumes the session (`claude -p --resume`,
-refused if the session wrote within 15s — the two-writer guard); Fork branches
-it, and a point fork writes a **new** session file rather than mutating the
-original.
+headlines it reads *off disk*. Answer resumes the session (`claude -p --resume`);
+while the session can't accept a write (a console-spawned run in flight, or the
+transcript wrote within 15s — the two-writer guard) the message is **queued, not
+refused**: a per-session FIFO at `$CSD_STATE_DIR/console/queue.json` (atomic
+replace, restart-safe) auto-dispatches head-of-queue through the same spawn path
+once the guard clears, strictly in order, one in flight per session. Queued
+turns render inline with a `⏸ queued` badge and are cancellable until dispatch
+begins; a failed dispatch (3 attempts, backoff) blocks its queue visibly until
+dismissed. Fork branches the session, and a point fork writes a **new** session
+file rather than mutating the original.
 
 **The console always mints a fork's session id itself** — a point fork writes
 the file under a `uuid4()` it chose, and an end fork passes that uuid to

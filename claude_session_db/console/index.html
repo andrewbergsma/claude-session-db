@@ -2,12 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0d1117">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="session console">
 <title>kmcp — session console</title>
 <style>
   :root {
+    color-scheme:dark;   /* native controls (selects, inputs, scrollbars) render dark */
     --bg:#0d1117; --surface:#161b22; --surface2:#1c2330; --surface3:#222a37;
-    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#6e7a87;
+    --border:#2d333b; --ink:#e6edf3; --ink2:#9da7b3; --muted:#8a95a1;
     --accent:#4c8dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --purple:#bc8cff;
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
@@ -16,13 +23,23 @@
   }
   * { box-sizing:border-box; margin:0; }
   html,body { height:100%; }
+  html { -webkit-text-size-adjust:100%; }
   body {
     background:var(--bg); color:var(--ink);
     font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
     display:grid; grid-template-columns:var(--nav-w) minmax(0,1fr) var(--rail-w);
-    grid-template-rows:100vh; height:100vh; overflow:hidden;
+    grid-template-rows:minmax(0,1fr);
+    height:100vh; height:100dvh;   /* dvh: iOS Safari's 100vh overshoots the visible viewport */
+    overflow:hidden; overscroll-behavior:none;
   }
-  @media (max-width:1100px){ body{ grid-template-columns:var(--nav-w) minmax(0,1fr); } #rail,#railgrip{ display:none; } }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  @media (prefers-reduced-motion: reduce){
+    *, *::before, *::after { animation-duration:.001ms !important;
+      animation-iteration-count:1 !important; transition-duration:.001ms !important; }
+  }
+
+  /* (responsive/mobile overrides live at the END of this stylesheet so they
+     win the cascade over the base rules below) */
 
   /* drag handle straddling the left edge of the right rail */
   #railgrip { position:fixed; top:0; bottom:0; right:var(--rail-w); width:9px;
@@ -42,7 +59,7 @@
 
   /* ---- left: projects + sessions ---- */
   #nav { background:var(--surface); border-right:1px solid var(--border);
-         overflow-y:auto; }
+         overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
   #nav .top { padding:12px 14px 8px; position:sticky; top:0; background:var(--surface);
               border-bottom:1px solid var(--border); z-index:2; }
   #nav .top .toprow { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -149,7 +166,9 @@
   .tldr-re { cursor:pointer; color:var(--muted); margin-left:6px; font:12px var(--mono); }
   .tldr-re:hover { color:var(--accent); }
 
-  #stream { flex:1; overflow-y:auto; padding:16px 20px 8px; }
+  #stream { flex:1; overflow-y:auto; overflow-x:hidden; padding:16px 20px 8px;
+            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #stream pre { max-width:100%; overflow:auto; }
   .ev { display:flex; gap:10px; margin:2px 0; }
   .ev .gutter { min-width:44px; text-align:right; color:var(--muted);
                 font:11px/1.6 var(--mono); flex:none; padding-top:2px; }
@@ -237,11 +256,12 @@
 
   /* compose */
   #compose { border-top:1px solid var(--border); padding:12px 20px; background:var(--surface);
-             display:flex; gap:8px; align-items:center; }
-  #compose input { flex:1; background:var(--bg); border:1px solid var(--border);
-                   border-radius:8px; color:var(--ink); padding:10px 14px;
-                   font:13px var(--mono); outline:none; }
-  #compose input:focus { border-color:var(--accent); }
+             display:flex; gap:8px; align-items:flex-end; }
+  #compose textarea { flex:1; background:var(--bg); border:1px solid var(--border);
+                      border-radius:8px; color:var(--ink); padding:10px 14px;
+                      font:13px/1.4 var(--mono); outline:none; resize:none;
+                      min-height:41px; max-height:30dvh; overflow-y:auto; }
+  #compose textarea:focus { border-color:var(--accent); }
   #compose button { border:1px solid var(--border); border-radius:8px; cursor:pointer;
                     font-size:13px; font-weight:600; padding:10px 16px;
                     background:var(--surface2); color:var(--ink); }
@@ -249,12 +269,17 @@
   #compose button:disabled { opacity:.4; cursor:not-allowed; }
   #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
              min-height:14px; background:var(--surface); }
+  #cstatus.ok { color:var(--good); }
+  #cstatus.bad { color:var(--bad); }
   #cwarn { display:none; color:var(--warn); opacity:.7; font:11px var(--mono);
            padding:6px 20px 0; background:var(--surface); }
 
   /* ---- right: read detail rail ---- */
   #rail { background:var(--surface); border-left:1px solid var(--border);
-          overflow-y:auto; padding:14px 16px; }
+          overflow-y:auto; padding:14px 16px;
+          -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  .act.danger:not(:disabled):not(.is-disabled) { color:var(--bad); border-color:var(--bad); }
+  .act.is-disabled { opacity:.38; cursor:not-allowed; }
   #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
              color:var(--ink2); margin-bottom:12px; }
   .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
@@ -443,7 +468,8 @@
   #mgmt .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
                  font:12px var(--mono); }
   #mgmt .mh .x:hover { color:var(--ink); }
-  #mgmtbody { flex:1; overflow:auto; min-height:0; }
+  #mgmtbody { flex:1; overflow:auto; min-height:0;
+              -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
   #mgmtbody table { border-collapse:collapse; width:100%; font:12.5px var(--mono); }
   #mgmtbody th { color:var(--muted); text-align:left; font-weight:normal;
                  padding:4px 10px; border-bottom:1px solid var(--border);
@@ -499,13 +525,132 @@
   #tl .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
                font:12px var(--mono); }
   #tl .mh .x:hover { color:var(--ink); }
-  #tlbody { flex:1; overflow:auto; min-height:0; max-width:900px; }
+  #tlbody { flex:1; overflow:auto; min-height:0; max-width:900px;
+            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
   .tlrow { display:grid; grid-template-columns:66px 1fr; gap:14px;
            padding:9px 4px; border-bottom:1px solid var(--border); align-items:baseline; }
   .tlrow .tm { font:11px var(--mono); color:var(--accent); white-space:nowrap; }
   .tlrow .sm { font-size:13px; line-height:1.5; color:var(--ink); }
   .tlrow.pending .sm { color:var(--muted); font-style:italic; }
   #tl .tlnote { color:var(--muted); font-size:11.5px; padding:10px 4px; }
+
+  /* ==================== responsive / mobile (cascade tail) ==================
+     These live LAST so they beat the base rules above at equal specificity. */
+
+  /* drawer backdrop: display:none at ALL widths by default — as a plain grid
+     child it would otherwise steal a grid column and scramble the layout */
+  #navback{ display:none; }
+
+  /* hamburger (drawer toggle) — hidden until the phone breakpoint shows it */
+  .navham{ display:none; cursor:pointer; flex:none; align-items:center; justify-content:center;
+           font-size:17px; padding:4px 11px; border:1px solid var(--border); border-radius:8px;
+           background:var(--surface2); color:var(--ink); user-select:none; }
+  /* rail-sheet close bar: hidden on desktop, a grabber on the sheet */
+  #railclose{ display:none; position:sticky; top:-14px; z-index:3; margin:-14px -16px 10px;
+              padding:10px 16px; background:var(--surface);
+              border-bottom:1px solid var(--border); border-radius:14px 14px 0 0;
+              align-items:center; justify-content:center; gap:8px; cursor:pointer;
+              color:var(--muted); font:12px var(--mono); min-height:44px; }
+  #railclose:active{ color:var(--ink); }
+  .act.mobrail{ display:none; }
+
+  /* connection-loss banner: polling failures must not be silent on a phone */
+  #connbanner{ display:none; position:fixed; top:calc(8px + env(safe-area-inset-top));
+               left:50%; transform:translateX(-50%); z-index:90;
+               background:var(--surface2); border:1px solid var(--warn); color:var(--warn);
+               font:12px var(--mono); padding:7px 12px; border-radius:8px; max-width:92vw; }
+  body.offline #connbanner{ display:block; }
+  body.offline #stream{ opacity:.55; }
+
+  /* toast: refusals/errors float above the composer + keyboard */
+  #toast{ position:fixed; left:50%; transform:translateX(-50%);
+          bottom:calc(env(safe-area-inset-bottom) + 84px); z-index:95;
+          background:var(--surface2); border:1px solid var(--border); color:var(--ink);
+          padding:10px 14px; border-radius:8px; font:13px var(--mono); opacity:0;
+          transition:opacity .2s; pointer-events:none; max-width:92vw; }
+  #toast.show{ opacity:1; }
+  #toast.bad{ border-color:var(--bad); color:var(--bad); }
+
+  /* ≤1100px: the rail becomes an on-demand bottom sheet instead of vanishing —
+     read/search/angle taps must keep working on tablet + phone. */
+  @media (max-width:1100px){
+    body{ grid-template-columns:var(--nav-w) minmax(0,1fr); }
+    #railgrip{ display:none; }
+    #rail{ position:fixed; inset:auto 0 0 0; height:85dvh; z-index:55;
+           transform:translateY(100%); transition:transform .22s ease;
+           border-top:1px solid var(--border); border-left:none;
+           border-radius:14px 14px 0 0; box-shadow:0 -10px 32px rgba(0,0,0,.55);
+           padding-bottom:calc(16px + env(safe-area-inset-bottom)); }
+    body.rail-open #rail{ transform:translateY(0); }
+    #railclose{ display:flex; }
+    .act.mobrail{ display:inline-flex; }
+  }
+
+  /* phone breakpoint: single column, off-canvas session drawer */
+  @media (max-width:760px){
+    body{ grid-template-columns:1fr; }
+    #nav{ position:fixed; top:0; bottom:0; left:0; z-index:70;
+          width:min(86vw,340px);
+          transform:translateX(-100%); transition:transform .22s ease;
+          box-shadow:2px 0 18px rgba(0,0,0,.55);
+          padding-left:env(safe-area-inset-left);
+          padding-top:env(safe-area-inset-top); }
+    body.navopen #nav{ transform:none; }
+    #navback{ display:none; position:fixed; inset:0; z-index:65; background:rgba(0,0,0,.5); }
+    body.navopen #navback{ display:block; }
+    body.navmin #nav{ width:min(86vw,340px); }   /* slim mode is a desktop concept;
+                                                    JS strips .navmin when the drawer opens */
+    #navgrip{ display:none; }
+    .navham{ display:inline-flex; }
+    #chdr{ padding:10px 12px; padding-top:calc(10px + env(safe-area-inset-top)); }
+    #chdr .chips, #chdr .acts{ flex-wrap:nowrap; overflow-x:auto;
+      -webkit-overflow-scrolling:touch; scrollbar-width:none; }
+    #chdr .chips::-webkit-scrollbar, #chdr .acts::-webkit-scrollbar{ display:none; }
+    #chdr .acts{ padding-bottom:4px; }
+    #stream{ padding:12px 12px 8px; }
+    .ev{ gap:6px; }
+    .ev .gutter{ min-width:34px; font-size:10px; }
+    .chip.sid{ max-width:140px; overflow:hidden; text-overflow:ellipsis; }
+    #compose{ padding:10px 12px;
+              padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
+    #cstatus{ font-size:12.5px; padding:0 12px 8px; }
+    .tcmd{ max-height:40dvh; }
+    .ang-detail{ max-height:46dvh; }
+    #mgmtbtn{ left:calc(10px + env(safe-area-inset-left));
+              /* clear the composer + status rows — it sat ON the input at bottom:10px */
+              bottom:calc(86px + env(safe-area-inset-bottom)); min-height:40px; }
+    #mgmt,#tl{ padding:12px;
+               padding-top:calc(12px + env(safe-area-inset-top));
+               padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+    #mgmt .mh,#tl .mh{ flex-wrap:wrap; }
+    #mgmt .mh .note,#tl .mh .note{ flex-basis:100%; order:9; font-size:10.5px; }
+    /* 10-col thread table: shed the low-value columns on a phone */
+    #mgmtbody th:nth-child(4), #mgmtbody td:nth-child(4),
+    #mgmtbody th:nth-child(5), #mgmtbody td:nth-child(5),
+    #mgmtbody th:nth-child(8), #mgmtbody td:nth-child(8){ display:none; }
+    /* an open digest takes the whole overlay instead of a 50/50 split */
+    #mgmt:has(#mgmtdigest.open) #mgmtbody{ display:none; }
+    #topicdlg{ align-items:flex-start; padding-top:8vh; }
+    #topicdlg .td-card{ max-height:85dvh; overflow:auto; }
+    .tlrow{ grid-template-columns:52px 1fr; gap:8px; }
+    .subhdr .back{ min-height:38px; display:inline-flex; align-items:center; }
+  }
+
+  /* touch ergonomics: bigger targets + press feedback (hover doesn't exist) */
+  @media (pointer:coarse){
+    #navgrip,#railgrip{ display:none; }
+    #compose textarea, #topicdlg .td-in, .navfilter, .cur-row select{ font-size:16px; }
+    .act, #compose button{ min-height:42px; }
+    .act.sm, .pribtn{ min-height:36px; }
+    .sortchip, .navbtn, .navtog, .navham{ min-height:32px; display:inline-flex; align-items:center; }
+    .rtab{ min-height:40px; display:inline-flex; align-items:center; flex:1; justify-content:center; }
+    .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re{ display:inline-flex; align-items:center;
+      justify-content:center; min-height:44px; min-width:44px; }
+    .tline.cmd{ padding:5px 4px; }
+    .read{ padding:8px 10px; }
+    .tline.cmd:active, .read:active, .ang-i:active, .sess:active{ background:var(--surface2); }
+    .subhdr .back:active{ border-color:var(--accent); color:var(--accent); }
+  }
 </style>
 </head>
 <body>
@@ -521,23 +666,28 @@
     <div id="navlist"></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
+  <div id="navback" onclick="closeNavDrawer()"></div>
 
   <main id="main">
-    <div id="chdr"><h2 style="color:var(--muted)">select a session</h2></div>
+    <div id="chdr"><div class="row1" style="display:flex;align-items:center;gap:10px">
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
+      <h2 style="color:var(--muted)">select a session</h2></div></div>
     <div id="stream"><div class="empty">pick a session on the left</div></div>
     <div id="cstatus"></div>
     <div id="cwarn">⚠ two-writer note: if an interactive window is open on this session,
       refresh it (exit + resume) before typing there — an inline reply typed into a stale
       window will orphan turns sent from here. Fork instead to leave this session untouched.</div>
     <div id="compose">
-      <input id="cin" placeholder="answer this session…" disabled
-             onkeydown="if(event.key==='Enter')send(false)">
+      <textarea id="cin" rows="1" placeholder="answer this session…" disabled
+                enterkeyhint="send" autocapitalize="sentences" spellcheck="true"
+                oninput="growComposer()" onkeydown="composerKey(event)"></textarea>
       <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
       <button id="bfork" disabled onclick="send(true)">Fork</button>
     </div>
   </main>
 
   <aside id="rail">
+    <div id="railclose" onclick="closeRailSheet()" role="button" aria-label="Close rail">▾ close</div>
     <h3>Read detail</h3>
     <div id="raildetail" class="rl-empty">
       Click a <b>📖 read</b> in the transcript to inspect what this session
@@ -556,8 +706,13 @@
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
+  <!-- connection-loss banner + toast (populated by JS) -->
+  <div id="connbanner" role="status"></div>
+  <div id="toast" role="status"></div>
+
   <!-- threads overlay: the session-management lens (open-thread inventory) -->
-  <button id="mgmtbtn" onclick="openMgmt()" title="Open-thread inventory: verdicts, agents, delta-after-summary">⊞ threads</button>
+  <button id="mgmtbtn" onclick="openMgmt()" aria-label="Open threads inventory"
+          title="Open-thread inventory: verdicts, agents, delta-after-summary">⊞ threads</button>
   <div id="mgmt">
     <div class="mh">
       <h2>open threads</h2>
@@ -657,6 +812,12 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
     b.title = min ? "Expand sidebar" : "Collapse sidebar";
   };
   window.toggleNav = () => {
+    // Phone: the sidebar is an off-canvas drawer, not a collapsible column.
+    if(matchMedia("(max-width:760px)").matches){
+      if(document.body.classList.contains("navopen")) closeNavDrawer();
+      else openNavDrawer();
+      return;
+    }
     min = !min; localStorage.setItem(MKEY, min ? "1" : "0"); apply();
   };
   apply();
@@ -689,11 +850,133 @@ document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
   const dlg = document.getElementById("topicdlg");
   if(dlg && dlg.classList.contains("open")){ closeTopicDlg(); return; }
+  if(document.body.classList.contains("navopen")){ closeNavDrawer(); return; }
+  if(document.body.classList.contains("rail-open")){ closeRailSheet(); return; }
   const box = document.getElementById("raildetail");
   if(box && !box.classList.contains("rl-empty") &&
      !/^(INPUT|TEXTAREA)$/.test(document.activeElement?.tagName || ""))
     clearRail();
 });
+
+/* ---------- overlay ⟷ browser-history integration ----------
+   Every overlay open pushes one history entry, so the OS back gesture (the
+   native "dismiss" on a phone) closes the overlay instead of leaving the
+   console. Explicit closes pop their own entry (ovDone) so entries don't
+   accumulate; closes triggered BY popstate pass fromPop=true and must not. */
+let ovClosing = 0;
+function ovOpen(){ history.pushState({ov: 1}, ""); }
+function ovDone(){
+  if(history.state && history.state.ov){ ovClosing++; history.back(); }
+}
+window.addEventListener("popstate", () => {
+  if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
+  if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
+  if(tlOpen) return closeTimeline(true);
+  if(mgmtOpen) return closeMgmt(true);
+  if(document.body.classList.contains("rail-open")) return closeRailSheet(true);
+  if(document.body.classList.contains("navopen")) return closeNavDrawer(true);
+});
+
+/* ---------- phone drawer (session list) + rail bottom sheet ---------- */
+let navOpenedAt = 0, railOpenedAt = 0;
+function openNavDrawer(){
+  document.body.classList.remove("navmin");   // slim mode is meaningless in a drawer
+  document.body.classList.add("navopen");
+  navOpenedAt = Date.now(); ovOpen();
+}
+function closeNavDrawer(fromPop){
+  if(!document.body.classList.contains("navopen")) return;
+  document.body.classList.remove("navopen");
+  if(!fromPop) ovDone();
+}
+function openRailSheet(){
+  railOpenedAt = Date.now();
+  if(!matchMedia("(max-width:1100px)").matches) return;
+  if(document.body.classList.contains("rail-open")) return;
+  document.body.classList.add("rail-open"); ovOpen();
+}
+function closeRailSheet(fromPop){
+  if(!document.body.classList.contains("rail-open")) return;
+  document.body.classList.remove("rail-open");
+  if(!fromPop) ovDone();
+}
+/* tap-outside closes the sheet/drawer (the opening tap is time-guarded) */
+document.addEventListener("click", e => {
+  if(document.body.classList.contains("rail-open") &&
+     Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
+    closeRailSheet();
+  if(document.body.classList.contains("navopen") &&
+     Date.now() - navOpenedAt > 350 &&
+     !e.target.closest("#nav") && !e.target.closest(".navham"))
+    closeNavDrawer();
+});
+
+/* ---------- connectivity: silence is not an option on a phone ----------
+   Every poll reports into pollDone; sustained failure dims the transcript and
+   shows a banner with the age of the data on screen. failStreak also feeds
+   the poll backoff so a dead server isn't hammered every 3s forever. */
+let lastOk = Date.now(), online = true, failStreak = 0;
+function pollDone(ok){
+  if(ok){
+    failStreak = 0; lastOk = Date.now();
+    if(!online){ online = true; setConnBanner(); }
+  } else {
+    failStreak++;
+    if(online && Date.now() - lastOk > 8000){ online = false; }
+    if(!online) setConnBanner();   // refresh the age text on every failure
+  }
+}
+function setConnBanner(){
+  document.body.classList.toggle("offline", !online);
+  const el = document.getElementById("connbanner");
+  if(el) el.textContent = online ? "" :
+    `⚠ disconnected — showing data from ${rel(lastOk)} ago`;
+}
+window.addEventListener("offline", () => { online = false; setConnBanner(); });
+window.addEventListener("online", () => { loadNav(); refreshSession(false, true); });
+
+/* ---------- toast: refusals must be visible above the keyboard ---------- */
+function toast(msg, bad){
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = bad ? "bad show" : "show";
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+/* ---------- composer: auto-grow textarea + key handling ---------- */
+function growComposer(){
+  const t = document.getElementById("cin");
+  t.style.height = "auto";
+  t.style.height = Math.min(t.scrollHeight + 2, window.innerHeight * 0.3) + "px";
+}
+function composerKey(e){
+  // Desktop: Enter sends, Shift+Enter breaks the line. Touch: Enter breaks the
+  // line (multi-line answers) — the Answer button sends.
+  if(e.key === "Enter" && !e.shiftKey && !matchMedia("(pointer:coarse)").matches){
+    e.preventDefault(); send(false);
+  }
+}
+
+/* ---------- iOS keyboard: pin the app to the VISIBLE viewport ----------
+   iOS Safari overlays the keyboard instead of resizing the layout, hiding the
+   composer behind it. Sizing <body> to visualViewport.height keeps the
+   composer (and the answering/✓ status line) above the keyboard. */
+(function(){
+  const vv = window.visualViewport;
+  if(!vv) return;
+  const sync = () => {
+    if(!matchMedia("(max-width:760px)").matches){
+      document.body.style.height = ""; return;
+    }
+    document.body.style.height = vv.height + "px";
+    window.scrollTo(0, 0);
+  };
+  vv.addEventListener("resize", sync);
+  vv.addEventListener("scroll", sync);
+})();
+
 let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
 /* While an answer we dispatched is running, we track it so #cstatus reflects
    the LIVE run (elapsed timer + completion) instead of freezing on "running". */
@@ -918,8 +1201,17 @@ function sessRow(s, d, tagProject){
 }
 
 async function loadNav(){
-  try { navData = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
-  catch(e){ return; }
+  let j;
+  try { j = await (await fetch("/api/sessions" + (showArchived?"?archived=1":""))).json(); }
+  catch(e){ pollDone(false); return; }
+  pollDone(true);
+  if(!j || !Array.isArray(j.sessions)){
+    // a 401 (expired cookie) or server error must not freeze the sidebar silently
+    document.getElementById("navsub").innerHTML =
+      `<span style="color:var(--warn)">⚠ ${esc((j && j.error) || "bad response")}</span>`;
+    return;
+  }
+  navData = j;
   renderNav();
 }
 
@@ -949,23 +1241,47 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 /* ---------- session detail ---------- */
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
+  closeNavDrawer(); closeRailSheet();   // phone: selecting a session dismisses both
   if(tlOpen) closeTimeline();   // the timeline overlay is scoped to one session
   gitBadge(0);   // stale dirty-count from the previous session
-  clearAwait(); document.getElementById("cstatus").textContent = "";
+  clearAwait();
+  const cs = document.getElementById("cstatus");
+  cs.textContent = ""; cs.className = "";
   document.querySelectorAll("#navlist .sess").forEach(el=>el.classList.remove("active"));
-  await refreshSession(true);
+  await refreshSession(true, true);
   loadNav();
 }
 
-async function refreshSession(scrollBottom){
+/* Conditional + cancellable session poll. The server's ETag folds the
+   transcript (mtime, size) with a 30s bucket, so an unchanged poll costs a
+   304 instead of a multi-MB payload; `force` (session switch, after an
+   action) skips the validator for an immediate full read. A superseded fetch
+   is aborted so a slow response can't paint a stale session. */
+let sessAC = null, sessETag = null, sessETagFor = null;
+async function refreshSession(scrollBottom, force){
   if(!curId) return;
-  let s; try { s = await (await fetch("/api/session?id="+curId)).json(); } catch(e){ return; }
+  const wanted = curId;
+  sessAC?.abort(); sessAC = new AbortController();
+  let r, s;
+  try {
+    const headers = {};
+    if(!force && sessETag && sessETagFor === curId)
+      headers["If-None-Match"] = sessETag;
+    r = await fetch("/api/session?id=" + curId, {signal: sessAC.signal, headers});
+    if(r.status === 304){ pollDone(true); return; }
+    s = await r.json();
+  } catch(e){ if(e.name !== "AbortError") pollDone(false); return; }
+  pollDone(true);
+  if(curId !== wanted) return;   // operator switched sessions mid-flight
   if(s.error) return;
+  sessETag = r.headers.get("ETag"); sessETagFor = curId;
   curSession = s;
   renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
   renderWrites(s); renderSummary(s); maybeLoadGit(false);
-  const st = document.getElementById("stream");
-  if(scrollBottom || pinnedBottom) st.scrollTop = st.scrollHeight;
+  if(scrollBottom){
+    const st = document.getElementById("stream");
+    st.scrollTop = st.scrollHeight; pinnedBottom = true;
+  }
   syncReplyStatus(s);
 }
 
@@ -983,7 +1299,9 @@ function startAwait(){
 function tickRunning(){
   if(!awaitReply){ clearInterval(replyTicker); replyTicker = null; return; }
   const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
-  document.getElementById("cstatus").textContent =
+  const st = document.getElementById("cstatus");
+  st.className = "";
+  st.textContent =
     `⏳ headless turn running — ${secs}s · Esc-safe, keep this session open`;
 }
 
@@ -1000,9 +1318,12 @@ function syncReplyStatus(s){
   const landed = s.events.length > awaitReply.baseEvents && last.kind === "assistant";
   clearAwait();
   const st = document.getElementById("cstatus");
+  st.className = landed ? "ok" : "bad";
   st.textContent = landed ? `✓ reply received (${secs}s)`
                           : `⚠ turn ended (${secs}s) — no reply appended`;
-  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")) st.textContent = ""; }, 8000);
+  if(!landed) toast(`turn ended after ${secs}s — no reply appended`, true);
+  setTimeout(() => { if(!awaitReply && st.textContent.startsWith("✓")){
+    st.textContent = ""; st.className = ""; } }, 8000);
 }
 
 /* tl;dr header line: what the session is about + what the agent is doing,
@@ -1043,6 +1364,7 @@ function renderHeader(s){
     </div>` : "";
   document.getElementById("chdr").innerHTML = `
     <div class="row1">
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
       ${stateDot(s)}
       <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
     </div>
@@ -1065,7 +1387,8 @@ function renderHeader(s){
     </div>
     ${tldrLine(s)}
     <div class="acts">
-      <button class="act" ${s.stoppable?"":"disabled"} onclick="act('stop')"
+      <button class="act danger ${s.stoppable?"":"is-disabled"}"
+        onclick="${s.stoppable?"act('stop')":"actmsg(this.title, true)"}"
         title="${s.stoppable
           ? "SIGINT the run this console spawned (same signal as Esc)"
           : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
@@ -1079,6 +1402,8 @@ function renderHeader(s){
         title="Assign a reusable topic › subtopic (overlay only — groups sessions independent of folder)">▦ Topic</button>
       <button class="act" onclick="openTimeline()"
         title="Whole-session catch-up: one time-stamped line per turn (tool results omitted), mined by the local model on demand">⧗ tl;dr timeline</button>
+      <button class="act mobrail" onclick="openRailSheet()"
+        title="Angles / context / writes / git rail">◫ Rail</button>
       <span class="pris"><span class="k-pri">priority</span>
         ${["critical","high","med","low"].map(p =>
           `<button class="act sm pribtn p-${p} ${s.priority===p?"on":""}"
@@ -1262,9 +1587,21 @@ function renderStream(s){
       html += `${w}<div class="b">${choiceCard(e)}</div></div>`;
   });
   const st = document.getElementById("stream");
-  st.onscroll = () => { pinnedBottom = st.scrollHeight - st.scrollTop - st.clientHeight < 40; };
-  st.innerHTML = html || `<div class="empty">empty transcript</div>`;
+  const out = html || `<div class="empty">empty transcript</div>`;
+  // Unchanged output → no repaint: the 3s poll must not rebuild thousands of
+  // DOM nodes (and drop text selection) for identical content.
+  if(out === renderStream._last) return;
+  renderStream._last = out;
+  // Preserve the reading position: innerHTML resets scrollTop to 0, and this
+  // runs from polls AND from tap-to-expand/select — never yank to the top.
+  const prevTop = st.scrollTop, wasPinned = pinnedBottom;
+  st.innerHTML = out;
+  st.scrollTop = wasPinned ? st.scrollHeight : prevTop;
 }
+/* pinned-to-bottom tracking lives on the element once, not per-render */
+document.getElementById("stream").addEventListener("scroll", function(){
+  pinnedBottom = this.scrollHeight - this.scrollTop - this.clientHeight < 40;
+});
 
 function selectEvent(idx){
   selIdx = idx;
@@ -1273,6 +1610,7 @@ function selectEvent(idx){
   const rail = document.getElementById("raildetail");
   rail.className = "";
   rail.innerHTML = e.kind === "search" ? searchDetail(e) : readDetail(e);
+  openRailSheet();   // ≤1100px the rail is a bottom sheet — a dead tap otherwise
 }
 
 /* Dismiss whatever detail is showing and restore the rail's default view, so
@@ -1289,6 +1627,7 @@ function clearRail(){
   box.className = "rl-empty";
   box.innerHTML = RAIL_PLACEHOLDER;
   document.getElementById("rail").scrollTop = 0;
+  closeRailSheet();
 }
 
 function readDetail(e){
@@ -1364,6 +1703,10 @@ async function post(url, body){
 async function act(kind){
   if(!curSession) return;
   const s = curSession;
+  if(kind === "stop" && !confirm(
+      "Stop this run?\n\nSIGINT → SIGTERM → SIGKILL to the run this console " +
+      "spawned. The turn in flight is lost."))
+    return;
   if(kind === "summarize" && !confirm(
       "Summarize this session independently, then archive it?\n\n" +
       "This spawns a SEPARATE off-session Claude run that digests the transcript " +
@@ -1378,7 +1721,7 @@ async function act(kind){
   // Set the success text AFTER the re-render: renderHeader rebuilds #actmsg as a
   // fresh empty span, so a message set before refreshSession was wiped
   // sub-second later (summarize had no other detail-pane feedback at all).
-  await refreshSession(false); loadNav();
+  await refreshSession(false, true); loadNav();
   actmsg(kind === "stop" ? "stopped" :
          kind === "archive" ? (body.archived ? "archived" : "unarchived") :
          "archived · independent summary dispatched (watch the summarizing chip)");
@@ -1389,7 +1732,7 @@ async function mine(){
   actmsg("mining…");
   const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
   if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
-  actmsg("mined"); await refreshSession(false);
+  actmsg("mined"); await refreshSession(false, true);
 }
 
 /* Flag/clear a session priority; the sidebar regroups on the next render. */
@@ -1400,7 +1743,7 @@ async function setPriority(p){
     {session_id: curId, priority: p || null});
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(p ? "priority " + p : "priority cleared");
-  await refreshSession(false); loadNav();
+  await refreshSession(false, true); loadNav();
 }
 
 /* Set/clear a human title (overlay only). prompt() matches the console's
@@ -1413,7 +1756,7 @@ async function setTitle(){
   const [ok, d] = await post("/api/title", {session_id: curId, title: t.trim() || null});
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(t.trim() ? "title set" : "title cleared");
-  await refreshSession(false); loadNav();
+  await refreshSession(false, true); loadNav();
 }
 
 /* ---------- topic dialog: reusable topic › subtopic taxonomy ----------
@@ -1431,6 +1774,7 @@ function openTopicDlg(){
   document.getElementById("td-subtopic").value = curSession.subtopic || "";
   refreshSubDatalist();
   document.getElementById("topicdlg").classList.add("open");
+  ovOpen();
   document.getElementById("td-topic").focus();
 }
 function refreshSubDatalist(){
@@ -1440,7 +1784,12 @@ function refreshSubDatalist(){
   document.getElementById("td-subs").innerHTML =
     subs.map(s=>`<option value="${esc(s)}"></option>`).join("");
 }
-function closeTopicDlg(){ document.getElementById("topicdlg").classList.remove("open"); }
+function closeTopicDlg(fromPop){
+  const dlg = document.getElementById("topicdlg");
+  if(!dlg.classList.contains("open")) return;
+  dlg.classList.remove("open");
+  if(fromPop !== true) ovDone();
+}
 async function saveTopic(){
   if(!curSession) return;
   const topic = document.getElementById("td-topic").value.trim();
@@ -1451,7 +1800,7 @@ async function saveTopic(){
   closeTopicDlg();
   if(!ok || d.error){ actmsg(d.error || "failed", true); return; }
   actmsg(topic ? `topic ${topic}${subtopic?" › "+subtopic:""}` : "topic cleared");
-  await refreshSession(false); loadNav();
+  await refreshSession(false, true); loadNav();
 }
 async function clearTopic(){
   document.getElementById("td-topic").value = "";
@@ -1504,6 +1853,7 @@ function tldrGroup(s){
 function showTldr(){
   const t = curSession?.tldr;
   if(!t) return;
+  openRailSheet();
   const box = document.getElementById("raildetail");
   box.className = "";
   box.innerHTML = `${RAIL_BACK}<h4>T1 · tldr</h4>
@@ -1747,6 +2097,7 @@ function renderGit(d){
 }
 
 async function showAngle(itemId){
+  openRailSheet();
   const box = document.getElementById("raildetail");
   box.classList.remove("rl-empty");
   box.innerHTML = `<h4>${esc(itemId)}</h4><div class="k">loading…</div>`;
@@ -1879,11 +2230,19 @@ function renderSummary(s){
 }
 
 /* ---------- answer / fork ---------- */
+let sending = false;
 async function send(isFork){
   const inp = document.getElementById("cin"); const text = inp.value.trim();
-  if(!text || !curSession) return;
+  if(!text || !curSession || sending) return;
+  // In-flight lock: a second tap on a laggy link must not double-spawn (the
+  // server would 409 it, but the operator would see a confusing refusal).
+  sending = true;
+  const bans = document.getElementById("bans"), bfork = document.getElementById("bfork");
+  const wasAns = bans.disabled, wasFork = bfork.disabled;
+  bans.disabled = bfork.disabled = true;
   const st = document.getElementById("cstatus");
-  st.textContent = isFork ? "forking…" : "answering…";
+  const fail = msg => { st.className = "bad"; st.textContent = "✗ " + msg; toast(msg, true); };
+  st.className = ""; st.textContent = isFork ? "forking…" : "answering…";
   try {
     const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
       headers:{"Content-Type":"application/json"},
@@ -1895,21 +2254,27 @@ async function send(isFork){
     let d = null;
     if(ct.includes("application/json")){
       try { d = await r.json(); }
-      catch(e){ st.textContent = "✗ "+r.status+" malformed JSON from server"; return; }
+      catch(e){ fail(r.status+" malformed JSON from server"); return; }
     } else {
       const t = (await r.text()).trim();
-      st.textContent = "✗ "+r.status+" "+(t.slice(0,300) || r.statusText || "empty response");
+      fail(r.status+" "+(t.slice(0,300) || r.statusText || "empty response"));
       return;
     }
-    if(!r.ok || d.error){ st.textContent = "✗ "+(d.error || (r.status+" "+r.statusText)); return; }
+    if(!r.ok || d.error){ fail(d.error || (r.status+" "+r.statusText)); return; }
     // Both fork routes mint & return new_session (fork-session-id fix); surface it.
+    st.className = "ok";
     st.textContent = d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
       : "✓ answer sent — headless turn running";
-    inp.value = "";
+    inp.value = ""; growComposer();
     // A plain answer resumes THIS session's file, so we can track it live.
     // Forks write a new session file — leave their one-shot status as-is.
-    if(d.action === "answer"){ startAwait(); refreshSession(false); }
-  } catch(e){ st.textContent = "✗ no response (server error?) — "+e; }
+    if(d.action === "answer"){ startAwait(); refreshSession(false, true); }
+  } catch(e){ fail("no response (server error?) — "+e); }
+  finally {
+    sending = false;
+    // restore pre-send gating; the next poll re-derives it from server truth
+    bans.disabled = wasAns; bfork.disabled = wasFork;
+  }
 }
 
 /* ---------- subagent back-link: parent session @ the spawning message ------ */
@@ -1936,12 +2301,15 @@ function openTimeline(){
   document.getElementById("tl").classList.add("open");
   document.getElementById("tlbody").innerHTML = `<div class="empty">loading…</div>`;
   document.getElementById("tlnote").textContent = "";
+  ovOpen();
   loadTimeline();
 }
-function closeTimeline(){
+function closeTimeline(fromPop){
+  if(!tlOpen) return;
   tlOpen = false;
   clearTimeout(tlTimer); tlTimer = null;
   document.getElementById("tl").classList.remove("open");
+  if(fromPop !== true) ovDone();
 }
 async function loadTimeline(){
   if(!tlOpen || !curId) return;
@@ -1988,7 +2356,12 @@ function renderTimeline(tl){
   if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
   if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
   if(tl.model) bits.push(esc(tl.model));
-  if(tl.generating) bits.push(esc(tl.status || "generating") + "…");
+  if(tl.generating){
+    // felt progress: rows fill in as each turn's summary lands
+    const done = rows.filter(r => r.summary && r.summary.indexOf("(unavailable") !== 0).length;
+    if(rows.length) bits.push(`${done}/${rows.length} turns mined`);
+    bits.push(esc(tl.status || "generating") + "… (closing keeps mining)");
+  }
   else if(tl.stale) bits.push("stale — ⟳ to refresh");
   if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
   note.textContent = bits.join(" · ");
@@ -2005,12 +2378,18 @@ document.addEventListener("keydown", e => {
 let mgmtOpen = false, mgmtAt = 0, mgmtRows = null, mgmtErr = null;
 
 function openMgmt(){ mgmtOpen = true;
-  document.getElementById("mgmt").classList.add("open"); refreshMgmt(true); }
-function closeMgmt(){ mgmtOpen = false; closeMgmtDigest();
-  document.getElementById("mgmt").classList.remove("open"); }
-function closeMgmtDigest(){
-  document.getElementById("mgmtdigest").classList.remove("open");
-  document.getElementById("mgmtdigestpre").textContent = ""; }
+  document.getElementById("mgmt").classList.add("open"); ovOpen(); refreshMgmt(true); }
+function closeMgmt(fromPop){
+  if(!mgmtOpen) return;
+  mgmtOpen = false; closeMgmtDigest();
+  document.getElementById("mgmt").classList.remove("open");
+  if(fromPop !== true) ovDone(); }
+function closeMgmtDigest(fromPop){
+  const dg = document.getElementById("mgmtdigest");
+  const wasOpen = dg.classList.contains("open");
+  dg.classList.remove("open");
+  document.getElementById("mgmtdigestpre").textContent = "";
+  if(wasOpen && fromPop !== true) ovDone(); }
 
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape" || !mgmtOpen) return;
@@ -2090,7 +2469,8 @@ async function showMgmtDigest(id, delta){
   document.getElementById("mgmtdigesttitle").textContent =
     `digest · ${id.slice(0,8)}${delta ? " · delta after summary" : ""}`;
   document.getElementById("mgmtdigestpre").textContent = "loading digest…";
-  document.getElementById("mgmtdigest").classList.add("open");
+  const dg = document.getElementById("mgmtdigest");
+  if(!dg.classList.contains("open")){ dg.classList.add("open"); ovOpen(); }
   try {
     const r = await fetch(`/api/digest?id=${id}&${q}`);
     document.getElementById("mgmtdigestpre").textContent = await r.text();
@@ -2099,10 +2479,32 @@ async function showMgmtDigest(id, delta){
   }
 }
 
-setInterval(()=>refreshMgmt(false), 30000);
+setInterval(() => { if(mgmtOpen && !document.hidden) refreshMgmt(false); }, 30000);
 
-loadNav(); setInterval(loadNav, 5000);
-setInterval(()=>refreshSession(false), 3000);
+/* ---------- poll loops: visibility-aware, backoff on failure ----------
+   A backgrounded phone tab must not poll (battery + LAN churn), and a dead
+   server must not be hammered at full cadence — failStreak (fed by pollDone)
+   stretches the interval 3s→6s→12s→…→30s until the first success resets it. */
+let navT = null, sesT = null;
+function pollDelay(base){
+  return Math.min(base * (failStreak ? 2 ** Math.min(failStreak, 4) : 1), 30000);
+}
+async function navTick(){
+  clearTimeout(navT);
+  await loadNav();
+  navT = setTimeout(navTick, pollDelay(5000));
+}
+async function sesTick(){
+  clearTimeout(sesT);
+  await refreshSession(false);
+  sesT = setTimeout(sesTick, pollDelay(3000));
+}
+function stopPolls(){ clearTimeout(navT); clearTimeout(sesT); }
+document.addEventListener("visibilitychange", () => {
+  if(document.hidden) stopPolls();
+  else { navTick(); sesTick(); }   // immediate catch-up on return
+});
+navTick(); sesTick();
 </script>
 </body>
 </html>

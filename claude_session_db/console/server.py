@@ -2082,6 +2082,12 @@ class Handler(SimpleHTTPRequestHandler):
         return False
 
     def end_headers(self):
+        # no-cache = "store but revalidate before use". Without it, index.html
+        # falls through to SimpleHTTPRequestHandler which sends only
+        # Last-Modified; browsers then apply RFC 7234 heuristic freshness and
+        # serve a stale (old-JS) page WITHOUT revalidating, so a normal reload
+        # runs pre-deploy client code. This forces a conditional GET each load.
+        self.send_header("Cache-Control", "no-cache")
         if getattr(self, "_set_cookie", False):
             self.send_header(
                 "Set-Cookie",

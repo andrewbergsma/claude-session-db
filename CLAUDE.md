@@ -164,14 +164,16 @@ when two runs share a project dir, and blind between spawn and first write.
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
 - **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,
-  time-stamped catch-up (one line per user-prompt turn, **tool results omitted**)
-  rendered in a full overlay. Distinct from the last-3-turns `tldr` headline —
-  this walks the ENTIRE conversation. Engine is `session_timeline.py`
-  (`POST /api/timeline` force-generates, `GET /api/timeline` serves cached, never
-  generates). Segment + map: one small local-Ollama call per turn (so it scales
-  to any length and never overflows a 7B/8K-ctx model), completed turns memoized
-  by prompt uuid, the tail turn always recomputed. Pull not push — nothing
-  auto-generates it; first open mines, later opens serve cached + offer ⟳.
+  time-stamped catch-up (one line per user-prompt turn, **tool results omitted**),
+  rendered as the **Timeline tab of the right rail** (beside Angles/Context/
+  Writes/Git). Distinct from the last-3-turns `tldr` headline — this walks the
+  ENTIRE conversation. Engine is `session_timeline.py` (`POST /api/timeline`
+  force-generates, `GET /api/timeline` serves cached, never generates). Segment +
+  map: one small local-Ollama call per turn (so it scales to any length and never
+  overflows a 7B/8K-ctx model), completed turns memoized by prompt uuid, the tail
+  turn always recomputed. **Cached-first, pull not push**: opening the tab only
+  ever serves the cached store off disk — it never auto-mines. Generate/⟳ are the
+  only things that force a run, and the tab polls only while one is in flight.
   Bounded by `CSD_TIMELINE_MAX_TURNS` (150; older turns omitted, surfaced in the
   footer). State: `$CSD_STATE_DIR/timeline/<sid>.json`.
 

@@ -513,26 +513,18 @@
   #topicdlg .td-actions { display:flex; gap:6px; margin-top:14px; }
   #topicdlg .td-actions .primary { color:var(--purple); border-color:var(--purple); }
 
-  /* ---- tl;dr timeline overlay (whole-session catch-up) ---- */
-  #tl { position:fixed; inset:0; background:var(--bg); z-index:50; display:none;
-        flex-direction:column; padding:16px 20px; overflow:hidden; }
-  #tl.open { display:flex; }
-  #tl .mh { display:flex; align-items:baseline; gap:12px; margin-bottom:12px; }
-  #tl .mh h2 { font-size:15px; font-weight:600; }
-  #tl .mh .note { color:var(--muted); font-size:11.5px; }
-  #tl .mh .re { cursor:pointer; color:var(--muted); font:12px var(--mono); }
-  #tl .mh .re:hover { color:var(--accent); }
-  #tl .mh .x { margin-left:auto; cursor:pointer; color:var(--muted);
-               font:12px var(--mono); }
-  #tl .mh .x:hover { color:var(--ink); }
-  #tlbody { flex:1; overflow:auto; min-height:0; max-width:900px;
-            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
-  .tlrow { display:grid; grid-template-columns:66px 1fr; gap:14px;
-           padding:9px 4px; border-bottom:1px solid var(--border); align-items:baseline; }
-  .tlrow .tm { font:11px var(--mono); color:var(--accent); white-space:nowrap; }
-  .tlrow .sm { font-size:13px; line-height:1.5; color:var(--ink); }
-  .tlrow.pending .sm { color:var(--muted); font-style:italic; }
-  #tl .tlnote { color:var(--muted); font-size:11.5px; padding:10px 4px; }
+  /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ---- */
+  #pane-timeline .tlrow { display:grid; grid-template-columns:46px 1fr; gap:9px;
+           padding:7px 0; border-bottom:1px solid var(--border); align-items:baseline; }
+  #pane-timeline .tlrow .tm { font:10px var(--mono); color:var(--accent); white-space:nowrap; }
+  #pane-timeline .tlrow .sm { font-size:12px; line-height:1.45; color:var(--ink); }
+  #pane-timeline .tlrow.pending .sm { color:var(--muted); font-style:italic; }
+  #pane-timeline .tlfoot { color:var(--muted); font:10.5px var(--mono); margin-top:10px;
+           padding-top:8px; border-top:1px solid var(--border); }
+  #pane-timeline .tlgen { margin-top:12px; }
+  #pane-timeline h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
+           float:right; }
+  #pane-timeline h3 .re:hover { color:var(--accent); }
 
   /* ==================== responsive / mobile (cascade tail) ==================
      These live LAST so they beat the base rules above at equal specificity. */
@@ -619,11 +611,11 @@
     #mgmtbtn{ left:calc(10px + env(safe-area-inset-left));
               /* clear the composer + status rows — it sat ON the input at bottom:10px */
               bottom:calc(86px + env(safe-area-inset-bottom)); min-height:40px; }
-    #mgmt,#tl{ padding:12px;
+    #mgmt{ padding:12px;
                padding-top:calc(12px + env(safe-area-inset-top));
                padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
-    #mgmt .mh,#tl .mh{ flex-wrap:wrap; }
-    #mgmt .mh .note,#tl .mh .note{ flex-basis:100%; order:9; font-size:10.5px; }
+    #mgmt .mh{ flex-wrap:wrap; }
+    #mgmt .mh .note{ flex-basis:100%; order:9; font-size:10.5px; }
     /* 10-col thread table: shed the low-value columns on a phone */
     #mgmtbody th:nth-child(4), #mgmtbody td:nth-child(4),
     #mgmtbody th:nth-child(5), #mgmtbody td:nth-child(5),
@@ -698,11 +690,13 @@
       <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
       <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
       <span class="rtab" data-t="git" onclick="setRailTab('git')">Git</span>
+      <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')">Timeline</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
     <div id="pane-writes" class="rtabpane"><div id="writes"></div></div>
     <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
+    <div id="pane-timeline" class="rtabpane"><div id="tlinfo"></div></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
@@ -752,16 +746,6 @@
     </div>
   </div>
 
-  <!-- tl;dr timeline overlay: whole-session, time-stamped catch-up -->
-  <div id="tl">
-    <div class="mh">
-      <h2>tl;dr timeline</h2>
-      <span id="tlnote" class="note"></span>
-      <span class="re" onclick="genTimeline()" title="regenerate the whole-session timeline">⟳ regenerate</span>
-      <span class="x" onclick="closeTimeline()">✕ close (Esc)</span>
-    </div>
-    <div id="tlbody"><div class="empty">loading…</div></div>
-  </div>
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
@@ -872,7 +856,6 @@ window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
   if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
   if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
-  if(tlOpen) return closeTimeline(true);
   if(mgmtOpen) return closeMgmt(true);
   if(document.body.classList.contains("rail-open")) return closeRailSheet(true);
   if(document.body.classList.contains("navopen")) return closeNavDrawer(true);
@@ -1242,7 +1225,7 @@ function toggleArchived(){ showArchived = !showArchived; loadNav(); }
 async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
   closeNavDrawer(); closeRailSheet();   // phone: selecting a session dismisses both
-  if(tlOpen) closeTimeline();   // the timeline overlay is scoped to one session
+  clearTimeout(tlTimer); tlTimer = null;   // drop any stale poll from the prior session
   gitBadge(0);   // stale dirty-count from the previous session
   clearAwait();
   const cs = document.getElementById("cstatus");
@@ -1278,6 +1261,7 @@ async function refreshSession(scrollBottom, force){
   curSession = s;
   renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
   renderWrites(s); renderSummary(s); maybeLoadGit(false);
+  if(railTab === "timeline") loadTimeline();   // refresh cached rows for the new session
   if(scrollBottom){
     const st = document.getElementById("stream");
     st.scrollTop = st.scrollHeight; pinnedBottom = true;
@@ -1400,8 +1384,6 @@ function renderHeader(s){
         title="Set or clear a human-readable title (overlay only — never touches the transcript)">✎ ${s.user_title?"Retitle":"Title"}</button>
       <button class="act" onclick="openTopicDlg()"
         title="Assign a reusable topic › subtopic (overlay only — groups sessions independent of folder)">▦ Topic</button>
-      <button class="act" onclick="openTimeline()"
-        title="Whole-session catch-up: one time-stamped line per turn (tool results omitted), mined by the local model on demand">⧗ tl;dr timeline</button>
       <button class="act mobrail" onclick="openRailSheet()"
         title="Angles / context / writes / git rail">◫ Rail</button>
       <span class="pris"><span class="k-pri">priority</span>
@@ -1823,11 +1805,12 @@ function setRailTab(t){
   localStorage.setItem("csd.consoleRailTab", t);
   applyRailTab();
   if(t === "git") maybeLoadGit(false);   // lazy: only computed when the tab opens
+  if(t === "timeline") loadTimeline();   // lazy: serve cached (never auto-mines)
 }
 function applyRailTab(){
   document.querySelectorAll("#railtabs .rtab").forEach(el =>
     el.classList.toggle("on", el.dataset.t === railTab));
-  for(const t of ["angles","context","writes","git"])
+  for(const t of ["angles","context","writes","git","timeline"])
     document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
 }
 applyRailTab();
@@ -2288,70 +2271,61 @@ async function openParent(parentId, anchorUuid){
   setTimeout(()=>el.classList.remove("anchor-flash"), 2500);
 }
 
-/* ---------- tl;dr timeline overlay: whole-session catch-up -----------------
-   A pre-determined "angle button". One time-stamped line per user-prompt turn
-   (tool RESULTS omitted), mined by the local model on demand via
-   POST/GET /api/timeline (session_timeline.py). First open auto-generates;
-   later opens serve the cached store instantly and offer ⟳ to regenerate. */
-let tlOpen = false, tlTimer = null;
+/* ---------- Timeline rail tab: whole-session catch-up ----------------------
+   The first pre-determined "angle button", living in the right rail beside
+   Angles/Context/Writes/Git. One time-stamped line per user-prompt turn
+   (tool RESULTS omitted), mined by the local model via POST/GET /api/timeline
+   (session_timeline.py). Cached-first: opening the tab NEVER auto-mines — it
+   serves the cached store off disk and offers Generate/⟳; only ⟳/Generate
+   force a run, and we poll only while one is in flight. */
+let tlTimer = null;
 
-function openTimeline(){
-  if(!curId){ actmsg("open a session first", true); return; }
-  tlOpen = true;
-  document.getElementById("tl").classList.add("open");
-  document.getElementById("tlbody").innerHTML = `<div class="empty">loading…</div>`;
-  document.getElementById("tlnote").textContent = "";
-  ovOpen();
-  loadTimeline();
-}
-function closeTimeline(fromPop){
-  if(!tlOpen) return;
-  tlOpen = false;
-  clearTimeout(tlTimer); tlTimer = null;
-  document.getElementById("tl").classList.remove("open");
-  if(fromPop !== true) ovDone();
-}
+function tlClock(t){ if(!t) return "?"; const d = new Date(t);
+  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+
 async function loadTimeline(){
-  if(!tlOpen || !curId) return;
+  clearTimeout(tlTimer); tlTimer = null;
+  const el = document.getElementById("tlinfo");
+  if(!el) return;
+  if(!curId){ el.innerHTML = `<h3>Timeline</h3><div class="rl-empty">Open a session to see its timeline.</div>`; return; }
   let d; try { d = await (await fetch("/api/timeline?id=" + encodeURIComponent(curId))).json(); }
-  catch(e){ return; }
-  const tl = d && d.timeline;
-  if(!tl) return genTimeline();          // never generated -> kick it off
-  renderTimeline(tl);
-  if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+  catch(e){ el.innerHTML = `<h3>Timeline</h3><div class="rl-empty">timeline unavailable</div>`; return; }
+  renderTimeline(d && d.timeline);         // null -> not-generated (offer Generate)
 }
 async function genTimeline(){
   if(!curId) return;
-  document.getElementById("tlbody").innerHTML =
-    `<div class="empty">mining the whole session… one local-model pass per turn</div>`;
+  document.getElementById("tlinfo").innerHTML =
+    `<h3>Timeline</h3><div class="rl-empty">mining the whole session… one local-model pass per turn.</div>`;
   const [ok, d] = await post("/api/timeline", {session_id: curId});
   if(!ok || d.error){
-    document.getElementById("tlbody").innerHTML =
-      `<div class="empty">timeline failed — ${esc(d.error || "?")}</div>`;
+    document.getElementById("tlinfo").innerHTML =
+      `<h3>Timeline</h3><div class="rl-empty">timeline failed — ${esc(d.error || "?")}</div>`;
     return;
   }
-  if(d.timeline){
-    renderTimeline(d.timeline);
-    if(d.timeline.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
-  }
+  renderTimeline(d.timeline);
 }
 function renderTimeline(tl){
-  const body = document.getElementById("tlbody");
-  const note = document.getElementById("tlnote");
-  if(tl.error){ body.innerHTML = `<div class="empty">unavailable — ${esc(tl.error)}</div>`;
-                note.textContent = ""; return; }
-  const rows = tl.rows || [];
-  if(!rows.length){
-    body.innerHTML = `<div class="empty">${tl.generating ? "mining the whole session…"
-                                                          : "no turns to summarize"}</div>`;
-  } else {
-    body.innerHTML = rows.map(r => {
-      const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
-      return `<div class="tlrow${pending ? " pending" : ""}">
-        <span class="tm">${esc(mgmtClock(r.t))}</span>
-        <span class="sm">${esc(r.summary || "…")}</span></div>`;
-    }).join("");
+  if(railTab !== "timeline") return;         // tab switched away mid-fetch
+  const el = document.getElementById("tlinfo");
+  if(!el) return;
+  const regen = `<span class="re" onclick="genTimeline()" title="regenerate the whole-session timeline">⟳</span>`;
+  if(!tl){                                    // never generated for this session
+    el.innerHTML = `<h3>Timeline</h3>
+      <div class="rl-empty">A whole-session catch-up: one time-stamped line per turn,
+        tool results omitted — mined by the local model on demand.
+        <div class="tlgen"><button class="act" onclick="genTimeline()">⧗ Generate</button></div></div>`;
+    return;
   }
+  if(tl.error){ el.innerHTML = `<h3>Timeline ${regen}</h3><div class="rl-empty">unavailable — ${esc(tl.error)}</div>`; return; }
+  const rows = tl.rows || [];
+  const body = rows.length
+    ? rows.map(r => {
+        const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
+        return `<div class="tlrow${pending ? " pending" : ""}" title="${esc(mgmtClock(r.t))}">
+          <span class="tm">${esc(tlClock(r.t))}</span>
+          <span class="sm">${esc(r.summary || "…")}</span></div>`;
+      }).join("")
+    : `<div class="rl-empty">${tl.generating ? "mining…" : "no turns to summarize"}</div>`;
   const bits = [];
   if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
   if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
@@ -2359,16 +2333,14 @@ function renderTimeline(tl){
   if(tl.generating){
     // felt progress: rows fill in as each turn's summary lands
     const done = rows.filter(r => r.summary && r.summary.indexOf("(unavailable") !== 0).length;
-    if(rows.length) bits.push(`${done}/${rows.length} turns mined`);
-    bits.push(esc(tl.status || "generating") + "… (closing keeps mining)");
-  }
-  else if(tl.stale) bits.push("stale — ⟳ to refresh");
+    if(rows.length) bits.push(`${done}/${rows.length} mined`);
+    bits.push(esc(tl.status || "generating") + "…");
+  } else if(tl.stale) bits.push("stale — ⟳ to refresh");
   if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
-  note.textContent = bits.join(" · ");
+  el.innerHTML = `<h3>Timeline ${regen}</h3><div class="tlrows">${body}</div>` +
+                 `<div class="tlfoot">${bits.join(" · ")}</div>`;
+  if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
 }
-document.addEventListener("keydown", e => {
-  if(e.key === "Escape" && tlOpen){ e.stopPropagation(); closeTimeline(); }
-});
 
 /* ---------- threads overlay: the session-management lens -------------------
    The console face of `csd angles sessions` (session_mgmt.py): one row per

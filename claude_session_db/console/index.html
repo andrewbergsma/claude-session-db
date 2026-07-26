@@ -415,6 +415,14 @@
   .ang-id { font:10px var(--mono); font-weight:700; color:var(--muted);
             flex:0 0 auto; }
   .ang-i:hover .ang-id { color:var(--purple); }
+  /* deployed/served URLs group (Context tab) */
+  .dep-url { color:var(--accent); text-decoration:none; min-width:0;
+             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .dep-url:hover { text-decoration:underline; }
+  .dep-dim { opacity:.45; }
+  .dep-st { font:10px var(--mono); color:var(--muted); margin-left:auto;
+            flex:0 0 auto; }
+  .dep-st.up { color:var(--good); }
   .ang-head { font-size:13px; margin:4px 0 8px; }
   .ang-detail { font:11.5px/1.5 var(--mono); white-space:pre-wrap;
                 word-break:break-word; max-height:46vh; overflow-y:auto;
@@ -2080,7 +2088,29 @@ function renderContext(s){
     <div class="kv"><span class="k">kmcp reads</span>
       <span class="v">${s.counts?.reads ?? 0} · ${s.counts?.searches ?? 0} searches</span></div>
     ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}` +
-    claudeMdGroup(s);
+    deployedGroup(s) + claudeMdGroup(s);
+}
+
+/* Deployed/served URLs — what this session "has up", mined server-side from
+   deploy/serve-shaped tool events only (Artifact publishes, deploy CLI output,
+   server launches, gh pr create). kind: A=artifact D=deploy L=local PR.
+   Local rows carry `up` from a loopback probe — a dead server dims, never
+   hides. PRs render dimmed too: secondary to actually-served things. */
+function deployedGroup(s){
+  const dep = s.deployed || [];
+  if(!dep.length) return "";
+  const K = {artifact:"A", deploy:"D", local:"L", pr:"PR"};
+  return `<div class="ang-g"><div class="ang-h">⛅ deployed · ${dep.length}</div>
+    ${dep.map(d=>{
+      const dim = d.kind==="pr" || (d.kind==="local" && d.up===false);
+      const st = d.kind==="local" && d.up!=null
+        ? `<span class="dep-st${d.up?" up":""}">${d.up?"up":"down"}</span>` : "";
+      return `<div class="ang-i${dim?" dep-dim":""}"
+        title="${esc(d.source||"")}${d.ts?" · "+esc(clock(d.ts)):""}">
+        <span class="ang-id">${K[d.kind]||"?"}</span>
+        <a class="dep-url" href="${esc(d.url)}" target="_blank"
+           rel="noopener noreferrer">${esc(d.label||d.url)}</a>${st}</div>`;
+    }).join("")}</div>`;
 }
 
 /* CLAUDE.md memory files — always-loaded context, resolved server-side from

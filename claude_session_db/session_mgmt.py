@@ -33,6 +33,7 @@ Watermark resolution (first hit wins):
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -525,3 +526,64 @@ def _watermark_for(sid: str, dsn: str,
             return created[sid.lower()], "kmcp"
     return None, "none"
 
+
+
+# ----------------------------------------------------------------------------
+# Console content search — match the archive DB text (assistant content_blocks
+# + user prompt_text) scoped to a set of visible session ids. Read-only,
+# bounded (statement_timeout + id-scoped), returns {session_id: html_snippet}
+# with the query highlighted (<mark>) and everything else HTML-escaped.
+# ----------------------------------------------------------------------------
+_SEARCH_SQL = """
+WITH hits AS (
+  SELECT session_id, content AS body
+  FROM content_blocks
+  WHERE session_id = ANY(%(ids)s) AND block_type IN ('text','thinking')
+        AND content ILIKE %(like)s
+  UNION ALL
+  SELECT session_id, prompt_text AS body
+  FROM messages
+  WHERE session_id = ANY(%(ids)s) AND message_type = 'prompt'
+        AND prompt_text ILIKE %(like)s
+)
+SELECT DISTINCT ON (session_id) session_id, body
+FROM hits
+ORDER BY session_id
+"""
+
+
+def _snippet(body: str, q: str, pad: int = 26, tail: int = 34) -> str:
+    """A one-line, HTML-escaped excerpt around the first match, query wrapped
+    in <mark>. Escapes first (content is untrusted) — safe for innerHTML."""
+    body = body or ""
+    i = body.lower().find(q.lower())
+    if i < 0:
+        s = html.escape(body[: pad + tail])
+        return (s + ("…" if len(body) > pad + tail else "")).replace("\n", " ")
+    a = max(0, i - pad)
+    b = min(len(body), i + len(q) + tail)
+    pre = ("…" if a > 0 else "") + html.escape(body[a:i])
+    hit = "<mark>" + html.escape(body[i:i + len(q)]) + "</mark>"
+    post = html.escape(body[i + len(q):b]) + ("…" if b < len(body) else "")
+    return (pre + hit + post).replace("\n", " ").replace("\r", "")
+
+
+def search_sessions(dsn: str, ids, q: str, limit: int = 400) -> dict:
+    """{session_id: snippet} for sessions in `ids` whose transcript text
+    matches `q` (case-insensitive substring). Bounded and read-only."""
+    ids = [s for s in (ids or []) if s]
+    q = (q or "").strip()
+    if not ids or len(q) < 2:
+        return {}
+    like = "%" + q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+    out: dict[str, str] = {}
+    with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        with conn.cursor() as cur:
+            cur.execute("SET LOCAL statement_timeout = 4000")
+            cur.execute(_SEARCH_SQL, {"ids": ids, "like": like})
+            for r in cur.fetchall():
+                out[r["session_id"]] = _snippet(r["body"], q)
+                if len(out) >= limit:
+                    break
+    return out

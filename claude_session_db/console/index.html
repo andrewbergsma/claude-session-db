@@ -180,6 +180,20 @@
   .who { font:10px var(--mono); font-weight:700; text-transform:uppercase;
          letter-spacing:.5px; margin-bottom:3px; }
   .turn.user .who { color:var(--accent); }
+  /* queued composer messages: visibly "not sent yet" — dashed, amber badge,
+     cancellable; a failed dispatch flips the accents to --bad. */
+  .turn.user.queued { border-style:dashed; opacity:.9; }
+  .turn.user.queued .who { color:var(--warn); }
+  .turn.user.qfailed { border-color:var(--bad); }
+  .turn.user.qfailed .who { color:var(--bad); }
+  .qbadge { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+            letter-spacing:.4px; color:var(--warn); border:1px solid var(--warn);
+            border-radius:3px; padding:0 4px; margin-left:6px; }
+  .qbadge.bad { color:var(--bad); border-color:var(--bad); }
+  .qcancel { float:right; cursor:pointer; color:var(--muted);
+             font:10px var(--mono); text-transform:none; letter-spacing:0; }
+  .qcancel:hover { color:var(--bad); }
+  .qerr { color:var(--bad); font-size:11.5px; margin-top:6px; }
   .turn.assistant .who { color:var(--ink2); }
   .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
   .turn.assistant .txt { color:var(--ink); }
@@ -1411,11 +1425,16 @@ function renderHeader(s){
   // choice.
   const writing = !!s.stoppable ||
                   (s.mtime_age_s != null && s.mtime_age_s < 20);
+  // The composer never blocks: a busy session (or one with messages already
+  // queued) accepts the message into the server-side reply queue, which
+  // dispatches it once the two-writer guard clears. The guard is unchanged —
+  // queueing is how we wait for it.
+  const nq = (s.queue || []).length;
   document.getElementById("cin").disabled = false;
-  document.getElementById("cin").placeholder = writing
-    ? "session is writing right now — wait for it to settle, or Fork to speak into a copy"
+  document.getElementById("cin").placeholder = (writing || nq)
+    ? "session is busy — your message will be queued and sent when it settles"
     : "answer this session…";
-  document.getElementById("bans").disabled = writing;
+  document.getElementById("bans").disabled = false;
   document.getElementById("bfork").disabled = false;
 }
 
@@ -1560,6 +1579,26 @@ function renderStream(s){
       html += `${w}<div class="b"><div class="toolev">${toolRows(e.tools, e.ts, live)}</div></div></div>`;
     else if(e.kind==="choice")
       html += `${w}<div class="b">${choiceCard(e)}</div></div>`;
+  });
+  // Queued composer messages (server-side reply queue): rendered at the tail
+  // as pending "you" turns — dashed + badged until actually dispatched, with a
+  // cancel affordance while they are still cancellable. A failed dispatch
+  // surfaces its error here (and, terminally, blocks the queue until dismissed
+  // — strict FIFO, never a silent reorder).
+  (s.queue || []).forEach(q => {
+    const failed = q.state === "failed";
+    const err = q.error
+      ? `<div class="qerr">${esc(q.error)}${failed
+          ? " — retries exhausted; dismiss to unblock the queue"
+          : ` — retrying (attempt ${q.attempts}/3)`}</div>`
+      : "";
+    html += `<div class="ev"><span class="gutter">${clock(q.queued_at)}</span>
+      <div class="b"><div class="turn user queued${failed ? " qfailed" : ""}">
+        <div class="who">you <span class="qbadge${failed ? " bad" : ""}">${failed ? "✗ failed" : "⏸ queued"}</span>
+          <span class="qcancel" onclick="cancelQueued('${esc(q.id)}')"
+            title="${failed ? "dismiss this failed message" : "cancel this queued message"}">✕ ${failed ? "dismiss" : "cancel"}</span></div>
+        <div class="txt">${esc(q.text)}</div>${err}
+      </div></div></div>`;
   });
   const st = document.getElementById("stream");
   const out = html || `<div class="empty">empty transcript</div>`;
@@ -1876,7 +1915,35 @@ function renderContext(s){
       <span class="v">${s.counts?.events ?? "—"}</span></div>
     <div class="kv"><span class="k">kmcp reads</span>
       <span class="v">${s.counts?.reads ?? 0} · ${s.counts?.searches ?? 0} searches</span></div>
-    ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}`;
+    ${s.truncated ? `<div class="cur-warn">large transcript — tail only</div>` : ""}` +
+    claudeMdGroup(s);
+}
+
+/* CLAUDE.md memory files — always-loaded context, resolved server-side from
+   the session's own cwd (global ~/.claude/CLAUDE.md + the project chain).
+   Missing files never reach the payload, so absent rows are simply absent. */
+function claudeMdGroup(s){
+  const mem = s.claudemd || [];
+  if(!mem.length) return "";
+  return `<div class="ang-g"><div class="ang-h">≡ memory (CLAUDE.md)</div>
+    ${mem.map((f,i)=>`<div class="ang-i" onclick="showClaudeMd(${i})" title="${esc(f.path)}">
+      <span class="ang-id">${f.scope==="global"?"G":"P"}</span> ${esc(shortPath(f.path))}
+      <span class="k" style="float:right">${kb(f.chars)}</span></div>`).join("")}</div>`;
+}
+
+async function showClaudeMd(n){
+  openRailSheet();
+  const box = document.getElementById("raildetail");
+  box.classList.remove("rl-empty");
+  box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">loading…</div>`;
+  let d;
+  try { d = await (await fetch(`/api/claudemd?id=${curId}&n=${n}`)).json(); }
+  catch(e){ box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">unavailable</div>`; return; }
+  if(d.error){ box.innerHTML = `<h4>CLAUDE.md</h4><div class="k">${esc(d.error)}</div>`; return; }
+  box.innerHTML = `${RAIL_BACK}<h4>${d.scope==="global"?"Global":"Project"} CLAUDE.md</h4>
+    <div class="kv"><span class="k">path</span><span class="v">${esc(shortPath(d.path))}</span></div>
+    <div class="kv"><span class="k">size</span><span class="v">${kb(d.chars)}${d.truncated?" · truncated":""}</span></div>
+    <pre class="ang-detail">${esc(d.content||"(empty)")}</pre>`;
 }
 
 /* Writes tab: the files/kmcp angle groups + every write-shaped tool call
@@ -2239,18 +2306,32 @@ async function send(isFork){
     if(!r.ok || d.error){ fail(d.error || (r.status+" "+r.statusText)); return; }
     // Both fork routes mint & return new_session (fork-session-id fix); surface it.
     st.className = "ok";
-    st.textContent = d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
+    st.textContent = d.action === "queued"
+      ? `⏸ queued #${d.position} — sends automatically when the session settles`
+      : d.new_session ? `⑂ forked${d.action==="fork"?" from end":""} → ${d.new_session.slice(0,8)} (headless)`
       : "✓ answer sent — headless turn running";
     inp.value = ""; growComposer();
     // A plain answer resumes THIS session's file, so we can track it live.
     // Forks write a new session file — leave their one-shot status as-is.
+    // A queued answer isn't running yet: just repaint so the queued turn shows.
     if(d.action === "answer"){ startAwait(); refreshSession(false, true); }
+    else if(d.action === "queued"){ refreshSession(false, true); }
   } catch(e){ fail("no response (server error?) — "+e); }
   finally {
     sending = false;
     // restore pre-send gating; the next poll re-derives it from server truth
     bans.disabled = wasAns; bfork.disabled = wasFork;
   }
+}
+
+/* Cancel (or, for a failed one, dismiss) a queued-not-yet-dispatched message.
+   The server refuses once dispatch has begun — no ambiguous cancels. */
+async function cancelQueued(qid){
+  if(!curId) return;
+  const [ok, d] = await post("/api/queue/cancel", {session_id: curId, queue_id: qid});
+  if(!ok || d.error){ toast(d.error || "cancel failed", true); return; }
+  toast("queued message removed");
+  refreshSession(false, true);
 }
 
 /* ---------- subagent back-link: parent session @ the spawning message ------ */

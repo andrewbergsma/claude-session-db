@@ -30,8 +30,11 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/claudemd?id=<sid>&n=   one CLAUDE.md memory file's content (read-only)
   GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
+                                   (busy session -> message queued, never refused)
+  POST /api/queue/cancel           {session_id, queue_id} -> drop a queued message
   POST /api/fork                   {session_id, cwd, text, at_uuid?}
   POST /api/priority               {session_id, priority: low|med|high|critical|null}
   POST /api/title                  {session_id, title: str|null} -> set/clear a title
@@ -1036,6 +1039,85 @@ def _agents_glance(path: Path):
     return {"total": total, "live": live} if total else None
 
 
+# ----------------------------------------------------------------------------
+# CLAUDE.md memory files — the always-loaded context Claude Code injects
+#
+# Read-only resolution, confined by construction to $HOME + the session's own
+# directory chain: the global ~/.claude/CLAUDE.md plus a CLAUDE.md per ancestor
+# directory of the session cwd (outermost first — the order Claude Code applies
+# them; a worktree cwd therefore surfaces both the repo's and the worktree's
+# file). /api/claudemd never accepts a path from the caller — it re-resolves
+# this list from the session id and indexes into it.
+# ----------------------------------------------------------------------------
+CLAUDEMD_MAX_BYTES = 512 * 1024
+
+
+def _claudemd_files(cwd):
+    """[{scope, path, chars}] for the CLAUDE.md files a session at `cwd` loads.
+
+    Missing files are omitted (never an error row); duplicates (symlinks,
+    cwd == repo root) collapse on the resolved path.
+    """
+    home = Path.home()
+    out, seen = [], set()
+
+    def add(scope, p: Path):
+        try:
+            rp = p.resolve()
+            if rp in seen or not rp.is_file():
+                return
+            seen.add(rp)
+            out.append({"scope": scope, "path": str(p),
+                        "chars": rp.stat().st_size})
+        except OSError:
+            pass
+
+    add("global", home / ".claude" / "CLAUDE.md")
+    if cwd:
+        try:
+            c = Path(cwd).resolve()
+        except OSError:
+            c = None
+        if c is not None:
+            for d in (*reversed(c.parents), c):
+                if d != home and d.is_relative_to(home):
+                    add("project", d / "CLAUDE.md")
+    return out
+
+
+def _session_cwd(path: Path):
+    """cwd from the transcript tail — the same derivation /api/git uses."""
+    cwd = None
+    for r in tail_records(path, NAV_TAIL_BYTES):
+        if r.get("type") in ("user", "assistant") and r.get("cwd"):
+            cwd = r["cwd"]
+    return cwd
+
+
+def claudemd_payload(sid: str, n: int):
+    """(payload, code) for GET /api/claudemd — one memory file, read-only.
+
+    `n` indexes the server-side re-resolved list for this session; the caller
+    can never name a path, so the endpoint can only serve the global CLAUDE.md
+    or one inside the session's own directory chain.
+    """
+    path = find_session(sid)
+    if path is None:
+        return {"error": "session not found"}, 404
+    files = _claudemd_files(_session_cwd(path))
+    if not 0 <= n < len(files):
+        return {"error": "no such memory file"}, 404
+    f = files[n]
+    try:
+        with open(f["path"], "rb") as fh:
+            data = fh.read(CLAUDEMD_MAX_BYTES + 1)
+    except OSError as e:
+        return {"error": str(e)[:200]}, 500
+    return {**f,
+            "content": data[:CLAUDEMD_MAX_BYTES].decode("utf-8", "replace"),
+            "truncated": len(data) > CLAUDEMD_MAX_BYTES}, 200
+
+
 def build_session(sid: str):
     path = find_session(sid)
     if path is None:
@@ -1212,11 +1294,15 @@ def build_session(sid: str):
         "truncated": truncated,
         "counts": {"reads": n_reads, "searches": n_searches,
                    "events": len(events)},
+        "claudemd": _claudemd_files(cwd),
         "events": events,
         "rail": angle_rail(sid),
         "tldr": tldr.payload(sid, path),
         "archived": sid in _read_archive(),
         "stoppable": _stop,
+        # queued-not-yet-dispatched composer messages (per-session FIFO); the
+        # client renders them at the stream tail as pending "you" turns.
+        "queue": queue_for(sid),
         # off-session summary status (in-memory SUMMARIZING) surfaced in the
         # DETAIL pane too — not just the nav — so its running→done/failed
         # transition is visible on the session the operator is watching. Child
@@ -1287,6 +1373,221 @@ def spawn_claude(args, cwd, session_id=None, log_path=None):
         )
     _register(session_id, proc)
     return proc
+
+
+# ----------------------------------------------------------------------------
+# reply queue — never block the operator on the two-writer guard
+#
+# /api/answer used to REFUSE when the session couldn't accept a write: the
+# transcript was written <15s ago (the two-writer guard), or a run this console
+# spawned for it is still in flight. Now the composer always accepts — when the
+# session is busy the message is queued (per-session FIFO, persisted at
+# $CSD_STATE_DIR/console/queue.json with the same atomic-replace pattern as
+# archived.json, so a restart loses nothing) and a background dispatcher sends
+# it through the SAME spawn path as a direct answer once the block clears.
+#
+# The guard itself is untouched — the queue is how we WAIT FOR it, never a
+# bypass: answer_blocked() wraps the guard's boolean plus the run registry
+# (_live_procs, the console's existing record of what it spawned), and both the
+# direct path and the dispatcher consult it. Strict order: only the head of a
+# session's queue is ever eligible, and a head that exhausted its retries stays
+# visible (state "failed", error attached) and deliberately blocks the rest
+# until the operator dismisses it — reordering or silently dropping a message
+# would be worse than pausing.
+# ----------------------------------------------------------------------------
+QUEUE_FILE = CONSOLE_STATE / "queue.json"
+_QUEUE_LOCK = threading.Lock()        # queue.json read-modify-write
+_DISPATCH_LOCK = threading.Lock()     # one spawn decision at a time (all paths)
+QUEUE_MAX_ATTEMPTS = 3
+QUEUE_RETRY_BACKOFF_S = 30            # × attempts, between failed dispatches
+QUEUE_POLL_S = 2.0                    # dispatcher tick; cheap (one stat + poll)
+
+
+def transcript_write_guard(sid: str) -> bool:
+    """The two-writer guard's boolean: True while the session's transcript was
+    written within the last 15s. Same check /api/answer always made inline —
+    kept as ONE interface so queue consumers wait on it rather than re-derive
+    it. Never weakened here; the queue exists to outlast it, not bypass it."""
+    src = find_session(sid)
+    try:
+        return bool(src and time.time() - src.stat().st_mtime < 15)
+    except OSError:
+        return False
+
+
+def answer_blocked(sid: str):
+    """Why the session can't take `claude -p --resume` RIGHT NOW, or None.
+
+    Two blocks, both already tracked elsewhere and only consulted here:
+    a live run the console itself spawned (the run registry), and the
+    two-writer guard window after any transcript write."""
+    if _live_procs(sid):
+        return "console-spawned run still in flight"
+    if transcript_write_guard(sid):
+        return "session written in the last 15s (two-writer guard)"
+    return None
+
+
+def _read_queue() -> dict:
+    """sid -> [item, ...] (FIFO). Missing/corrupt file degrades to empty."""
+    try:
+        d = json.loads(QUEUE_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_queue(q: dict) -> None:
+    _atomic_write_json(QUEUE_FILE, {k: v for k, v in q.items() if v})
+
+
+def queue_for(sid: str) -> list:
+    """UI projection of a session's pending queue (never the cwd internals)."""
+    return [{"id": it.get("id"), "text": it.get("text"),
+             "queued_at": it.get("queued_at"),
+             "state": it.get("state", "queued"),
+             "attempts": it.get("attempts", 0), "error": it.get("error")}
+            for it in _read_queue().get(sid) or []]
+
+
+def enqueue_answer(sid: str, cwd, text: str, reason: str) -> dict:
+    item = {"id": uuidlib.uuid4().hex[:12], "text": text, "cwd": cwd,
+            "queued_at": datetime.now(timezone.utc).isoformat(),
+            "attempts": 0, "state": "queued", "error": None,
+            "next_attempt_at": 0, "blocked_reason": reason}
+    with _QUEUE_LOCK:
+        q = _read_queue()
+        q.setdefault(sid, []).append(item)
+        _write_queue(q)
+        pos = len(q[sid])
+    return {"ok": True, "action": "queued", "session": sid,
+            "queue_id": item["id"], "position": pos, "reason": reason}
+
+
+def cancel_queued(sid: str, qid: str) -> dict:
+    """Drop a queued message. Refused mid-dispatch (the spawn may already have
+    happened) and after dispatch (nothing left to cancel) — never ambiguous."""
+    with _QUEUE_LOCK:
+        q = _read_queue()
+        items = q.get(sid) or []
+        hit = next((it for it in items if it.get("id") == qid), None)
+        if hit is None:
+            return {"ok": False,
+                    "error": "message not queued (already dispatched or cancelled)"}
+        if hit.get("state") == "dispatching":
+            return {"ok": False, "error": "message is dispatching right now"}
+        items = [it for it in items if it.get("id") != qid]
+        if items:
+            q[sid] = items
+        else:
+            q.pop(sid, None)
+        _write_queue(q)
+    return {"ok": True, "session": sid, "cancelled": qid}
+
+
+def submit_answer(sid: str, cwd, text: str) -> tuple:
+    """(payload, http_code) for /api/answer — the never-refuse composer path.
+
+    Sendable now AND nothing already queued -> spawn directly, exactly the
+    pre-queue behaviour. Otherwise enqueue: a non-empty queue enqueues even
+    when the guard is clear, so a new message can never overtake older queued
+    ones (strict per-session FIFO)."""
+    with _DISPATCH_LOCK:
+        reason = answer_blocked(sid)
+        if reason is None and not (_read_queue().get(sid) or []):
+            # Spawn can throw (e.g. `claude` unresolved) — must return JSON,
+            # not let the exception close the connection bodyless.
+            try:
+                spawn_claude(["-p", "--resume", sid, text], cwd, sid)
+            except Exception as e:  # noqa: BLE001
+                return {"error": f"failed to spawn claude: {str(e)[:250]}"}, 500
+            return {"ok": True, "action": "answer", "session": sid}, 200
+    return enqueue_answer(sid, cwd, text, reason or "behind queued messages"), 200
+
+
+def _fail_queued(sid: str, qid: str, err: str) -> None:
+    """Record a failed dispatch on the item: bounded retries with backoff,
+    then a terminal 'failed' state the operator sees and must dismiss."""
+    with _QUEUE_LOCK:
+        q = _read_queue()
+        for it in q.get(sid) or []:
+            if it.get("id") == qid:
+                it["attempts"] = it.get("attempts", 0) + 1
+                it["error"] = err[:300]
+                exhausted = it["attempts"] >= QUEUE_MAX_ATTEMPTS
+                it["state"] = "failed" if exhausted else "queued"
+                it["next_attempt_at"] = (
+                    time.time() + QUEUE_RETRY_BACKOFF_S * it["attempts"])
+                break
+        _write_queue(q)
+
+
+def _pop_queued(sid: str, qid: str) -> None:
+    with _QUEUE_LOCK:
+        q = _read_queue()
+        items = [it for it in (q.get(sid) or []) if it.get("id") != qid]
+        if items:
+            q[sid] = items
+        else:
+            q.pop(sid, None)
+        _write_queue(q)
+
+
+def _dispatch_tick() -> None:
+    """One pass over every session with queued messages. Head-only (strict
+    order), single-flight per session (a just-spawned run registers in RUNS
+    before the lock is released, so answer_blocked holds until it exits and
+    the guard window passes)."""
+    now = time.time()
+    for sid in list(_read_queue().keys()):
+        with _DISPATCH_LOCK:
+            if answer_blocked(sid):
+                continue
+            with _QUEUE_LOCK:
+                q = _read_queue()
+                items = q.get(sid) or []
+                if not items:
+                    continue
+                head = items[0]
+                if head.get("state") == "failed":
+                    continue            # blocks the queue until dismissed
+                if (head.get("next_attempt_at") or 0) > now:
+                    continue            # backing off after a failed attempt
+                head["state"] = "dispatching"   # cancel refuses from here on
+                _write_queue(q)
+            try:
+                spawn_claude(["-p", "--resume", sid, head.get("text") or ""],
+                             head.get("cwd"), sid)
+            except Exception as e:  # noqa: BLE001 — surfaced on the item
+                _fail_queued(sid, head["id"], str(e))
+            else:
+                _pop_queued(sid, head["id"])
+
+
+def _reset_stuck_dispatching() -> None:
+    """Startup pass: a crash mid-dispatch leaves an item 'dispatching'; put it
+    back to 'queued' so it isn't orphaned (worst case is one duplicate send,
+    never a silent drop)."""
+    with _QUEUE_LOCK:
+        q = _read_queue()
+        changed = False
+        for items in q.values():
+            for it in items:
+                if it.get("state") == "dispatching":
+                    it["state"] = "queued"
+                    changed = True
+        if changed:
+            _write_queue(q)
+
+
+def _queue_dispatcher() -> None:
+    _reset_stuck_dispatching()
+    while True:
+        try:
+            _dispatch_tick()
+        except Exception:  # noqa: BLE001 — the dispatcher must never die
+            pass
+        time.sleep(QUEUE_POLL_S)
 
 
 # ----------------------------------------------------------------------------
@@ -2211,7 +2512,14 @@ class Handler(SimpleHTTPRequestHandler):
             if p is not None:
                 try:
                     st = p.stat()
-                    etag = (f'"{st.st_mtime_ns:x}-{st.st_size:x}-'
+                    # Fold the reply-queue file's signature in so a queued /
+                    # cancelled / failed message repaints on the next poll
+                    # instead of waiting out the 30s bucket.
+                    try:
+                        qsig = QUEUE_FILE.stat().st_mtime_ns
+                    except OSError:
+                        qsig = 0
+                    etag = (f'"{st.st_mtime_ns:x}-{st.st_size:x}-{qsig:x}-'
                             f'{int(time.time() // 30):x}"')
                     if self.headers.get("If-None-Match") == etag:
                         self.send_response(304)
@@ -2244,6 +2552,20 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload, code = git_payload(
                     sid, refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/claudemd":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                n = int((q.get("n") or ["0"])[0])
+            except ValueError:
+                return self._json({"error": "bad n"}, 400)
+            try:
+                payload, code = claudemd_payload(sid, n)
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
@@ -2304,6 +2626,10 @@ class Handler(SimpleHTTPRequestHandler):
         # --- endpoints that act on the session, no text needed --------------
         if route == "/api/stop":
             r = stop_session(sid)
+            return self._json(r, 200 if r["ok"] else 409)
+
+        if route == "/api/queue/cancel":
+            r = cancel_queued(sid, body.get("queue_id", ""))
             return self._json(r, 200 if r["ok"] else 409)
 
         if route == "/api/archive":
@@ -2390,20 +2716,12 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "text required"}, 400)
 
         if route == "/api/answer":
-            src = find_session(sid)
-            if src and time.time() - src.stat().st_mtime < 15:
-                return self._json(
-                    {"error": "session written in the last 15s — answer refused "
-                              "(two-writer guard); wait for it to settle, "
-                              "or fork"}, 409)
-            # Spawn can throw (e.g. `claude` unresolved) — must return JSON, not
-            # let the exception close the connection bodyless. Mirror /api/fork.
-            try:
-                spawn_claude(["-p", "--resume", sid, text], cwd, sid)
-            except Exception as e:
-                return self._json(
-                    {"error": f"failed to spawn claude: {str(e)[:250]}"}, 500)
-            return self._json({"ok": True, "action": "answer", "session": sid})
+            # Never refused: sendable now -> spawned exactly as before; busy
+            # (two-writer guard / console-spawned run live) or behind earlier
+            # queued messages -> enqueued, dispatched by the queue worker the
+            # moment answer_blocked() clears. See submit_answer().
+            payload, code = submit_answer(sid, cwd, text)
+            return self._json(payload, code)
 
         if route == "/api/fork":
             at = body.get("at_uuid")
@@ -2437,6 +2755,10 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
     CSD_DSN = csd_dsn or os.environ.get("CSD_DATABASE_URL")
     _migrate_legacy_overlays()      # seed meta.json from legacy priority/titles
+    # Reply-queue dispatcher: drains queued composer messages once a session's
+    # answer_blocked() clears (persisted queue — survives console restarts).
+    threading.Thread(target=_queue_dispatcher, daemon=True,
+                     name="reply-queue").start()
 
     if _loopback(host) or no_auth:
         TOKEN = None

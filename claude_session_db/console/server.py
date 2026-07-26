@@ -54,6 +54,7 @@ import re
 import secrets
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -1085,6 +1086,191 @@ def _claudemd_files(cwd):
     return out
 
 
+# ----------------------------------------------------------------------------
+# Deployed / served URLs — what this session "has up"
+#
+# Pure-regex/structural extraction (doctrine: extraction is code, models only
+# judge). URLs are anchored to deploy/serve-shaped TOOL EVENTS — an Artifact
+# publish result, a `gh pr create` output, a deploy CLI's output, a server
+# launch command — never to prose, docs, or search results, so a URL merely
+# *mentioned* in conversation can't reach the rail (precision over recall).
+# Read-only over the already-parsed records; nothing is resumed or written.
+# ----------------------------------------------------------------------------
+ARTIFACT_URL_RE = re.compile(r"https://claude\.ai/[^\s\"'<>|)\]]+")
+PR_CMD_RE = re.compile(r"\bgh\s+pr\s+create\b")
+PR_URL_RE = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+# Deploy CLIs in command position (start of a line/pipeline segment), so
+# `curl https://x.vercel.app` or a URL in prose never counts as a deploy.
+DEPLOY_CMD_RE = re.compile(
+    r"(?:^|[|&;(]\s*|\s)(?:npx\s+|nohup\s+)?"
+    r"(?:wrangler\s+(?:pages\s+)?deploy|vercel\b|netlify\s+deploy"
+    r"|fly(?:ctl)?\s+deploy|firebase\s+deploy|surge\s)", re.M)
+DEPLOY_HOST_RE = re.compile(
+    r"https?://[\w.-]+\.(?:workers\.dev|pages\.dev|vercel\.app|netlify\.app"
+    r"|fly\.dev|onrender\.com|web\.app|surge\.sh)(?:/[^\s\"'<>|)\]]*)?")
+LOCAL_URL_RE = re.compile(
+    r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0)(?::\d{2,5})?(?:/|\b)")
+# (launcher regex, default port or None, short name). A launcher with no
+# explicit --port and no default and no URL in its output yields nothing.
+SERVE_LAUNCHERS = [
+    (re.compile(r"\bcsd\s+console\b"), 4462, "csd console"),
+    (re.compile(r"-m\s+claude_session_db\.console\.server\b"), 4462,
+     "console.server"),
+    (re.compile(r"\bserver\.serve\(|\bserve\(host"), 4462, "server.serve"),
+    (re.compile(r"-m\s+http\.server\b"), 8000, "http.server"),
+    (re.compile(r"\buvicorn\b"), 8000, "uvicorn"),
+    (re.compile(r"\bgunicorn\b"), 8000, "gunicorn"),
+    (re.compile(r"\bflask\b[^\n|;&]*\brun\b"), 5000, "flask run"),
+    (re.compile(r"\b(?:npx\s+)?vite\b(?!\s+build)"), 5173, "vite"),
+    (re.compile(r"\bnext\s+dev\b"), 3000, "next dev"),
+    (re.compile(r"\bnpm\s+run\s+(?:dev|serve)\b"
+                r"|\b(?:yarn|pnpm|bun)\s+(?:run\s+)?dev\b"), None, "npm dev"),
+    (re.compile(r"\bnpx\s+(?:serve|http-server)\b|\bhttp-server\b"), None,
+     "http-server"),
+    (re.compile(r"\bphp\s+-S\b"), None, "php -S"),
+]
+SERVE_PORT_RE = re.compile(r"(?:--port[= ]\s*|\bport\s*=\s*|\s-p\s+)(\d{2,5})\b")
+HTTP_SERVER_PORT_RE = re.compile(r"-m\s+http\.server\s+(\d{2,5})\b")
+PHP_S_PORT_RE = re.compile(r"-S\s+[\w.]*:(\d{2,5})")
+# Lines that only inspect/kill/search never *launch* — a launcher token inside
+# them (grep pattern, pkill -f "port=...", a comment) must not mint a URL.
+NON_LAUNCH_LINE_RE = re.compile(
+    r"^\s*(?:#|(?:sudo\s+)?(?:pkill|kill|killall|grep|rg|ag|lsof|ps|cat|sed"
+    r"|awk|curl|wget|echo)\b)")
+DEPLOYED_PROBE_MAX = 8          # cap per-payload liveness probes
+DEPLOYED_PROBE_TIMEOUT = 0.1    # seconds; loopback connect only
+
+
+def _probe_local(port: int) -> bool:
+    """~100ms TCP connect to loopback ONLY — never a remote host."""
+    try:
+        with socket.create_connection(("127.0.0.1", port),
+                                      timeout=DEPLOYED_PROBE_TIMEOUT):
+            return True
+    except OSError:
+        return False
+
+
+def _deployed(records, rmap):
+    """[{url, kind, label, ts, source, up?}] — what this session has up.
+
+    kind ∈ artifact | deploy | local | pr. Dedup by URL, LAST occurrence's
+    timestamp wins. `local` rows carry `up` from a loopback-only connect probe
+    (dead servers render dimmed, not hidden). Sorted artifact → deploy →
+    local → pr (PRs are secondary to actually-served things), newest first
+    within a kind.
+    """
+    found = {}   # url -> row (dict preserves order; re-put moves to the end)
+
+    def put(url, kind, label, ts, source):
+        url = url.rstrip(".,;:")
+        found.pop(url, None)
+        found[url] = {"url": url, "kind": kind, "label": label, "ts": ts,
+                      "source": " ".join((source or "").split())[:160]}
+
+    for r in records:
+        if r.get("type") != "assistant":
+            continue
+        ts = r.get("timestamp")
+        content = (r.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use"):
+                continue
+            name, inp = b.get("name", ""), b.get("input") or {}
+            res = rmap.get(b.get("id")) or {}
+            out_text = res.get("text") or ""
+
+            if name == "Artifact":
+                # Result reads "Published <file> at https://claude.ai/…".
+                m = ARTIFACT_URL_RE.search(out_text)
+                if m and not res.get("is_error"):
+                    label = (inp.get("title")
+                             or Path(inp.get("file_path") or "").name
+                             or "artifact")
+                    put(m.group(0), "artifact", label, ts, "Artifact publish")
+                continue
+            if name != "Bash":
+                continue
+            cmd = inp.get("command") or ""
+
+            if PR_CMD_RE.search(cmd):
+                m = PR_URL_RE.search(out_text)
+                if m:
+                    put(m.group(0), "pr", "PR #" + m.group(0).rsplit("/", 1)[1],
+                        ts, "gh pr create")
+
+            if DEPLOY_CMD_RE.search(cmd):
+                # The URL must come from the deploy's OWN output.
+                for m in DEPLOY_HOST_RE.finditer(out_text):
+                    u = m.group(0)
+                    host = (urlparse(u).hostname or u)
+                    put(u, "deploy", host, ts, cmd)
+
+            if res.get("is_error"):
+                continue    # a refused/failed launch never served anything
+            heredoc_end = None   # prose in heredocs (commit msgs, PR bodies)
+            for line in cmd.splitlines():
+                if heredoc_end is not None:
+                    if line.strip() == heredoc_end:
+                        heredoc_end = None
+                    continue
+                hm = re.search(r"<<[-~]?\s*['\"]?(\w+)", line)
+                if hm:
+                    heredoc_end = hm.group(1)
+                served = False
+                # per pipeline segment, so the launcher, its port, and the
+                # displayed source all come from the same simple command
+                for seg in re.split(r"&&|\|\||;|\|", line):
+                    seg = seg.strip()
+                    if not seg or NON_LAUNCH_LINE_RE.match(seg):
+                        continue
+                    hit = next(((rx, dflt, nm)
+                                for rx, dflt, nm in SERVE_LAUNCHERS
+                                if rx.search(seg)), None)
+                    if hit is None:
+                        continue
+                    rx, dflt, nm = hit
+                    # `csd console` in backticks is prose ABOUT the command,
+                    # not a launch of it
+                    ms = rx.search(seg)
+                    if ms and seg[max(0, ms.start()-1):ms.start()] == "`":
+                        continue
+                    pm = (HTTP_SERVER_PORT_RE.search(seg)
+                          or PHP_S_PORT_RE.search(seg)
+                          or SERVE_PORT_RE.search(seg))
+                    port = int(pm.group(1)) if pm else None
+                    if port is None:
+                        mu = LOCAL_URL_RE.search(out_text)
+                        if mu:
+                            port = urlparse(mu.group(0).rstrip("/")).port or 80
+                    if port is None:
+                        port = dflt
+                    if port:
+                        put(f"http://127.0.0.1:{port}/", "local",
+                            f"127.0.0.1:{port} · {nm}", ts, seg)
+                        served = True
+                        break
+                if served:
+                    break   # one served URL per command is enough
+
+    rows = list(found.values())
+    probed = 0
+    for row in rows:
+        if row["kind"] != "local" or probed >= DEPLOYED_PROBE_MAX:
+            continue
+        pu = urlparse(row["url"])
+        if pu.hostname == "127.0.0.1" and pu.port:   # loopback by construction
+            row["up"] = _probe_local(pu.port)
+            probed += 1
+    order = {"artifact": 0, "deploy": 1, "local": 2, "pr": 3}
+    # ISO-8601 timestamps sort lexicographically: newest first within a kind.
+    rows.sort(key=lambda x: x["ts"] or "", reverse=True)
+    rows.sort(key=lambda x: order.get(x["kind"], 9))
+    return rows
+
+
 def _session_cwd(path: Path):
     """cwd from the transcript tail — the same derivation /api/git uses."""
     cwd = None
@@ -1295,6 +1481,10 @@ def build_session(sid: str):
         "counts": {"reads": n_reads, "searches": n_searches,
                    "events": len(events)},
         "claudemd": _claudemd_files(cwd),
+        # deployed/served URLs mined from deploy/serve-shaped tool events
+        # (Artifact publishes, deploy CLI output, server launches, PRs) —
+        # never from prose. Local rows carry a loopback liveness `up` flag.
+        "deployed": _deployed(records, rmap),
         "events": events,
         "rail": angle_rail(sid),
         "tldr": tldr.payload(sid, path),

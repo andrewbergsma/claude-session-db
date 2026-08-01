@@ -88,6 +88,26 @@
   .sc:hover { color:var(--ink); }
   .sc.on { background:var(--accent); color:#fff; border-color:var(--accent); }
 
+  /* ---- batch multi-select + progress bar (sticky at the sidebar foot) ---- */
+  #navbatchbtn.on { color:var(--accent); background:var(--surface2); }
+  #batchbar { display:none; position:sticky; bottom:0; z-index:4; background:var(--surface);
+              border-top:1px solid var(--border); padding:8px 12px 9px; font-size:11.5px; }
+  #batchbar.on { display:block; }
+  #batchbar .bhead { display:flex; justify-content:space-between; align-items:center;
+                     color:var(--muted); font:10.5px var(--mono); }
+  #batchbar .bhead b { color:var(--ink); }
+  #batchbar .bx { cursor:pointer; color:var(--muted); } #batchbar .bx:hover { color:var(--ink); }
+  #batchbar .brow { display:flex; align-items:center; gap:5px; flex-wrap:wrap; margin-top:5px; }
+  #batchbar .bstat { font:10.5px var(--mono); color:var(--muted); margin-top:6px;
+                     max-height:130px; overflow-y:auto; }
+  #batchbar .bstat .bi { display:flex; gap:6px; align-items:baseline; line-height:1.5; }
+  #batchbar .bstat .bi .lb { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  #batchbar .st-done { color:var(--good); } #batchbar .st-failed { color:var(--warn); }
+  #batchbar .st-running { color:var(--accent); } #batchbar .st-queued, #batchbar .st-cancelled { color:var(--muted); }
+  .sess .bchk { cursor:pointer; color:var(--muted); font-size:12px; }
+  .sess.bselrow { background:var(--surface2); box-shadow:inset 2px 0 0 var(--accent); }
+  .sess.bselrow .bchk { color:var(--accent); }
+
   /* collapsed rail: project initials + waiting dots */
   body.navmin #nav .top { padding:10px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
@@ -727,6 +747,8 @@
     <div class="top">
       <div class="toprow">
         <div class="navtabs" id="navtabs"></div>
+        <span id="navbatchbtn" class="navbtn" onclick="toggleBatchMode()"
+              title="Batch actions: select multiple sessions, then mine angles / generate timelines / summarize them as a queue">▣</span>
         <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
       </div>
       <div class="sub" id="navsub">loading…</div>
@@ -735,6 +757,7 @@
     </div>
     <div id="navrail"></div>
     <div id="navlist"></div>
+    <div id="batchbar"></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
   <div id="navback" onclick="closeNavDrawer()"></div>
@@ -1252,6 +1275,13 @@ function sessRow(s, showProject){
   const idleCell = working ? `<div class="cidle active" title="agent active now">active</div>`
                            : `<div class="cidle" title="idle since last message">${idleTxt(s)}</div>`;
   const arc = showProject ? " arch" : "";
+  /* batch mode: the row toggles selection instead of opening, and the state
+     dot becomes a checkbox — no column changes, so the grid is untouched */
+  const rowClick = batchMode ? `batchToggle(event,'${id}')` : `openSession('${id}')`;
+  const selCls = batchMode && batchSel.has(id) ? " bselrow" : "";
+  const stateCell = batchMode
+    ? `<div class="cstate bchk">${batchSel.has(id)?"☑":"☐"}</div>`
+    : `<div class="cstate">${stateDot(s)}</div>`;
 
   if(navMobile){
     const open = navExpanded.has(id);
@@ -1262,16 +1292,16 @@ function sessRow(s, showProject){
         <span>Last <b>${dtStr(lastMs(s))}</b></span>
         ${showProject?`<span>Project <b>${esc(s.project_label||s.project||"")}</b></span>`:""}
       </div>` : "";
-    return `<div class="sess${arc} ${id===curId?"active":""}" onclick="openSession('${id}')">
-      <div class="cstate">${stateDot(s)}</div>
+    return `<div class="sess${arc}${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
+      ${stateCell}
       ${titleCell}
       ${prioCell}
       ${idleCell}
       <div class="cexp" title="show more" onclick="toggleRowExpand(event,'${id}')">${open?"▾":"▸"}</div>
     </div>${detail}`;
   }
-  return `<div class="sess${arc} ${id===curId?"active":""}" onclick="openSession('${id}')">
-    <div class="cstate">${stateDot(s)}</div>
+  return `<div class="sess${arc}${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
+    ${stateCell}
     ${titleCell}
     ${showProject ? `<div class="cproj" title="${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</div>` : `<div class="cnum">${s.msg_count!=null?s.msg_count:"—"}</div>`}
     <div class="ck ${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?s.ctx_tokens.toLocaleString()+' tokens':''}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</div>
@@ -1919,6 +1949,117 @@ async function mine(){
   const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
   if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
   actmsg("mined"); await refreshSession(false, true);
+}
+
+/* ---------- batch operations: multi-select + queued fan-out ----------------
+   The ▣ toggle turns the sidebar into a multi-select surface (rows toggle
+   selection; the state dot becomes a checkbox). "All open" selects every
+   session the threads lens calls open (verdict != CLOSED). Run buttons POST
+   /api/batch — the server queues the work through a single worker (angles +
+   timeline serial; summarize bounded to 2 in-flight off-session runs) and
+   the bar polls /api/batch for per-session progress. Failures isolate. */
+let batchMode = false, batchSel = new Set(), batchData = null, batchTimer = null;
+const OPEN_VERDICTS = ["LIVE", "OPEN", "OPEN-delta", "OPEN?"];
+
+function toggleBatchMode(){
+  batchMode = !batchMode;
+  if(!batchMode) batchSel.clear();
+  const b = document.getElementById("navbatchbtn");
+  if(b) b.classList.toggle("on", batchMode);
+  renderNav(); renderBatchBar();
+}
+function batchToggle(e, id){
+  e.stopPropagation();
+  batchSel.has(id) ? batchSel.delete(id) : batchSel.add(id);
+  renderNav(); renderBatchBar();
+}
+function batchClear(){ batchSel.clear(); renderNav(); renderBatchBar(); }
+async function batchAllOpen(){
+  let d; try { d = await (await fetch("/api/mgmt")).json(); } catch(e){ toast("threads lens unreachable", true); return; }
+  if(d.error){ toast(d.error, true); return; }
+  const open = new Set((d.sessions||[]).filter(r => OPEN_VERDICTS.includes(r.verdict)).map(r => r.session_id));
+  const visible = new Set((navData && navData.sessions || []).map(s => s.session_id));
+  let n = 0;
+  for(const id of open) if(visible.has(id)){ batchSel.add(id); n++; }
+  toast(n ? `selected ${n} open session(s)` : "no open sessions in the sidebar");
+  renderNav(); renderBatchBar();
+}
+async function runBatch(action){
+  if(!batchSel.size) return;
+  if(action === "summarize" && !confirm(
+      `Summarize + archive ${batchSel.size} session(s)?\n\n` +
+      "Each spawns a SEPARATE off-session claude run (max 2 at a time) that " +
+      "digests the transcript from disk — it never resumes or touches the " +
+      "session. Each session is archived when its summary is dispatched."))
+    return;
+  const [ok, d] = await post("/api/batch", {actions: [action], session_ids: [...batchSel]});
+  if(!ok || d.error){ toast(d.error || "batch failed", true); return; }
+  toast(`batch queued — ${d.batch.items.length} item(s)`);
+  pollBatch();
+}
+async function cancelBatch(bid){
+  await post("/api/batch/cancel", {batch_id: bid});
+  pollBatch();
+}
+async function pollBatch(){
+  clearTimeout(batchTimer); batchTimer = null;
+  let d; try { d = await (await fetch("/api/batch")).json(); } catch(e){ d = null; }
+  if(d && Array.isArray(d.batches)) batchData = d.batches;
+  renderBatchBar();
+  if((batchData||[]).some(b => !b.done))
+    batchTimer = setTimeout(pollBatch, 2500);
+}
+function batchLabel(sid){
+  const s = (navData && navData.sessions || []).find(x => x.session_id === sid);
+  return (s && (s.user_title || s.title)) || sid.slice(0, 8);
+}
+const BATCH_GLYPH = {queued:"·", running:"▶", done:"✓", failed:"✗", cancelled:"–"};
+function renderBatchBar(){
+  const el = document.getElementById("batchbar");
+  if(!el) return;
+  const active = (batchData||[]).find(b => !b.done);
+  const last = active || (batchData||[])[0];
+  el.classList.toggle("on", batchMode || !!active);
+  if(!batchMode && !active){ el.innerHTML = ""; return; }
+  let html = "";
+  if(batchMode){
+    html += `<div class="bhead"><span><b>${batchSel.size}</b> selected</span>
+        <span class="bx" onclick="toggleBatchMode()" title="leave batch mode">✕ done</span></div>
+      <div class="brow">
+        <button class="act sm" onclick="batchAllOpen()"
+          title="Select every open session — threads-lens verdict LIVE / OPEN / OPEN-delta (not CLOSED, not archived)">◉ All open</button>
+        <button class="act sm" onclick="batchClear()">clear</button>
+      </div>
+      <div class="brow">
+        <button class="act sm" onclick="runBatch('angles')" title="Mine the latest turn's angles for each selected session (serial queue)">⟳ Angles</button>
+        <button class="act sm" onclick="runBatch('timeline')" title="Generate the whole-session timeline for each selected session (serial queue, one Ollama lane)">⧗ Timelines</button>
+        <button class="act sm" onclick="runBatch('summarize')" title="Off-session summarize + archive each selected session (max 2 claude runs in flight)">✎ Summarize</button>
+      </div>`;
+  }
+  if(last){
+    const c = {queued:0, running:0, done:0, failed:0, cancelled:0};
+    for(const it of last.items) c[it.status] = (c[it.status]||0) + 1;
+    const parts = [];
+    if(c.running) parts.push(`<span class="st-running">${c.running} running</span>`);
+    if(c.queued) parts.push(`${c.queued} queued`);
+    if(c.done) parts.push(`<span class="st-done">${c.done} done</span>`);
+    if(c.failed) parts.push(`<span class="st-failed">${c.failed} failed</span>`);
+    if(c.cancelled) parts.push(`${c.cancelled} cancelled`);
+    const cancelBtn = (c.queued && !last.done)
+      ? ` <span class="bx" onclick="cancelBatch('${last.id}')" title="cancel the still-queued items (running items finish)">✕ cancel queued</span>` : "";
+    // list only the interesting items; a fully-green batch collapses to the count line
+    const lines = last.items
+      .filter(it => it.status === "running" || it.status === "failed" || it.status === "queued")
+      .slice(0, 30)
+      .map(it => `<div class="bi"><span class="st-${it.status}">${BATCH_GLYPH[it.status]||"?"}</span>` +
+                 `<span class="lb" title="${esc(it.session_id)}">${esc(batchLabel(it.session_id))}</span>` +
+                 `<span>${esc(it.action)}</span>` +
+                 (it.error ? `<span class="st-failed" title="${esc(it.error)}">${esc(it.error.slice(0,60))}</span>` : "") +
+                 `</div>`).join("");
+    html += `<div class="bstat"><div class="bi"><span>${last.done ? "batch finished" : "batch running"}:</span>` +
+            `<span>${parts.join(" · ") || "empty"}</span>${cancelBtn}</div>${lines}</div>`;
+  }
+  el.innerHTML = html;
 }
 
 /* Flag/clear a session priority; the sidebar regroups on the next render. */
@@ -2745,6 +2886,7 @@ document.addEventListener("visibilitychange", () => {
   else { navTick(); sesTick(); }   // immediate catch-up on return
 });
 navTick(); sesTick();
+pollBatch();   // pick up any batch resumed from batch.json after a restart
 </script>
 </body>
 </html>

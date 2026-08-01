@@ -50,6 +50,7 @@ import gzip
 import hmac
 import json
 import os
+import queue as queuelib
 import re
 import secrets
 import shutil
@@ -2181,6 +2182,269 @@ def digest_payload(sid: str, delta: bool, head, tail, full: bool):
 
 
 # ----------------------------------------------------------------------------
+# batch operations — one per-session action fanned out over many sessions
+#
+# The three per-session buttons (Mine angles / Generate timeline / Summarize +
+# archive) as a queue, never a stampede. Doctrine mirrors angles-watch: a
+# SINGLE worker drains the job queue, so N sessions cannot hit the local
+# Ollama concurrently. Per action:
+#   - angles:    mine_angles() (blocking subprocess) — strictly serial.
+#   - timeline:  reuses session_timeline's own single in-process worker via
+#     payload(force=True), then waits on its STATUS — so a batch and a manual
+#     Generate press share ONE lane instead of racing.
+#   - summarize: the SAME off-session dispatch path as the button
+#     (summarize_session — never --resume, archive on dispatch), bounded to
+#     SUMMARIZE_MAX_INFLIGHT concurrent `claude -p` children; a per-item
+#     watcher resolves the outcome off SUMMARIZING.
+# Failures isolate per item — one bad session never aborts the batch.
+# State is the console pattern: atomic-replace JSON (batch.json). On restart,
+# queued items are re-enqueued (same doctrine as queue.json); items caught
+# mid-run are marked failed ("interrupted") rather than silently re-run.
+# ----------------------------------------------------------------------------
+BATCH_FILE = CONSOLE_STATE / "batch.json"
+BATCH_ACTIONS = ("angles", "timeline", "summarize")
+BATCH_KEEP = 8                       # finished batches kept for the UI
+BATCH_MAX_ITEMS = 200
+SUMMARIZE_MAX_INFLIGHT = 2
+BATCH_TIMELINE_WAIT_S = int(os.environ.get("CSD_BATCH_TIMELINE_WAIT_S", "3600"))
+BATCH_SUMMARY_WAIT_S = int(os.environ.get("CSD_BATCH_SUMMARY_WAIT_S", "7200"))
+_BATCH_LOCK = threading.Lock()
+_BATCHES: dict[str, dict] = {}       # id -> batch dict (mirrored to BATCH_FILE)
+_BATCH_JOBS: "queuelib.Queue[tuple[str, int]]" = queuelib.Queue()
+_BATCH_WORKER = None
+_SUMMARIZE_SLOTS = threading.BoundedSemaphore(SUMMARIZE_MAX_INFLIGHT)
+
+OPEN_VERDICTS = ("LIVE", "OPEN", "OPEN-delta", "OPEN?")   # i.e. not CLOSED
+
+
+def _persist_batches_locked() -> None:
+    """Caller holds _BATCH_LOCK. Prunes finished batches beyond BATCH_KEEP."""
+    done = sorted((b for b in _BATCHES.values() if b.get("done")),
+                  key=lambda b: b.get("created_at") or 0)
+    for b in done[:-BATCH_KEEP] if len(done) > BATCH_KEEP else []:
+        _BATCHES.pop(b["id"], None)
+    _atomic_write_json(BATCH_FILE, {"batches": list(_BATCHES.values())})
+
+
+def _batch_update(bid: str, idx, **fields) -> None:
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        if not b:
+            return
+        if idx is not None and 0 <= idx < len(b["items"]):
+            b["items"][idx].update(fields)
+        b["done"] = all(i["status"] in ("done", "failed", "cancelled")
+                        for i in b["items"])
+        if b["done"] and not b.get("ended_at"):
+            b["ended_at"] = time.time()
+        _persist_batches_locked()
+
+
+def _watch_batch_summary(bid: str, idx: int, sid: str) -> None:
+    """Resolve a dispatched batch summary off SUMMARIZING, then free the slot."""
+    try:
+        t0 = time.time()
+        while time.time() - t0 < BATCH_SUMMARY_WAIT_S:
+            st = SUMMARIZING.get(sid)
+            if st != "running":
+                break
+            time.sleep(2)
+        else:
+            st = f"still running after {BATCH_SUMMARY_WAIT_S}s"
+        if st == "done":
+            _batch_update(bid, idx, status="done", ended_at=time.time())
+        else:
+            _batch_update(bid, idx, status="failed", ended_at=time.time(),
+                          error=str(st or "summary did not resolve")[:300])
+    finally:
+        _SUMMARIZE_SLOTS.release()
+
+
+def _run_batch_item(bid: str, idx: int) -> None:
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        item = (b["items"][idx]
+                if b and 0 <= idx < len(b["items"]) else None)
+        if not item or item["status"] != "queued":
+            return                    # cancelled (or gone) while waiting
+        sid, action, cwd = item["session_id"], item["action"], item.get("cwd")
+    _batch_update(bid, idx, status="running", started_at=time.time())
+    try:
+        if action == "angles":
+            r = mine_angles(sid)
+            if not r.get("ok"):
+                raise RuntimeError(r.get("error") or "mine failed")
+        elif action == "timeline":
+            p = find_session(sid)
+            if p is None:
+                raise RuntimeError("transcript not found")
+            session_timeline.payload(sid, p, force=True)   # enqueue, one lane
+            t0 = time.time()
+            while True:
+                st = session_timeline.STATUS.get(sid) or ""
+                if st == "ok":
+                    break
+                if st and not st.startswith(("queued", "generating")):
+                    raise RuntimeError(st[:300])
+                if time.time() - t0 > BATCH_TIMELINE_WAIT_S:
+                    raise RuntimeError(
+                        f"timeline still running after {BATCH_TIMELINE_WAIT_S}s")
+                time.sleep(2)
+        elif action == "summarize":
+            _SUMMARIZE_SLOTS.acquire()   # bound concurrent claude -p children
+            try:
+                r = summarize_session(sid, cwd or "")
+            except BaseException:
+                _SUMMARIZE_SLOTS.release()
+                raise
+            if not r.get("ok"):
+                _SUMMARIZE_SLOTS.release()
+                raise RuntimeError(r.get("error") or "dispatch failed")
+            threading.Thread(target=_watch_batch_summary, args=(bid, idx, sid),
+                             daemon=True,
+                             name=f"batch-summary-{sid[:8]}").start()
+            return                    # the watcher resolves done/failed
+        else:
+            raise RuntimeError(f"unknown action {action!r}")
+        _batch_update(bid, idx, status="done", ended_at=time.time())
+    except Exception as exc:  # noqa: BLE001 — one bad item ≠ dead batch
+        _batch_update(bid, idx, status="failed", error=str(exc)[:300],
+                      ended_at=time.time())
+
+
+def _batch_worker_loop() -> None:
+    while True:
+        bid, idx = _BATCH_JOBS.get()
+        try:
+            _run_batch_item(bid, idx)
+        except Exception:  # noqa: BLE001 — the worker must never die
+            pass
+
+
+def _ensure_batch_worker() -> None:
+    global _BATCH_WORKER
+    with _BATCH_LOCK:
+        if _BATCH_WORKER is None or not _BATCH_WORKER.is_alive():
+            _BATCH_WORKER = threading.Thread(target=_batch_worker_loop,
+                                             daemon=True, name="batch-worker")
+            _BATCH_WORKER.start()
+
+
+def open_session_ids() -> tuple:
+    """(ids, error) — sessions the mgmt lens calls open (not CLOSED), minus
+    archived. The same verdicts the threads overlay shows."""
+    m = mgmt_payload(7, 15)
+    if m.get("error"):
+        return [], m["error"]
+    archived = _read_archive()
+    ids = [r["session_id"] for r in m.get("sessions", [])
+           if r.get("verdict") in OPEN_VERDICTS
+           and r["session_id"] not in archived]
+    return ids, None
+
+
+def create_batch(actions, session_ids, scope=None) -> tuple:
+    """(payload, http_code). Expands actions × sessions into queued items."""
+    acts = [a for a in (actions or []) if a in BATCH_ACTIONS]
+    if not acts:
+        return {"error": f"actions must be a non-empty subset of "
+                         f"{list(BATCH_ACTIONS)}"}, 400
+    if scope == "open":
+        ids, err = open_session_ids()
+        if err:
+            return {"error": f"open-scope unavailable: {err}"}, 502
+    else:
+        ids = [s for s in (session_ids or [])
+               if isinstance(s, str) and s.strip()]
+    seen: set = set()
+    ids = [s for s in ids if not (s in seen or seen.add(s))]
+    if not ids:
+        return {"error": "no sessions selected"}, 400
+    items = []
+    for act in acts:
+        for sid in ids:
+            if act in ("summarize", "timeline") and ":" in sid:
+                continue              # child transcripts: parent's business
+            cwd = None
+            if act == "summarize":
+                p = find_session(sid)
+                cwd = _session_cwd(p) if p else None
+            items.append({"session_id": sid, "action": act, "cwd": cwd,
+                          "status": "queued", "error": None})
+    if not items:
+        return {"error": "nothing to do for the selected sessions"}, 400
+    if len(items) > BATCH_MAX_ITEMS:
+        return {"error": f"batch too large (> {BATCH_MAX_ITEMS} items)"}, 400
+    bid = time.strftime("b%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+    batch = {"id": bid, "actions": acts, "scope": scope or "explicit",
+             "created_at": time.time(), "done": False, "items": items}
+    with _BATCH_LOCK:
+        _BATCHES[bid] = batch
+        _persist_batches_locked()
+    for i in range(len(items)):
+        _BATCH_JOBS.put((bid, i))
+    _ensure_batch_worker()
+    return {"ok": True, "batch": batch}, 200
+
+
+def cancel_batch(bid: str) -> dict:
+    """Cancel every still-queued item; running items finish on their own."""
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        if not b:
+            return {"ok": False, "error": "no such batch"}
+        n = 0
+        for it in b["items"]:
+            if it["status"] == "queued":
+                it["status"] = "cancelled"
+                n += 1
+        b["done"] = all(i["status"] in ("done", "failed", "cancelled")
+                        for i in b["items"])
+        if b["done"] and not b.get("ended_at"):
+            b["ended_at"] = time.time()
+        _persist_batches_locked()
+    return {"ok": True, "cancelled": n}
+
+
+def batches_payload() -> dict:
+    with _BATCH_LOCK:
+        out = sorted(_BATCHES.values(),
+                     key=lambda b: b.get("created_at") or 0, reverse=True)
+        return json.loads(json.dumps({"batches": out}))   # detached copy
+
+
+def _resume_batches() -> None:
+    """Reload batch.json at startup: re-enqueue queued items (the queue.json
+    doctrine — restart-safe), mark items caught mid-run as failed rather than
+    silently re-running them (summarize archives; a re-run must be explicit)."""
+    try:
+        d = json.loads(BATCH_FILE.read_text())
+        stored = d.get("batches") or []
+    except (OSError, ValueError):
+        return
+    requeue = []
+    with _BATCH_LOCK:
+        for b in stored:
+            if not isinstance(b, dict) or not b.get("id"):
+                continue
+            for i, it in enumerate(b.get("items") or []):
+                if it.get("status") == "running":
+                    it.update(status="failed",
+                              error="interrupted by console restart")
+                elif it.get("status") == "queued":
+                    requeue.append((b["id"], i))
+            b["done"] = all(i.get("status") in ("done", "failed", "cancelled")
+                            for i in b.get("items") or [])
+            _BATCHES[b["id"]] = b
+        if _BATCHES:
+            _persist_batches_locked()
+    for job in requeue:
+        _BATCH_JOBS.put(job)
+    if requeue:
+        _ensure_batch_worker()
+
+
+# ----------------------------------------------------------------------------
 # git tab — per-session repository status
 #
 # Read-only, lazy, and timeout-bounded: the endpoint resolves the session's cwd
@@ -2796,6 +3060,8 @@ class Handler(SimpleHTTPRequestHandler):
             if p is None:
                 return self._json({"error": "not found"}, 404)
             return self._json({"timeline": session_timeline.payload(sid, p)})
+        if u.path == "/api/batch":
+            return self._json(batches_payload())
         return super().do_GET()
 
     def _do_POST(self):
@@ -2822,6 +3088,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q)})
             except Exception as e:              # DB unreachable → degrade, never 500
                 return self._json({"matches": {}, "error": str(e)})
+
+        # Batch ops are session-set-level, not single-session: route them
+        # before the session_id requirement below.
+        if route == "/api/batch":
+            payload, code = create_batch(body.get("actions"),
+                                         body.get("session_ids"),
+                                         scope=body.get("scope"))
+            return self._json(payload, code)
+        if route == "/api/batch/cancel":
+            r = cancel_batch(body.get("batch_id", ""))
+            return self._json(r, 200 if r["ok"] else 404)
 
         sid = body.get("session_id", "")
         cwd = body.get("cwd")
@@ -2964,6 +3241,7 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     # answer_blocked() clears (persisted queue — survives console restarts).
     threading.Thread(target=_queue_dispatcher, daemon=True,
                      name="reply-queue").start()
+    _resume_batches()               # restart-safe batch queue (batch.json)
 
     if _loopback(host) or no_auth:
         TOKEN = None

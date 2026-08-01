@@ -193,6 +193,23 @@ def generate(sid: str, jsonl_path: Path, model: str = DEFAULT_MODEL,
     t0 = time.time()
     rows: list[dict] = []
     last_i = len(segs) - 1
+
+    def _store(partial: bool) -> dict:
+        s = {
+            "session_id": sid,
+            "turn_key": key,
+            "rows": rows,
+            "memo": memo,
+            "turn_count": len(rows) if not partial else len(segs),
+            "truncated_older": truncated_older,
+            "model": model,
+            "latency_s": round(time.time() - t0, 1),
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        }
+        if partial:
+            s["partial"] = True          # cleared by the completing persist
+        return s
+
     for i, seg in enumerate(segs):
         STATUS[sid] = f"generating {i + 1}/{len(segs)}"
         cached = memo.get(seg["uuid"])
@@ -206,18 +223,15 @@ def generate(sid: str, jsonl_path: Path, model: str = DEFAULT_MODEL,
             if not summary.startswith("(unavailable"):
                 memo[seg["uuid"]] = summary
         rows.append({"uuid": seg["uuid"], "t": seg["t"], "summary": summary})
+        # Persist INCREMENTALLY: the first-ever generation of a long session
+        # takes one model call per turn (minutes), and the UI polls the cached
+        # store to show "rows fill in" progress. Without this, GET served null
+        # for the whole run (the button looked dead) and a console restart
+        # mid-run lost every summary including the memo.
+        if i != last_i:
+            _persist(sid, _store(partial=True))
 
-    store = {
-        "session_id": sid,
-        "turn_key": key,
-        "rows": rows,
-        "memo": memo,
-        "turn_count": len(rows),
-        "truncated_older": truncated_older,
-        "model": model,
-        "latency_s": round(time.time() - t0, 1),
-        "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-    }
+    store = _store(partial=False)
     _persist(sid, store)
     return store
 
@@ -295,11 +309,19 @@ def payload(sid: str, jsonl_path: Path, force: bool = False) -> Optional[dict]:
     status = STATUS.get(sid)
     generating = (status or "").startswith(("queued", "generating"))
     if not cached:
-        if not force:
+        # A first-ever generation has no store yet (its first partial persist
+        # may still be a model call away) — while one is queued/in-flight the
+        # GET poll must say "generating", not null, or the UI re-offers the
+        # Generate button and the run looks like a no-op.
+        if not force and not generating:
             return None
         return {"session_id": sid, "rows": [], "status": status,
                 "generating": True, "stale": True}
+    # A partial store with no in-flight run is an orphan (console restarted
+    # mid-generation): render it, but as stale — never "generating", which
+    # would make the UI poll forever for a worker that no longer exists.
     return {**cached,
-            "stale": bool(key and cached.get("turn_key") != key),
+            "stale": bool(cached.get("partial") and not generating) or
+                     bool(key and cached.get("turn_key") != key),
             "generating": generating,
             "status": status}

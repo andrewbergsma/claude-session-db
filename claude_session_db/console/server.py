@@ -1526,15 +1526,183 @@ def build_session(sid: str):
 
 
 # ----------------------------------------------------------------------------
+# side-session permission envelope — spawn_claude as resolver/translator
+#
+# Pilot of claude_session_db:design/task-driven-side-sessions. Every side-session
+# the console spawns used to inherit whatever ambient settings its `cwd` resolved
+# to, passing not one scope or permission flag. A summarize spawned with a
+# git-worktree cwd therefore could not read ~/.claude/projects — where the
+# transcript it is digesting lives — so it failed on the filesystem guard and
+# then flailed through fallbacks, each blocked for the same reason.
+#
+# The fix is NOT a per-worktree settings.local.json (reactive, drifts, does not
+# travel) and NOT a Python dict of flags (drifts identically, just in here). It
+# is a VERSIONED kmcp skill entry under this app's steward. Same doctrine as the
+# angles miner: the envelope is DECLARED DATA, this code only TRANSLATES it.
+#
+#   skill.harness_hints.required_tools     -> --allowedTools (comma-joined)
+#   skill.harness_hints.fs_read + fs_write -> --add-dir
+#   agent.constraints.max_turns            -> --max-turns
+#   agent.guardrails + the resolved paths  -> --append-system-prompt
+#
+# The last line is not decoration: the off-session summary skill locates its
+# transcript with a compound, command-substituted shell command, which a headless
+# run can never get approved. Handing the ALREADY-RESOLVED path down (the console
+# knows it — find_session) removes the need for that command entirely. Filesystem
+# scope alone would not have fixed the pilot.
+#
+# DOCTRINE — why this cannot break the console: resolve_envelope() NEVER raises
+# and never blocks a spawn. kmcp unreachable, skill missing, entry malformed —
+# every failure degrades to ZERO flags, which is byte-for-byte what every spawn
+# did before this existed, with the reason surfaced to the caller instead of
+# swallowed. There is deliberately NO hardcoded fallback envelope: duplicating a
+# declared scope in Python is exactly the drift this design displaces, and a
+# silent fallback would mask a broken resolver by making it look like it worked.
+# Least privilege only — the bypass permission mode is never emitted.
+# ----------------------------------------------------------------------------
+ACTION_SKILLS = {"summarize": "claude_session_db:skill/console-summarize"}
+ENVELOPE_TTL_S = 300
+_ENV_CACHE: dict = {}                 # skill ref -> (fetched_at, envelope)
+_ENV_LOCK = threading.Lock()
+
+
+def _fetch_envelope(ref: str) -> dict:
+    """Load a skill entry + its bound agent from kmcp. Raises on failure."""
+    app, _, path = ref.partition(":")
+    skill = _kmcp_call("get_entry", {"application": app, "path": path,
+                                     "entity_type": "skill",
+                                     "include_relationships": False})
+    content = (skill or {}).get("content") or {}
+    if not content:
+        raise KmcpError(f"{ref}: {skill.get('error') or 'no content'}")
+    env = {"skill": ref, "agent_ref": content.get("assigned_agent"),
+           "hints": content.get("harness_hints") or {},
+           "guardrails": [], "constraints": {}}
+    if env["agent_ref"]:
+        aapp, _, apath = str(env["agent_ref"]).partition(":")
+        try:
+            agent = _kmcp_call("get_entry", {"application": aapp, "path": apath,
+                                             "entity_type": "agent",
+                                             "include_relationships": False})
+            ac = (agent or {}).get("content") or {}
+            env["guardrails"] = ac.get("guardrails") or []
+            env["constraints"] = ac.get("constraints") or {}
+        except KmcpError:
+            pass          # the skill's own scope is still worth applying
+    return env
+
+
+def _envelope(ref: str) -> dict:
+    now = time.time()
+    with _ENV_LOCK:
+        hit = _ENV_CACHE.get(ref)
+        if hit and now - hit[0] < ENVELOPE_TTL_S:
+            return hit[1]
+    env = _fetch_envelope(ref)        # outside the lock: it shells out
+    with _ENV_LOCK:
+        _ENV_CACHE[ref] = (now, env)
+    return env
+
+
+def _envelope_prompt(env: dict, ctx: dict):
+    """The --append-system-prompt body: what the child must not have to discover."""
+    out = []
+    sid, tpath = ctx.get("session_id"), ctx.get("transcript")
+    if sid:
+        out.append(f"Target session UUID: {sid}")
+    if tpath:
+        out.append(
+            f"That session's transcript is ALREADY RESOLVED at: {tpath}\n"
+            "Use this path directly. Do not search the filesystem for it, and do "
+            "not run a piped, chained or command-substituted shell command to "
+            "locate it — this is a headless run with no human to approve one.")
+    guardrails = [g for g in (env.get("guardrails") or []) if isinstance(g, str)]
+    if guardrails:
+        out.append(f"Hard rules for this run (from {env.get('agent_ref')}):")
+        out += [f"- {g}" for g in guardrails]
+    return "\n".join(out) if out else None
+
+
+def resolve_envelope(action, ctx=None):
+    """(flags, note) — CLI tokens to PREPEND for this action, and why.
+
+    NEVER raises. An unresolved envelope returns ([], reason): the spawn then
+    behaves exactly as it did before this resolver existed, and the reason
+    travels back to the operator instead of being swallowed.
+    """
+    if not action:
+        return [], None
+    ref = ACTION_SKILLS.get(action)
+    if not ref:
+        return [], f"no skill bound to action {action!r}"
+    try:
+        env = _envelope(ref)
+    except Exception as exc:            # noqa: BLE001 — degrade, never block
+        return [], (f"envelope unresolved ({type(exc).__name__}: {exc}); "
+                    "spawned with ambient permissions")
+
+    hints = env.get("hints") or {}
+    flags, applied = [], []
+
+    tools = [t for t in (hints.get("required_tools") or []) if isinstance(t, str)]
+    if tools:
+        # Comma-joined as ONE argument on purpose: --allowedTools is variadic and
+        # a space-separated list would greedily consume following bare tokens.
+        flags += ["--allowedTools", ",".join(tools)]
+        applied.append(f"{len(tools)} tools")
+
+    dirs = []
+    for key in ("fs_read", "fs_write"):
+        for p in (hints.get(key) or []):
+            if isinstance(p, str) and p:
+                rp = str(Path(p).expanduser())
+                if rp not in dirs:
+                    dirs.append(rp)
+    if dirs:
+        flags += ["--add-dir"] + dirs
+        applied.append(f"{len(dirs)} dirs")
+
+    max_turns = (env.get("constraints") or {}).get("max_turns")
+    if isinstance(max_turns, int) and max_turns > 0:
+        flags += ["--max-turns", str(max_turns)]
+        applied.append(f"max_turns={max_turns}")
+
+    prompt = _envelope_prompt(env, ctx or {})
+    if prompt:
+        flags += ["--append-system-prompt", prompt]
+        applied.append("system-prompt")
+
+    mcps = [m for m in (hints.get("required_mcps") or []) if isinstance(m, str)]
+    if mcps:
+        # Declared, but not translated in the pilot: there is no console-side MCP
+        # config file to point --mcp-config at, and inventing a path would be a
+        # guess. The child reaches kmcp the way the console does (knowledge-cli in
+        # local-trusted mode). Surfaced rather than silently dropped.
+        applied.append(f"mcps declared but unmapped: {','.join(mcps)}")
+
+    if not flags:
+        return [], f"{ref}: envelope resolved but declared nothing"
+    return flags, f"{ref}: " + ", ".join(applied)
+
+
+# ----------------------------------------------------------------------------
 # answer / fork (unchanged behaviour from the prototype)
 # ----------------------------------------------------------------------------
-def spawn_claude(args, cwd, session_id=None, log_path=None):
+def spawn_claude(args, cwd, session_id=None, log_path=None, action=None,
+                 envelope_ctx=None):
     """Spawn a claude run, registering it so Stop can signal its process group.
 
     log_path captures this run's output to a DEDICATED file instead of the
     shared answers.log — used by the summarize action so it can measure whether
     the child actually produced anything (a zero-output rc==0 child is the
     observed silent no-op). Default behaviour (shared answers.log) is unchanged.
+
+    action names a console action bound to a kmcp skill (see ACTION_SKILLS); its
+    declared permission envelope is resolved and PREPENDED to args. Callers that
+    pass no action — answer, fork, the queue dispatcher — are untouched: they
+    resolve to zero flags and spawn exactly as before. The resolved note is
+    attached to the returned Popen as `envelope_note` so endpoints can surface it
+    without changing this function's return contract.
     """
     # Resolve `claude` robustly. A console launched with a minimal PATH (a
     # launchd/GUI parent hands down `/usr/bin:/bin:/usr/sbin:/sbin`) has no
@@ -1552,15 +1720,31 @@ def spawn_claude(args, cwd, session_id=None, log_path=None):
     local_bin = str(Path.home() / ".local" / "bin")
     if local_bin not in env.get("PATH", "").split(os.pathsep):
         env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+
+    # Resolve the declared envelope and PREPEND its flags. Prepending is only
+    # safe because every call site's args begin with an option token ("-p"):
+    # --allowedTools and --add-dir are variadic and would otherwise swallow a
+    # bare prompt positional. That is a contract, so check it rather than trust
+    # it — a caller that breaks it loses the envelope, never its prompt.
+    flags, envelope_note = resolve_envelope(action, envelope_ctx)
+    if flags and not (args and str(args[0]).startswith("-")):
+        flags, envelope_note = [], (
+            "envelope skipped: spawn args must begin with an option token or a "
+            "variadic flag would consume the prompt")
+    full_args = flags + list(args)
+
     log_file = Path(log_path) if log_path else ANSWER_LOG
     with open(log_file, "a") as log:
-        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(args)} (cwd={cwd})\n")
+        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(full_args)} (cwd={cwd})\n")
+        if envelope_note:
+            log.write(f"--- envelope: {envelope_note}\n")
         log.flush()
         proc = subprocess.Popen(
-            [claude] + args, cwd=cwd or str(Path.home()),
+            [claude] + full_args, cwd=cwd or str(Path.home()),
             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True, env=env,
         )
+    proc.envelope_note = envelope_note
     _register(session_id, proc)
     return proc
 
@@ -2105,8 +2289,17 @@ def summarize_session(sid: str, cwd: str) -> dict:
     # A dedicated per-summary log lets _await_summary measure real output.
     _SUMMARY_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _SUMMARY_LOG_DIR / f"{sid}.log"
+    # Dispatch through the resolver: the summarize action is bound to
+    # claude_session_db:skill/console-summarize, whose declared scope covers
+    # ~/.claude/projects (the ambient cwd here is the session's own working dir,
+    # often a git worktree that cannot see it). The transcript path is resolved
+    # HERE and handed down, so the child never needs the compound shell command
+    # a headless run cannot get approved.
+    src = find_session(sid)
     proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
-                        log_path=log_path)
+                        log_path=log_path, action="summarize",
+                        envelope_ctx={"session_id": sid,
+                                      "transcript": str(src) if src else None})
     try:
         base_size = log_path.stat().st_size          # header only, pre-output
     except OSError:
@@ -2117,6 +2310,7 @@ def summarize_session(sid: str, cwd: str) -> dict:
                      args=(sid, proc, log_path, base_size),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
+            "envelope": getattr(proc, "envelope_note", None),
             "note": "independent off-session summary dispatched; session archived"}
 
 

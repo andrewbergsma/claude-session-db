@@ -30,6 +30,9 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/files?id=<sid>&path=   one directory listing under the session's
+                                   repo root / cwd (read-only, root-confined)
+  GET  /api/file?id=<sid>&path=    one file's text/metadata (raw=1: image bytes)
   GET  /api/claudemd?id=<sid>&n=   one CLAUDE.md memory file's content (read-only)
   GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
@@ -55,6 +58,7 @@ import secrets
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -2540,6 +2544,248 @@ def git_payload(sid: str, refresh: bool = False):
 
 
 # ----------------------------------------------------------------------------
+# files tab — read-only file browser rooted at the session's repo root
+#
+# The root derives SERVER-SIDE from the session transcript — the same cwd
+# derivation /api/git uses, widened to the repo toplevel when the cwd is in a
+# git repo (reusing the git snapshot cache, so the two tabs can never disagree
+# on the root). The caller only ever names the session and a RELATIVE path;
+# no request parameter can move the root (same posture as /api/claudemd).
+#
+# _confine() is the single gate both endpoints pass every caller path through:
+# reject before joining (absolute path, NUL, any `..` segment, `.git`), then
+# canonicalize after joining (realpath both ends + commonpath containment,
+# which catches symlink escapes). Listings mark escaping symlinks instead of
+# following them; /api/file refuses them outright, and serves regular files
+# only (a FIFO would hang the handler thread). GET-only, no subprocess, no
+# mutation anywhere in this section.
+# ----------------------------------------------------------------------------
+FILES_TTL_S = 5
+FILES_LIST_CAP = 500               # entries per listing; beyond -> truncated
+FILE_TEXT_CAP = 256 * 1024         # text preview cap (head or tail)
+FILE_RAW_CAP = 5 * 1024 * 1024     # raw image hard cap (413 beyond)
+_FILES_CACHE: dict[tuple, tuple] = {}   # (root, rel, hidden) -> (expires, payload)
+_FILES_LOCK = threading.Lock()
+IMAGE_CTYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".gif": "image/gif", ".webp": "image/webp",
+                ".svg": "image/svg+xml"}
+
+
+class ConfineError(ValueError):
+    """A caller-supplied relative path that must not be served."""
+
+
+def _confine(root: str, rel: str) -> str:
+    """Resolve `rel` under `root` or raise ConfineError — the only path gate
+    for /api/files and /api/file; every caller path passes through here.
+
+    Rejects BEFORE joining: absolute paths, NUL, any `..` segment, `.git`.
+    Canonicalizes AFTER joining: realpath both ends + commonpath containment,
+    which catches symlink escapes (a link inside root pointing outside it).
+    A symlink that lands back inside root but under .git/ is re-checked after
+    resolution, so the exclusion can't be laundered through a link.
+    """
+    rel = rel or ""
+    if "\x00" in rel:
+        raise ConfineError("NUL in path")
+    if rel.startswith(("/", "\\")):
+        raise ConfineError("absolute paths not allowed")
+    parts = [p for p in rel.replace("\\", "/").split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        raise ConfineError("path traversal not allowed")
+    if ".git" in parts:
+        raise ConfineError(".git is not served")
+    real_root = os.path.realpath(root)
+    target = os.path.realpath(os.path.join(real_root, *parts))
+    try:
+        if os.path.commonpath([real_root, target]) != real_root:
+            raise ConfineError("path escapes the session root")
+    except ValueError as exc:          # mixed absolute/relative or drives
+        raise ConfineError("path escapes the session root") from exc
+    if target != real_root and \
+            ".git" in os.path.relpath(target, real_root).split(os.sep):
+        raise ConfineError(".git is not served")
+    return target
+
+
+def _list_dir(root: str, rel: str, hidden: bool = False) -> dict:
+    """One directory listing under `root` (session-independent, testable).
+
+    Dirs first then name sort; `.git` never listed; dotfiles excluded unless
+    `hidden` (their count always reported). Symlinks are never followed for
+    typing: a link is reported as type "symlink" with `target` dir|file when
+    it resolves INSIDE the root, `escapes` when it points out of it (the
+    client renders those inert), `broken` when it resolves to nothing.
+    """
+    target = _confine(root, rel)
+    if not os.path.isdir(target):
+        raise FileNotFoundError(rel or "/")
+    real_root = os.path.realpath(root)
+    rows, hidden_count = [], 0
+    with os.scandir(target) as it:
+        entries = sorted(it, key=lambda e: e.name.lower())
+    for e in entries:
+        if e.name == ".git":
+            continue                    # always excluded, never even counted
+        if e.name.startswith(".") and not hidden:
+            hidden_count += 1
+            continue
+        row = {"name": e.name}
+        try:
+            if e.is_symlink():
+                row["type"] = "symlink"
+                try:
+                    tgt = os.path.realpath(e.path)
+                    if os.path.commonpath([real_root, tgt]) != real_root:
+                        row["escapes"] = True
+                    elif os.path.isdir(tgt):
+                        row["target"] = "dir"
+                    elif os.path.isfile(tgt):
+                        row["target"] = "file"
+                    else:
+                        row["broken"] = True
+                except (OSError, ValueError):
+                    row["broken"] = True
+            elif e.is_dir(follow_symlinks=False):
+                row["type"] = "dir"
+            else:
+                row["type"] = "file"
+                st = e.stat(follow_symlinks=False)
+                row["size"] = st.st_size
+                row["mtime"] = st.st_mtime
+        except OSError:                 # raced deletion / permission
+            row.setdefault("type", "file")
+            row["broken"] = True
+        rows.append(row)
+    rows.sort(key=lambda r: (
+        not (r["type"] == "dir" or r.get("target") == "dir"),
+        r["name"].lower()))
+    return {"path": rel, "entries": rows[:FILES_LIST_CAP],
+            "hidden_count": hidden_count,
+            "truncated": len(rows) > FILES_LIST_CAP}
+
+
+def _files_root(sid: str):
+    """(root, cwd, error_payload, code) — the server-side root derivation.
+
+    cwd from the transcript tail (the /api/git derivation), widened to the
+    repo toplevel via the same cached git snapshot /api/git serves from.
+    """
+    path = find_session(sid)
+    if path is None:
+        return None, None, {"error": "session not found"}, 404
+    cwd = _session_cwd(path)
+    if not cwd:
+        return None, None, {"error": "no cwd recorded in this transcript"}, 404
+    if not Path(cwd).is_dir():
+        return None, None, {"error": "session cwd no longer exists"}, 404
+    snap = _cached_snapshot(cwd, False)
+    root = (snap.get("repo") or {}).get("root") or cwd
+    return root, cwd, None, None
+
+
+def files_payload(sid: str, rel: str, hidden=False, refresh=False):
+    """(payload, code) for GET /api/files — one lazy directory listing."""
+    root, cwd, err, code = _files_root(sid)
+    if err:
+        return err, code
+    key = (root, rel or "", bool(hidden))
+    now = time.time()
+    if not refresh:
+        with _FILES_LOCK:
+            hit = _FILES_CACHE.get(key)
+            if hit and hit[0] > now:
+                return hit[1], 200
+    try:
+        listing = _list_dir(root, rel or "", hidden)
+    except ConfineError as e:
+        return {"error": str(e)}, 403
+    except (FileNotFoundError, NotADirectoryError):
+        return {"error": "directory not found"}, 404
+    except OSError as e:
+        return {"error": str(e)[:300]}, 500
+    cwd_rel = "" if cwd == root else os.path.relpath(cwd, root)
+    if cwd_rel == ".":
+        cwd_rel = ""
+    payload = {"root": root, "cwd_rel": cwd_rel, "generated_at": now, **listing}
+    with _FILES_LOCK:
+        _FILES_CACHE[key] = (now + FILES_TTL_S, payload)
+    return payload, 200
+
+
+def _file_json(root: str, rel: str, tail=False) -> tuple:
+    """(payload, code) — one file's metadata + capped utf-8 text content.
+
+    Binary (NUL in the first 8 KiB) -> metadata only, no content. Text past
+    the cap carries truncated:true and part head|tail (tail=1 reads the end).
+    Regular files only — S_ISREG, so a FIFO can't hang the handler thread.
+    """
+    try:
+        target = _confine(root, rel)
+    except ConfineError as e:
+        return {"error": str(e)}, 403
+    try:
+        st = os.stat(target)
+    except OSError:
+        return {"error": "file not found"}, 404
+    if not stat.S_ISREG(st.st_mode):
+        return {"error": "not a regular file"}, 403
+    size = st.st_size
+    base = {"path": rel, "size": size, "mtime": st.st_mtime}
+    with open(target, "rb") as f:
+        if b"\x00" in f.read(8192):
+            return {**base, "binary": True}, 200
+        cap = FILE_TEXT_CAP
+        if tail and size > cap:
+            f.seek(size - cap)
+            data, part = f.read(cap), "tail"
+        else:
+            f.seek(0)
+            data, part = f.read(cap), "head"
+    return {**base, "binary": False, "truncated": size > cap, "cap": cap,
+            "part": part, "content": data.decode("utf-8", "replace")}, 200
+
+
+def _file_raw(root: str, rel: str):
+    """(bytes, ctype, error_payload, code) — image bytes only, hard-capped.
+
+    raw=1 exists solely so a bare <img> tag works (cookie auth); anything
+    that is not a whitelisted image extension is refused before touching disk.
+    """
+    ctype = IMAGE_CTYPES.get(os.path.splitext(rel or "")[1].lower())
+    if not ctype:
+        return None, None, {"error": "raw=1 serves image extensions only"}, 400
+    try:
+        target = _confine(root, rel)
+    except ConfineError as e:
+        return None, None, {"error": str(e)}, 403
+    try:
+        st = os.stat(target)
+    except OSError:
+        return None, None, {"error": "file not found"}, 404
+    if not stat.S_ISREG(st.st_mode):
+        return None, None, {"error": "not a regular file"}, 403
+    if st.st_size > FILE_RAW_CAP:
+        return None, None, {"error": f"image exceeds {FILE_RAW_CAP} byte cap"}, 413
+    with open(target, "rb") as f:
+        return f.read(FILE_RAW_CAP), ctype, None, None
+
+
+def file_payload(sid: str, rel: str, tail=False):
+    root, _cwd, err, code = _files_root(sid)
+    if err:
+        return err, code
+    return _file_json(root, rel, tail)
+
+
+def file_raw(sid: str, rel: str):
+    root, _cwd, err, code = _files_root(sid)
+    if err:
+        return None, None, err, code
+    return _file_raw(root, rel)
+
+
+# ----------------------------------------------------------------------------
 # auth
 #
 # The console is NOT a read-only surface: /api/answer and /api/fork spawn
@@ -2742,6 +2988,42 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload, code = git_payload(
                     sid, refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/files":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                payload, code = files_payload(
+                    sid, (q.get("path") or [""])[0],
+                    hidden=(q.get("hidden") or ["0"])[0] == "1",
+                    refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/file":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            rel = (q.get("path") or [""])[0]
+            try:
+                if (q.get("raw") or ["0"])[0] == "1":
+                    data, ctype, err, code = file_raw(sid, rel)
+                    if err is not None:
+                        return self._json(err, code)
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                payload, code = file_payload(
+                    sid, rel, tail=(q.get("tail") or ["0"])[0] == "1")
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)

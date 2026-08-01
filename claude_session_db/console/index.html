@@ -603,6 +603,48 @@
            float:right; }
   #pane-timeline h3 .re:hover { color:var(--accent); }
 
+  /* ---- Files rail tab: lazy tree + preview overlay ---- */
+  .fcrumb { font:11px var(--mono); color:var(--ink2); margin:2px 0 8px;
+            word-break:break-all; }
+  .fcrumb .k { color:var(--muted); }
+  .fcrumb .navtog { float:none; margin-left:8px; white-space:nowrap; }
+  .ftree { font:11px var(--mono); }
+  .frow { display:flex; gap:6px; align-items:baseline; padding:2px 4px;
+          cursor:pointer; border-radius:4px; color:var(--ink2); min-width:0; }
+  .frow:hover { background:var(--surface2); }
+  .frow.inert { cursor:default; }
+  .frow.inert:hover { background:transparent; }
+  .frow .fch { flex:0 0 10px; text-align:center; color:var(--muted); font-size:9px; }
+  .frow .fn { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .frow.fdir .fn { color:var(--ink); }
+  .frow.fcwd .fn { color:var(--accent); font-weight:600; }
+  .frow.flink { opacity:.8; }
+  .frow .fgit { flex:0 0 12px; color:var(--warn); font-weight:700; text-align:center; }
+  .frow .fgit.unt { color:var(--muted); }
+  .frow .fsz { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
+  /* preview overlay — same fixed-inset idiom as #mgmt (quiet header, ✕, Esc) */
+  #fileview { position:fixed; inset:0; background:var(--bg); z-index:58;
+              display:none; flex-direction:column; padding:16px 20px; overflow:hidden; }
+  #fileview.open { display:flex; }
+  #fileview .fh { display:flex; align-items:baseline; gap:12px; margin-bottom:10px;
+                  min-width:0; }
+  #fileview .fh h2 { font:600 14px var(--mono); min-width:0; overflow:hidden;
+                     text-overflow:ellipsis; white-space:nowrap; }
+  #fileview .fh .fvmeta { color:var(--muted); font:11px var(--mono); min-width:0;
+                          overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #fileview .fh .x { margin-left:auto; cursor:pointer; color:var(--muted);
+                     font:12px var(--mono); flex:none; }
+  #fileview .fh .x:hover { color:var(--ink); }
+  #fvbody { flex:1; overflow:auto; min-height:0;
+            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #fvbody pre { font:11.5px/1.5 var(--mono); white-space:pre-wrap;
+                word-break:break-word; background:var(--surface);
+                border:1px solid var(--border); border-radius:8px; padding:10px 12px; }
+  #fvbody img { max-width:100%; height:auto; background:var(--surface);
+                border:1px solid var(--border); border-radius:8px; }
+  .fvnote { font:11px var(--mono); color:var(--warn); margin-bottom:8px; }
+  .fvfoot { display:flex; gap:6px; margin-top:10px; flex-wrap:wrap; }
+
   /* ==================== responsive / mobile (cascade tail) ==================
      These live LAST so they beat the base rules above at equal specificity. */
 
@@ -691,6 +733,9 @@
     #mgmt{ padding:12px;
                padding-top:calc(12px + env(safe-area-inset-top));
                padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
+    #fileview{ padding:12px;
+               padding-top:calc(12px + env(safe-area-inset-top));
+               padding-bottom:calc(12px + env(safe-area-inset-bottom)); }
     #mgmt .mh{ flex-wrap:wrap; }
     #mgmt .mh .note{ flex-basis:100%; order:9; font-size:10.5px; }
     /* 10-col thread table: shed the low-value columns on a phone */
@@ -766,12 +811,14 @@
       <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
       <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
       <span class="rtab" data-t="git" onclick="setRailTab('git')">Git</span>
+      <span class="rtab" data-t="files" onclick="setRailTab('files')">Files</span>
       <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')">Timeline</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
     <div id="pane-writes" class="rtabpane"><div id="writes"></div></div>
     <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
+    <div id="pane-files" class="rtabpane"><div id="filesinfo"></div></div>
     <div id="pane-timeline" class="rtabpane"><div id="tlinfo"></div></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
@@ -795,6 +842,19 @@
       <div class="dh"><span id="mgmtdigesttitle"></span>
         <span class="x" onclick="closeMgmtDigest()">✕ close digest</span></div>
       <pre id="mgmtdigestpre"></pre>
+    </div>
+  </div>
+
+  <!-- file preview overlay (Files rail tab): fixed inset, quiet header, Esc closes -->
+  <div id="fileview">
+    <div class="fh"><h2 id="fvtitle"></h2><span class="fvmeta" id="fvmeta"></span>
+      <span class="x" onclick="closeFileView()">✕ close (Esc)</span></div>
+    <div id="fvbody"></div>
+    <div class="fvfoot">
+      <button class="act sm" onclick="fvCopy(false)" title="copy the root-relative path">⧉ copy path</button>
+      <button class="act sm" onclick="fvCopy(true)" title="copy the absolute path">⧉ copy absolute</button>
+      <button class="act sm primary" onclick="fvInsert()"
+        title="append the root-relative path to the answer composer">↳ insert into composer</button>
     </div>
   </div>
 
@@ -912,6 +972,8 @@ document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
   const dlg = document.getElementById("topicdlg");
   if(dlg && dlg.classList.contains("open")){ closeTopicDlg(); return; }
+  const fv = document.getElementById("fileview");
+  if(fv && fv.classList.contains("open")){ closeFileView(); return; }
   if(document.body.classList.contains("navopen")){ closeNavDrawer(); return; }
   if(document.body.classList.contains("rail-open")){ closeRailSheet(); return; }
   const box = document.getElementById("raildetail");
@@ -933,6 +995,7 @@ function ovDone(){
 window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
   if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
+  if(document.getElementById("fileview").classList.contains("open")) return closeFileView(true);
   if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
   if(mgmtOpen) return closeMgmt(true);
   if(document.body.classList.contains("rail-open")) return closeRailSheet(true);
@@ -964,6 +1027,9 @@ function closeRailSheet(fromPop){
 }
 /* tap-outside closes the sheet/drawer (the opening tap is time-guarded) */
 document.addEventListener("click", e => {
+  // the file-preview overlay sits ABOVE the sheet/drawer — a tap inside it
+  // must not count as "outside" and close (or history-pop) what's beneath it
+  if(e.target.closest("#fileview")) return;
   if(document.body.classList.contains("rail-open") &&
      Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
     closeRailSheet();
@@ -1407,7 +1473,8 @@ async function openSession(id){
   curId = id; selIdx = null; pinnedBottom = true;
   closeNavDrawer(); closeRailSheet();   // phone: selecting a session dismisses both
   clearTimeout(tlTimer); tlTimer = null;   // drop any stale poll from the prior session
-  gitBadge(0);   // stale dirty-count from the previous session
+  gitBadge(0); gitData = null;   // stale dirty-count / payload from the previous session
+  filesReset(); filesTabBadge(0);
   clearAwait();
   const cs = document.getElementById("cstatus");
   cs.textContent = ""; cs.className = "";
@@ -1442,6 +1509,9 @@ async function refreshSession(scrollBottom, force){
   curSession = s;
   renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
   renderWrites(s); renderSummary(s); maybeLoadGit(false);
+  // Files never piggybacks the poll loops — only a session SWITCH while the
+  // tab is showing needs a fresh root listing.
+  if(railTab === "files" && filesFor !== curId) maybeLoadFiles(false);
   if(railTab === "timeline") loadTimeline();   // refresh cached rows for the new session
   if(scrollBottom){
     const st = document.getElementById("stream");
@@ -2009,12 +2079,13 @@ function setRailTab(t){
   localStorage.setItem("csd.consoleRailTab", t);
   applyRailTab();
   if(t === "git") maybeLoadGit(false);   // lazy: only computed when the tab opens
+  if(t === "files") maybeLoadFiles(false); // lazy: root listing on first open
   if(t === "timeline") loadTimeline();   // lazy: serve cached (never auto-mines)
 }
 function applyRailTab(){
   document.querySelectorAll("#railtabs .rtab").forEach(el =>
     el.classList.toggle("on", el.dataset.t === railTab));
-  for(const t of ["angles","context","writes","git","timeline"])
+  for(const t of ["angles","context","writes","git","files","timeline"])
     document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
 }
 applyRailTab();
@@ -2178,7 +2249,7 @@ function renderWrites(s){
    Lazy (fetched only while the Git tab is open), client-TTL'd on top of the
    server's per-repo cache; ⟳ passes refresh=1 to bust both (incl. the slow
    5-min gh PR cache). Everything shown comes from read-only git commands. */
-let gitFor = null, gitAt = 0, gitLoading = false;
+let gitFor = null, gitAt = 0, gitLoading = false, gitData = null;
 const GIT_CLIENT_TTL = 15000;
 
 async function maybeLoadGit(force){
@@ -2191,6 +2262,7 @@ async function maybeLoadGit(force){
   try {
     const d = await (await fetch(`/api/git?id=${curId}${force?"&refresh=1":""}`)).json();
     gitFor = curId; gitAt = Date.now();
+    gitData = d;   // kept for the Files tab's status decoration (join, no refetch)
     renderGit(d);
   } catch(e){
     el.innerHTML = `<h3>Git</h3><div class="rl-empty">unavailable — ${esc(String(e))}</div>`;
@@ -2331,6 +2403,246 @@ function renderGit(d){
       html += `<div class="wr-h">recently merged / closed</div>` + done.map(row).join("");
   }
   el.innerHTML = html;
+}
+
+/* ---------- Files tab: read-only file browser -----------------------------
+   Anchored server-side at the session's repo root (else its cwd) — the same
+   derivation /api/git uses; the client only ever names relative paths, and
+   the root is also the security boundary (no navigation above it). Lazy:
+   one fetch per expanded directory, cached per session in memory (never
+   localStorage), root listing on tab open, ⟳ re-fetches the expanded set.
+   Never piggybacks the poll loops. Git-status decoration joins the ALREADY
+   CACHED /api/git payload — absent/mismatched/truncated degrades silently. */
+let filesFor = null, filesRoot = null, filesCwdRel = "", filesHiddenN = 0;
+let filesCache = new Map();      // rel -> listing payload (this session only)
+let filesExpanded = new Set();   // rel of expanded dirs (memory, per session)
+let filesShowHidden = false, filesLoading = false, filesErr = null;
+
+function filesReset(){
+  filesFor = null; filesRoot = null; filesCwdRel = ""; filesHiddenN = 0;
+  filesCache.clear(); filesExpanded.clear();
+  filesShowHidden = false; filesErr = null;
+}
+function filesTabBadge(n){
+  const tab = document.querySelector('#railtabs .rtab[data-t="files"]');
+  if(tab) tab.textContent = n ? `Files ·${n}` : "Files";
+}
+/* JSON-encode then HTML-escape: safe to embed a path in an onclick attr
+   (quotes/backslashes survive the HTML-decode → JS-parse round trip). */
+function jsArg(p){ return esc(JSON.stringify(p)); }
+function fsize(n){
+  if(n == null) return "";
+  if(n < 1024) return n + " B";
+  if(n < 1024*1024) return (n/1024).toFixed(1) + " kB";
+  return (n/1024/1024).toFixed(1) + " MB";
+}
+
+async function fetchDir(rel, refresh){
+  const u = `/api/files?id=${encodeURIComponent(curId)}&path=${encodeURIComponent(rel)}`
+          + (filesShowHidden ? "&hidden=1" : "") + (refresh ? "&refresh=1" : "");
+  const d = await (await fetch(u)).json();
+  if(d.error) throw new Error(d.error);
+  return d;
+}
+
+async function maybeLoadFiles(force){
+  if(railTab !== "files" || !curId || filesLoading) return;
+  const sid = curId;
+  if(!force && filesFor === sid && filesCache.has("")){ renderFiles(); return; }
+  filesLoading = true;
+  if(filesFor !== sid){
+    filesReset(); filesFor = sid;
+    document.getElementById("filesinfo").innerHTML =
+      `<h3>Files</h3><div class="rl-empty">loading…</div>`;
+  }
+  try {
+    const d = await fetchDir("", force);
+    if(curId !== sid){ filesLoading = false; return; }   // switched mid-flight
+    filesRoot = d.root; filesCwdRel = d.cwd_rel || "";
+    filesHiddenN = d.hidden_count || 0;
+    filesCache.set("", d); filesErr = null;
+    if(force){   // ⟳: refresh every dir the operator has expanded
+      for(const rel of [...filesExpanded]){
+        try { filesCache.set(rel, await fetchDir(rel, true)); }
+        catch(e){ filesExpanded.delete(rel); filesCache.delete(rel); }
+      }
+    }
+  } catch(e){ filesErr = String(e.message || e); }
+  filesLoading = false;
+  renderFiles();
+}
+
+async function toggleDir(rel){
+  if(filesExpanded.has(rel)){ filesExpanded.delete(rel); renderFiles(); return; }
+  filesExpanded.add(rel);
+  if(!filesCache.has(rel)){
+    renderFiles();                       // paints the "loading…" row
+    try { filesCache.set(rel, await fetchDir(rel, false)); }
+    catch(e){ filesExpanded.delete(rel); toast(String(e.message || e), true); }
+  }
+  renderFiles();
+}
+
+async function toggleFilesHidden(){
+  filesShowHidden = !filesShowHidden;
+  filesCache.clear();                    // listings are keyed by hidden server-side
+  await maybeLoadFiles(true);
+}
+
+/* dirty/untracked path sets joined from the cached /api/git payload; a dir
+   containing dirty files gets a dot. Absent / different root / truncated
+   status list → empty sets (no badges), never a fetch. */
+function filesGitSets(){
+  const out = {dirty:new Map(), unt:new Set(), dirs:new Set(), n:0};
+  const d = (gitFor === curId) ? gitData : null;
+  if(!d || !d.repo || d.repo.root !== filesRoot || (d.status||{}).truncated)
+    return out;
+  const addDirs = p => { let s = p, i;
+    while((i = s.lastIndexOf("/")) > 0){ s = s.slice(0, i); out.dirs.add(s); } };
+  for(const f of (d.status||{}).dirty || []){
+    out.dirty.set(f.path, f.flags || "M"); addDirs(f.path); out.n++; }
+  for(const f of (d.status||{}).untracked || []){
+    out.unt.add(f.path); addDirs(f.path); out.n++; }
+  return out;
+}
+
+function fileRows(rel, depth, g){
+  const d = filesCache.get(rel);
+  const pad = `style="padding-left:${depth*14}px"`;
+  if(!d) return `<div class="frow inert" ${pad}><span class="fch"></span>
+    <span class="fn" style="color:var(--muted)">loading…</span></div>`;
+  let html = "";
+  for(const e of d.entries || []){
+    const p = rel ? rel + "/" + e.name : e.name;
+    const isDir = e.type === "dir" || (e.type === "symlink" && e.target === "dir");
+    const isFile = e.type === "file" || (e.type === "symlink" && e.target === "file");
+    const link = e.type === "symlink" ? " flink" : "";
+    if(isDir){
+      const open = filesExpanded.has(p);
+      const cwdCls = (filesCwdRel && (p === filesCwdRel ||
+        filesCwdRel.startsWith(p + "/"))) ? " fcwd" : "";
+      const gd = g.dirs.has(p)
+        ? `<span class="fgit" title="contains modified/untracked files">•</span>` : "";
+      html += `<div class="frow fdir${link}${cwdCls}" ${pad} onclick="toggleDir(${jsArg(p)})"
+        title="${esc(p)}${e.type==="symlink"?" (symlink)":""}${p===filesCwdRel?" — session cwd":""}">
+        <span class="fch">${open?"▾":"▸"}</span><span class="fn">${esc(e.name)}/</span>${gd}</div>`;
+      if(open) html += fileRows(p, depth + 1, g);
+    } else if(isFile){
+      const flag = g.dirty.has(p)
+        ? `<span class="fgit" title="modified (${esc(g.dirty.get(p))})">M</span>`
+        : g.unt.has(p) ? `<span class="fgit unt" title="untracked">?</span>` : "";
+      html += `<div class="frow${link}" ${pad} onclick="openFileView(${jsArg(p)})" title="${esc(p)}">
+        <span class="fch"></span><span class="fn">${esc(e.name)}</span>${flag}
+        ${e.size!=null?`<span class="fsz">${fsize(e.size)}</span>`:""}</div>`;
+    } else {   // escaping or broken symlink — shown, inert, never followed
+      html += `<div class="frow flink inert" ${pad}
+        title="${e.escapes?"symlink escapes the session root — not served":"broken symlink"}">
+        <span class="fch"></span><span class="fn" style="color:var(--muted)">${esc(e.name)} ⤴${e.escapes?" ⛔":""}</span></div>`;
+    }
+  }
+  if(d.truncated)
+    html += `<div class="gmore" style="margin-left:${depth*14}px">… listing capped at 500 entries</div>`;
+  return html;
+}
+
+function renderFiles(){
+  if(railTab !== "files") return;
+  const el = document.getElementById("filesinfo");
+  if(!el) return;
+  const hdr = `<div class="gh3"><h3>Files</h3>
+    <button class="act sm" onclick="maybeLoadFiles(true)"
+      title="Re-read the visible tree from disk (root + expanded dirs)">⟳ refresh</button></div>`;
+  if(!curId){ el.innerHTML = `<h3>Files</h3><div class="rl-empty">Open a session to browse its files.</div>`; return; }
+  if(filesErr){ el.innerHTML = `${hdr}<div class="rl-empty">${esc(filesErr)}</div>`; return; }
+  if(!filesCache.has("")){ el.innerHTML = `${hdr}<div class="rl-empty">loading…</div>`; return; }
+  const g = filesGitSets();
+  filesTabBadge(g.n);
+  const hid = (filesHiddenN || filesShowHidden)
+    ? ` <span class="navtog" onclick="toggleFilesHidden()">${
+        filesShowHidden ? "hide hidden" : `show hidden (${filesHiddenN})`}</span>` : "";
+  el.innerHTML = hdr +
+    `<div class="fcrumb" title="${esc(filesRoot||"")}">${esc(shortPath(filesRoot))}${
+      filesCwdRel ? ` <span class="k">· cwd ${esc(filesCwdRel)}</span>` : ""}${hid}</div>` +
+    `<div class="ftree">${fileRows("", 0, g)}</div>`;
+}
+
+/* ---- preview overlay (fixed inset, same idiom as #mgmt; Esc closes) ---- */
+const IMG_EXTS = new Set([".png",".jpg",".jpeg",".gif",".webp",".svg"]);
+let fvPath = null;
+
+function fvUrl(rel){
+  return `/api/file?id=${encodeURIComponent(curId)}&path=${encodeURIComponent(rel)}`;
+}
+
+async function openFileView(rel, tail){
+  if(!curId) return;
+  fvPath = rel;
+  const ov = document.getElementById("fileview");
+  if(!ov.classList.contains("open")){ ov.classList.add("open"); ovOpen(); }
+  document.getElementById("fvtitle").textContent = rel.split("/").pop();
+  document.getElementById("fvtitle").title = rel;
+  document.getElementById("fvmeta").textContent = "loading…";
+  document.getElementById("fvbody").innerHTML = "";
+  let d;
+  try { d = await (await fetch(fvUrl(rel) + (tail ? "&tail=1" : ""))).json(); }
+  catch(e){ document.getElementById("fvmeta").textContent = "unavailable — " + e; return; }
+  if(fvPath !== rel) return;             // another file opened mid-flight
+  if(d.error){ document.getElementById("fvmeta").textContent = d.error; return; }
+  renderFileView(rel, d);
+}
+
+function renderFileView(rel, d){
+  const ext = (rel.match(/\.[^./]+$/) || [""])[0].toLowerCase();
+  const g = filesGitSets();
+  const flag = g.dirty.has(rel) ? " · git M" : g.unt.has(rel) ? " · git ?" : "";
+  const bits = [];
+  if(d.size != null) bits.push(fsize(d.size));
+  if(ext) bits.push(ext.slice(1));
+  if(d.mtime) bits.push(dtStr(d.mtime * 1000));
+  document.getElementById("fvmeta").textContent = bits.join(" · ") + flag;
+  const body = document.getElementById("fvbody");
+  if(IMG_EXTS.has(ext)){
+    // bare <img> works because auth rides the cookie, even on a LAN bind
+    body.innerHTML = `<img src="${esc(fvUrl(rel))}&raw=1" alt="${esc(rel)}">`;
+    return;
+  }
+  if(d.binary){
+    body.innerHTML = `<div class="rl-empty">binary · ${fsize(d.size)} — no preview</div>`;
+    return;
+  }
+  const note = d.truncated
+    ? `<div class="fvnote">${d.part === "tail" ? "tail" : "head"} ${fsize(d.cap)} of ${fsize(d.size)} —
+        <span class="navtog" onclick="openFileView(${jsArg(rel)}, ${d.part !== "tail"})">${
+        d.part === "tail" ? "load head" : "load tail"}</span></div>`
+    : "";
+  body.innerHTML = note + `<pre>${esc(d.content || "(empty file)")}</pre>`;
+}
+
+function closeFileView(fromPop){
+  const ov = document.getElementById("fileview");
+  if(!ov.classList.contains("open")) return;
+  ov.classList.remove("open");
+  fvPath = null;
+  if(fromPop !== true) ovDone();
+}
+
+function fvCopy(abs){
+  if(!fvPath) return;
+  const p = abs && filesRoot ? filesRoot + "/" + fvPath : fvPath;
+  if(navigator.clipboard?.writeText)
+    navigator.clipboard.writeText(p).then(() => toast("copied " + p))
+      .catch(() => toast("copy failed", true));
+  else toast("clipboard unavailable", true);
+}
+
+/* mirrors the context-insert pattern (ctx()): append the root-relative path
+   into the answer composer, ready to reference in the next message. */
+function fvInsert(){
+  if(!fvPath) return;
+  const inp = document.getElementById("cin");
+  inp.value = (inp.value ? inp.value.trimEnd() + " " : "") + fvPath;
+  closeFileView();
+  inp.focus(); growComposer();
 }
 
 async function showAngle(itemId){

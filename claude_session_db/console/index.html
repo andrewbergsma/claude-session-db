@@ -67,6 +67,8 @@
   .navbtn { cursor:pointer; color:var(--muted); font:13px var(--mono); flex:none;
             padding:1px 5px; border-radius:4px; }
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
+  .toprow-btns { display:flex; align-items:center; gap:6px; flex:none; }
+  #navflatbtn.on { color:var(--accent); }
   /* top-level tabs: Projects | Archive */
   .navtabs { display:flex; gap:16px; align-items:center; }
   .navtab { cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
@@ -92,7 +94,7 @@
   body.navmin #nav .top { padding:10px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
   body.navmin .navtabs, body.navmin #nav .top .sub, body.navmin .search,
-  body.navmin .scoperow, body.navmin #navlist { display:none; }
+  body.navmin .scoperow, body.navmin #navlist, body.navmin #navflatbtn { display:none; }
   body.navmin #navrail { display:flex; }
   #navrail { display:none; flex-direction:column; align-items:center; gap:8px; padding:10px 0; }
   .railproj { position:relative; width:34px; height:34px; border-radius:8px; background:var(--surface3);
@@ -149,6 +151,7 @@
            color:var(--ink); font:12.5px inherit; padding:2px 5px; }
   .tedit:focus { outline:none; }
   .ctitle .m { display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono); }
+  .ctitle .m .mproj { min-width:0; flex:0 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .brc { color:var(--purple); } .agc { color:var(--cyan); }
   .snip { margin-top:2px; font:10px var(--mono); color:var(--ink2);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -727,7 +730,11 @@
     <div class="top">
       <div class="toprow">
         <div class="navtabs" id="navtabs"></div>
-        <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
+        <span class="toprow-btns">
+          <span id="navflatbtn" class="navbtn" onclick="toggleNavFlat()"
+                title="Grouped by project — tap for a flat most-recent-first list">▤</span>
+          <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
+        </span>
       </div>
       <div class="sub" id="navsub">loading…</div>
       <input class="search" id="navq" placeholder="search — titles & content…" autocomplete="off">
@@ -964,6 +971,12 @@ function closeRailSheet(fromPop){
 }
 /* tap-outside closes the sheet/drawer (the opening tap is time-guarded) */
 document.addEventListener("click", e => {
+  // A tap on a control that re-renders its own subtree (folder header, sort
+  // header, priority flag, expand caret …) detaches e.target before this
+  // bubble-phase listener runs, so closest("#nav") would answer "outside"
+  // and dismiss the drawer. A detached target can only mean the tap landed
+  // INSIDE live UI that repainted itself — never treat it as outside.
+  if(e.target instanceof Node && !e.target.isConnected) return;
   if(document.body.classList.contains("rail-open") &&
      Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
     closeRailSheet();
@@ -1071,6 +1084,7 @@ let navTab   = "projects";                                          // projects 
 let navSort  = localStorage.getItem("csd.navSort2") || "recent";    // column sort key
 let navDir   = localStorage.getItem("csd.navDir2")  || "desc";
 let navOpenProj = localStorage.getItem("csd.navOpenProj") || null;  // single-open accordion
+let navFlat  = localStorage.getItem("csd.navFlat") === "1";         // projects tab: false = grouped accordion, true = one flat recent-first list
 let navScope = localStorage.getItem("csd.navScope") || "both";      // title | content | both
 let navQuery = "";
 let navSearchMatches = null;   // {session_id: snippet} from /api/search, or null while pending
@@ -1234,7 +1248,12 @@ function sessRow(s, showProject){
   const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
   const wt = s.worktree ? `<span class="brc">⌥${esc(s.worktree)}</span>` : "";
   const ag = s.agents && s.agents.total ? `<span class="agc" title="${s.agents.total} subagent(s)${s.agents.live?`, ${s.agents.live} live`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>` : "";
-  const parts = [wt, ag].filter(Boolean);
+  // showProject===true (archive): dedicated column on desktop. "inline" (flat
+  // mode) and any mobile variant: the project rides the dim meta line instead,
+  // so the title keeps its width and a flat row stays attributable.
+  const projInline = showProject==="inline" || (showProject && navMobile);
+  const pj = projInline ? `<span class="mproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>` : "";
+  const parts = [pj, wt, ag].filter(Boolean);
   const meta = parts.length ? parts.join(" ") : `<span style="color:#3b434d">—</span>`;
   const m = navMatch(s);
   const snip = (navQuery.trim() && m.inC && m.snip) ? `<div class="snip">${m.snip}</div>` : "";
@@ -1273,7 +1292,7 @@ function sessRow(s, showProject){
   return `<div class="sess${arc} ${id===curId?"active":""}" onclick="openSession('${id}')">
     <div class="cstate">${stateDot(s)}</div>
     ${titleCell}
-    ${showProject ? `<div class="cproj" title="${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</div>` : `<div class="cnum">${s.msg_count!=null?s.msg_count:"—"}</div>`}
+    ${showProject===true ? `<div class="cproj" title="${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</div>` : `<div class="cnum">${s.msg_count!=null?s.msg_count:"—"}</div>`}
     <div class="ck ${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?s.ctx_tokens.toLocaleString()+' tokens':''}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</div>
     ${prioCell}
     ${dtCell(s.started_at?startMs(s):0)}
@@ -1286,7 +1305,7 @@ function sessionTable(list, showProject){
   const sign = navDir==="asc" ? 1 : -1;
   const rows = [...list].sort((a,b)=> sign * (NAVCMP[navSort]||NAVCMP.recent)(a,b));
   const cls = showProject ? " arch" : "";
-  const col3 = navMobile ? "" : (showProject ? navTh("project","Project") : navTh("turns","Turns",true));
+  const col3 = navMobile ? "" : (showProject===true ? navTh("project","Project") : navTh("turns","Turns",true));
   const head = navMobile
     ? `<div class="thead${cls}"><div class="th off">•</div>${navTh("title","Title")}${navTh("prio","Prio")}${navTh("idle","Idle",true)}<div class="th off"></div></div>`
     : `<div class="thead${cls}"><div class="th off" onclick="setNavSortKey('state')" title="sort by state">•</div>${navTh("title","Title")}${col3}${navTh("ctx","Ctx",true)}${navTh("prio","Prio")}${navTh("started","Started")}${navTh("recent","Last")}${navTh("idle","Idle",true)}</div>`;
@@ -1323,7 +1342,25 @@ function renderArchiveList(d){
                      : `<div class="empty">${q?"no archived sessions match":"nothing archived — “Summarize + archive” lands sessions here"}</div>`;
 }
 
+/* flat mode: every session in ONE sortable table, project inline on each
+   row's meta line ("inline" keeps the title column at grouped-mode width).
+   Grouping is a render-order concern only — same data, same navMatch, same
+   sessionTable as the accordion, so archive filtering / cutoff / badges /
+   sidechain glance all come along for free. */
+function renderFlatList(d){
+  const q = navQuery.trim().toLowerCase();
+  const list = (d.sessions||[]).filter(s=> !q || navMatch(s).hit ||
+                 (s.project_label||s.project||"").toLowerCase().includes(q));
+  return list.length ? sessionTable(list, "inline")
+    : `<div class="empty">${q?`no sessions match “${esc(navQuery)}”`:"no recent sessions"}</div>`;
+}
+
 function toggleProj(key){ navOpenProj = (navOpenProj===key ? null : key); localStorage.setItem("csd.navOpenProj", navOpenProj||""); renderNav(); }
+function toggleNavFlat(){
+  navFlat = !navFlat;
+  localStorage.setItem("csd.navFlat", navFlat ? "1" : "0");
+  renderNav();
+}
 function setNavSortKey(key){
   if(navSort===key) navDir = navDir==="asc" ? "desc" : "asc";
   else { navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc"; }
@@ -1353,9 +1390,19 @@ function renderNav(){
   renderNavScope();
   setNavSubBar(d);
   renderNavRail(d);
+  const fb = document.getElementById("navflatbtn");
+  if(fb){
+    fb.style.display = navTab==="archive" ? "none" : "";   // archive is already flat
+    fb.classList.toggle("on", navFlat);
+    fb.textContent = navFlat ? "≡" : "▤";
+    fb.title = navFlat ? "Flat list (most recent first) — tap to group by project"
+                       : "Grouped by project — tap for a flat most-recent-first list";
+  }
   const list = document.getElementById("navlist");
   list.style.setProperty("--cols", navCols());
-  list.innerHTML = navTab==="archive" ? renderArchiveList(d) : renderProjects(d);
+  list.innerHTML = navTab==="archive" ? renderArchiveList(d)
+                 : navFlat            ? renderFlatList(d)
+                 : renderProjects(d);
   const q = document.getElementById("navq");
   if(q) q.placeholder = navTab==="archive" ? "search archived — titles & content…" : "search — titles & content…";
   if(navEditing){ const el = document.querySelector("#navlist .tedit"); if(el){ el.focus(); el.select(); } }

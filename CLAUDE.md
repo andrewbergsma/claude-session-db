@@ -167,6 +167,8 @@ when two runs share a project dir, and blind between spawn and first write.
   two-writer guard is gone and the archive is decoupled — the session is archived
   the moment the summary is dispatched (its outcome is tracked in `SUMMARIZING`
   for visibility, not as an archive gate).
+  Summarize is the **first action dispatched through the side-session permission
+  envelope** (below); every other spawn is still ambient.
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
 - **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,
@@ -182,6 +184,44 @@ when two runs share a project dir, and blind between spawn and first write.
   only things that force a run, and the tab polls only while one is in flight.
   Bounded by `CSD_TIMELINE_MAX_TURNS` (150; older turns omitted, surfaced in the
   footer). State: `$CSD_STATE_DIR/timeline/<sid>.json`.
+
+### Side-session permission envelope (`spawn_claude` as resolver/translator)
+
+Pilot of `claude_session_db:design/task-driven-side-sessions`. Side-sessions used
+to pass **no scope or permission flag** and inherited whatever ambient settings
+their `cwd` resolved to — so a Summarize spawned with a git-worktree cwd could not
+read `~/.claude/projects`, where the transcript it digests lives. Measured A/B on
+the same cwd/target/prompt: without the envelope the child returns *"you haven't
+granted it yet"* + *"This command requires approval"*; with it, it reads the
+transcript and runs `session_digest.py` clean.
+
+The envelope is **declared data, not code**: a versioned kmcp skill
+(`claude_session_db:skill/console-summarize`) binding an agent
+(`agent:tools/session-summarizer`). `spawn_claude(…, action=…)` only *translates*
+it — `harness_hints.required_tools` → `--allowedTools` (comma-joined; the flag is
+variadic and would otherwise eat a bare prompt), `fs_read`+`fs_write` →
+`--add-dir`, `constraints.max_turns` → `--max-turns`, and `guardrails` **plus the
+already-resolved transcript path** → `--append-system-prompt`. That last part is
+load-bearing, not decoration: the skill otherwise locates its transcript with a
+command-substituted shell command that a headless run can never get approved, so
+filesystem scope alone would not have fixed it.
+
+`fs_read`/`fs_write`/`bash_allow` are first-class keys under `harness_hints`
+(decision: `event/2026-08-01/decide-harness-scope-keys-on-harness-hints`) — the
+skill schema sets no `additionalProperties` bar, so they validate today with no
+migration.
+
+**Doctrine — it cannot break the console.** `resolve_envelope()` never raises and
+never blocks: kmcp unreachable, skill missing, entry malformed all degrade to
+**zero flags**, byte-for-byte the previous behaviour, with the reason surfaced
+(spawn log + the `/api/summarize` `envelope` field) instead of swallowed. There is
+deliberately **no hardcoded fallback envelope** — duplicating a declared scope in
+Python is the drift this displaces, and a silent fallback would mask a broken
+resolver. Actions with no bound skill (answer, fork, the queue dispatcher) resolve
+to nothing and are untouched. Least privilege only; `bypassPermissions` is never
+emitted. Flags are **prepended**, which is safe only because every call site's
+args begin with `-p` — `spawn_claude` checks that contract and drops the envelope
+(never the prompt) if a caller breaks it.
 
 ### Curation — the span action-vocabulary
 

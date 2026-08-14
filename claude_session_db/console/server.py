@@ -53,6 +53,7 @@ import gzip
 import hmac
 import json
 import os
+import queue as queuelib
 import re
 import secrets
 import shutil
@@ -1530,15 +1531,183 @@ def build_session(sid: str):
 
 
 # ----------------------------------------------------------------------------
+# side-session permission envelope — spawn_claude as resolver/translator
+#
+# Pilot of claude_session_db:design/task-driven-side-sessions. Every side-session
+# the console spawns used to inherit whatever ambient settings its `cwd` resolved
+# to, passing not one scope or permission flag. A summarize spawned with a
+# git-worktree cwd therefore could not read ~/.claude/projects — where the
+# transcript it is digesting lives — so it failed on the filesystem guard and
+# then flailed through fallbacks, each blocked for the same reason.
+#
+# The fix is NOT a per-worktree settings.local.json (reactive, drifts, does not
+# travel) and NOT a Python dict of flags (drifts identically, just in here). It
+# is a VERSIONED kmcp skill entry under this app's steward. Same doctrine as the
+# angles miner: the envelope is DECLARED DATA, this code only TRANSLATES it.
+#
+#   skill.harness_hints.required_tools     -> --allowedTools (comma-joined)
+#   skill.harness_hints.fs_read + fs_write -> --add-dir
+#   agent.constraints.max_turns            -> --max-turns
+#   agent.guardrails + the resolved paths  -> --append-system-prompt
+#
+# The last line is not decoration: the off-session summary skill locates its
+# transcript with a compound, command-substituted shell command, which a headless
+# run can never get approved. Handing the ALREADY-RESOLVED path down (the console
+# knows it — find_session) removes the need for that command entirely. Filesystem
+# scope alone would not have fixed the pilot.
+#
+# DOCTRINE — why this cannot break the console: resolve_envelope() NEVER raises
+# and never blocks a spawn. kmcp unreachable, skill missing, entry malformed —
+# every failure degrades to ZERO flags, which is byte-for-byte what every spawn
+# did before this existed, with the reason surfaced to the caller instead of
+# swallowed. There is deliberately NO hardcoded fallback envelope: duplicating a
+# declared scope in Python is exactly the drift this design displaces, and a
+# silent fallback would mask a broken resolver by making it look like it worked.
+# Least privilege only — the bypass permission mode is never emitted.
+# ----------------------------------------------------------------------------
+ACTION_SKILLS = {"summarize": "claude_session_db:skill/console-summarize"}
+ENVELOPE_TTL_S = 300
+_ENV_CACHE: dict = {}                 # skill ref -> (fetched_at, envelope)
+_ENV_LOCK = threading.Lock()
+
+
+def _fetch_envelope(ref: str) -> dict:
+    """Load a skill entry + its bound agent from kmcp. Raises on failure."""
+    app, _, path = ref.partition(":")
+    skill = _kmcp_call("get_entry", {"application": app, "path": path,
+                                     "entity_type": "skill",
+                                     "include_relationships": False})
+    content = (skill or {}).get("content") or {}
+    if not content:
+        raise KmcpError(f"{ref}: {skill.get('error') or 'no content'}")
+    env = {"skill": ref, "agent_ref": content.get("assigned_agent"),
+           "hints": content.get("harness_hints") or {},
+           "guardrails": [], "constraints": {}}
+    if env["agent_ref"]:
+        aapp, _, apath = str(env["agent_ref"]).partition(":")
+        try:
+            agent = _kmcp_call("get_entry", {"application": aapp, "path": apath,
+                                             "entity_type": "agent",
+                                             "include_relationships": False})
+            ac = (agent or {}).get("content") or {}
+            env["guardrails"] = ac.get("guardrails") or []
+            env["constraints"] = ac.get("constraints") or {}
+        except KmcpError:
+            pass          # the skill's own scope is still worth applying
+    return env
+
+
+def _envelope(ref: str) -> dict:
+    now = time.time()
+    with _ENV_LOCK:
+        hit = _ENV_CACHE.get(ref)
+        if hit and now - hit[0] < ENVELOPE_TTL_S:
+            return hit[1]
+    env = _fetch_envelope(ref)        # outside the lock: it shells out
+    with _ENV_LOCK:
+        _ENV_CACHE[ref] = (now, env)
+    return env
+
+
+def _envelope_prompt(env: dict, ctx: dict):
+    """The --append-system-prompt body: what the child must not have to discover."""
+    out = []
+    sid, tpath = ctx.get("session_id"), ctx.get("transcript")
+    if sid:
+        out.append(f"Target session UUID: {sid}")
+    if tpath:
+        out.append(
+            f"That session's transcript is ALREADY RESOLVED at: {tpath}\n"
+            "Use this path directly. Do not search the filesystem for it, and do "
+            "not run a piped, chained or command-substituted shell command to "
+            "locate it — this is a headless run with no human to approve one.")
+    guardrails = [g for g in (env.get("guardrails") or []) if isinstance(g, str)]
+    if guardrails:
+        out.append(f"Hard rules for this run (from {env.get('agent_ref')}):")
+        out += [f"- {g}" for g in guardrails]
+    return "\n".join(out) if out else None
+
+
+def resolve_envelope(action, ctx=None):
+    """(flags, note) — CLI tokens to PREPEND for this action, and why.
+
+    NEVER raises. An unresolved envelope returns ([], reason): the spawn then
+    behaves exactly as it did before this resolver existed, and the reason
+    travels back to the operator instead of being swallowed.
+    """
+    if not action:
+        return [], None
+    ref = ACTION_SKILLS.get(action)
+    if not ref:
+        return [], f"no skill bound to action {action!r}"
+    try:
+        env = _envelope(ref)
+    except Exception as exc:            # noqa: BLE001 — degrade, never block
+        return [], (f"envelope unresolved ({type(exc).__name__}: {exc}); "
+                    "spawned with ambient permissions")
+
+    hints = env.get("hints") or {}
+    flags, applied = [], []
+
+    tools = [t for t in (hints.get("required_tools") or []) if isinstance(t, str)]
+    if tools:
+        # Comma-joined as ONE argument on purpose: --allowedTools is variadic and
+        # a space-separated list would greedily consume following bare tokens.
+        flags += ["--allowedTools", ",".join(tools)]
+        applied.append(f"{len(tools)} tools")
+
+    dirs = []
+    for key in ("fs_read", "fs_write"):
+        for p in (hints.get(key) or []):
+            if isinstance(p, str) and p:
+                rp = str(Path(p).expanduser())
+                if rp not in dirs:
+                    dirs.append(rp)
+    if dirs:
+        flags += ["--add-dir"] + dirs
+        applied.append(f"{len(dirs)} dirs")
+
+    max_turns = (env.get("constraints") or {}).get("max_turns")
+    if isinstance(max_turns, int) and max_turns > 0:
+        flags += ["--max-turns", str(max_turns)]
+        applied.append(f"max_turns={max_turns}")
+
+    prompt = _envelope_prompt(env, ctx or {})
+    if prompt:
+        flags += ["--append-system-prompt", prompt]
+        applied.append("system-prompt")
+
+    mcps = [m for m in (hints.get("required_mcps") or []) if isinstance(m, str)]
+    if mcps:
+        # Declared, but not translated in the pilot: there is no console-side MCP
+        # config file to point --mcp-config at, and inventing a path would be a
+        # guess. The child reaches kmcp the way the console does (knowledge-cli in
+        # local-trusted mode). Surfaced rather than silently dropped.
+        applied.append(f"mcps declared but unmapped: {','.join(mcps)}")
+
+    if not flags:
+        return [], f"{ref}: envelope resolved but declared nothing"
+    return flags, f"{ref}: " + ", ".join(applied)
+
+
+# ----------------------------------------------------------------------------
 # answer / fork (unchanged behaviour from the prototype)
 # ----------------------------------------------------------------------------
-def spawn_claude(args, cwd, session_id=None, log_path=None):
+def spawn_claude(args, cwd, session_id=None, log_path=None, action=None,
+                 envelope_ctx=None):
     """Spawn a claude run, registering it so Stop can signal its process group.
 
     log_path captures this run's output to a DEDICATED file instead of the
     shared answers.log — used by the summarize action so it can measure whether
     the child actually produced anything (a zero-output rc==0 child is the
     observed silent no-op). Default behaviour (shared answers.log) is unchanged.
+
+    action names a console action bound to a kmcp skill (see ACTION_SKILLS); its
+    declared permission envelope is resolved and PREPENDED to args. Callers that
+    pass no action — answer, fork, the queue dispatcher — are untouched: they
+    resolve to zero flags and spawn exactly as before. The resolved note is
+    attached to the returned Popen as `envelope_note` so endpoints can surface it
+    without changing this function's return contract.
     """
     # Resolve `claude` robustly. A console launched with a minimal PATH (a
     # launchd/GUI parent hands down `/usr/bin:/bin:/usr/sbin:/sbin`) has no
@@ -1556,15 +1725,31 @@ def spawn_claude(args, cwd, session_id=None, log_path=None):
     local_bin = str(Path.home() / ".local" / "bin")
     if local_bin not in env.get("PATH", "").split(os.pathsep):
         env["PATH"] = local_bin + os.pathsep + env.get("PATH", "")
+
+    # Resolve the declared envelope and PREPEND its flags. Prepending is only
+    # safe because every call site's args begin with an option token ("-p"):
+    # --allowedTools and --add-dir are variadic and would otherwise swallow a
+    # bare prompt positional. That is a contract, so check it rather than trust
+    # it — a caller that breaks it loses the envelope, never its prompt.
+    flags, envelope_note = resolve_envelope(action, envelope_ctx)
+    if flags and not (args and str(args[0]).startswith("-")):
+        flags, envelope_note = [], (
+            "envelope skipped: spawn args must begin with an option token or a "
+            "variadic flag would consume the prompt")
+    full_args = flags + list(args)
+
     log_file = Path(log_path) if log_path else ANSWER_LOG
     with open(log_file, "a") as log:
-        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(args)} (cwd={cwd})\n")
+        log.write(f"\n--- spawn {time.strftime('%H:%M:%S')}: {claude} {' '.join(full_args)} (cwd={cwd})\n")
+        if envelope_note:
+            log.write(f"--- envelope: {envelope_note}\n")
         log.flush()
         proc = subprocess.Popen(
-            [claude] + args, cwd=cwd or str(Path.home()),
+            [claude] + full_args, cwd=cwd or str(Path.home()),
             stdout=log, stderr=log, stdin=subprocess.DEVNULL,
             start_new_session=True, env=env,
         )
+    proc.envelope_note = envelope_note
     _register(session_id, proc)
     return proc
 
@@ -2109,8 +2294,17 @@ def summarize_session(sid: str, cwd: str) -> dict:
     # A dedicated per-summary log lets _await_summary measure real output.
     _SUMMARY_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = _SUMMARY_LOG_DIR / f"{sid}.log"
+    # Dispatch through the resolver: the summarize action is bound to
+    # claude_session_db:skill/console-summarize, whose declared scope covers
+    # ~/.claude/projects (the ambient cwd here is the session's own working dir,
+    # often a git worktree that cannot see it). The transcript path is resolved
+    # HERE and handed down, so the child never needs the compound shell command
+    # a headless run cannot get approved.
+    src = find_session(sid)
     proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
-                        log_path=log_path)
+                        log_path=log_path, action="summarize",
+                        envelope_ctx={"session_id": sid,
+                                      "transcript": str(src) if src else None})
     try:
         base_size = log_path.stat().st_size          # header only, pre-output
     except OSError:
@@ -2121,6 +2315,7 @@ def summarize_session(sid: str, cwd: str) -> dict:
                      args=(sid, proc, log_path, base_size),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
+            "envelope": getattr(proc, "envelope_note", None),
             "note": "independent off-session summary dispatched; session archived"}
 
 
@@ -2182,6 +2377,269 @@ def digest_payload(sid: str, delta: bool, head, tail, full: bool):
         return f"digest: {exc}", 404
     except Exception as exc:  # noqa: BLE001
         return f"digest: {type(exc).__name__}: {exc}", 500
+
+
+# ----------------------------------------------------------------------------
+# batch operations — one per-session action fanned out over many sessions
+#
+# The three per-session buttons (Mine angles / Generate timeline / Summarize +
+# archive) as a queue, never a stampede. Doctrine mirrors angles-watch: a
+# SINGLE worker drains the job queue, so N sessions cannot hit the local
+# Ollama concurrently. Per action:
+#   - angles:    mine_angles() (blocking subprocess) — strictly serial.
+#   - timeline:  reuses session_timeline's own single in-process worker via
+#     payload(force=True), then waits on its STATUS — so a batch and a manual
+#     Generate press share ONE lane instead of racing.
+#   - summarize: the SAME off-session dispatch path as the button
+#     (summarize_session — never --resume, archive on dispatch), bounded to
+#     SUMMARIZE_MAX_INFLIGHT concurrent `claude -p` children; a per-item
+#     watcher resolves the outcome off SUMMARIZING.
+# Failures isolate per item — one bad session never aborts the batch.
+# State is the console pattern: atomic-replace JSON (batch.json). On restart,
+# queued items are re-enqueued (same doctrine as queue.json); items caught
+# mid-run are marked failed ("interrupted") rather than silently re-run.
+# ----------------------------------------------------------------------------
+BATCH_FILE = CONSOLE_STATE / "batch.json"
+BATCH_ACTIONS = ("angles", "timeline", "summarize")
+BATCH_KEEP = 8                       # finished batches kept for the UI
+BATCH_MAX_ITEMS = 200
+SUMMARIZE_MAX_INFLIGHT = 2
+BATCH_TIMELINE_WAIT_S = int(os.environ.get("CSD_BATCH_TIMELINE_WAIT_S", "3600"))
+BATCH_SUMMARY_WAIT_S = int(os.environ.get("CSD_BATCH_SUMMARY_WAIT_S", "7200"))
+_BATCH_LOCK = threading.Lock()
+_BATCHES: dict[str, dict] = {}       # id -> batch dict (mirrored to BATCH_FILE)
+_BATCH_JOBS: "queuelib.Queue[tuple[str, int]]" = queuelib.Queue()
+_BATCH_WORKER = None
+_SUMMARIZE_SLOTS = threading.BoundedSemaphore(SUMMARIZE_MAX_INFLIGHT)
+
+OPEN_VERDICTS = ("LIVE", "OPEN", "OPEN-delta", "OPEN?")   # i.e. not CLOSED
+
+
+def _persist_batches_locked() -> None:
+    """Caller holds _BATCH_LOCK. Prunes finished batches beyond BATCH_KEEP."""
+    done = sorted((b for b in _BATCHES.values() if b.get("done")),
+                  key=lambda b: b.get("created_at") or 0)
+    for b in done[:-BATCH_KEEP] if len(done) > BATCH_KEEP else []:
+        _BATCHES.pop(b["id"], None)
+    _atomic_write_json(BATCH_FILE, {"batches": list(_BATCHES.values())})
+
+
+def _batch_update(bid: str, idx, **fields) -> None:
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        if not b:
+            return
+        if idx is not None and 0 <= idx < len(b["items"]):
+            b["items"][idx].update(fields)
+        b["done"] = all(i["status"] in ("done", "failed", "cancelled")
+                        for i in b["items"])
+        if b["done"] and not b.get("ended_at"):
+            b["ended_at"] = time.time()
+        _persist_batches_locked()
+
+
+def _watch_batch_summary(bid: str, idx: int, sid: str) -> None:
+    """Resolve a dispatched batch summary off SUMMARIZING, then free the slot."""
+    try:
+        t0 = time.time()
+        while time.time() - t0 < BATCH_SUMMARY_WAIT_S:
+            st = SUMMARIZING.get(sid)
+            if st != "running":
+                break
+            time.sleep(2)
+        else:
+            st = f"still running after {BATCH_SUMMARY_WAIT_S}s"
+        if st == "done":
+            _batch_update(bid, idx, status="done", ended_at=time.time())
+        else:
+            _batch_update(bid, idx, status="failed", ended_at=time.time(),
+                          error=str(st or "summary did not resolve")[:300])
+    finally:
+        _SUMMARIZE_SLOTS.release()
+
+
+def _run_batch_item(bid: str, idx: int) -> None:
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        item = (b["items"][idx]
+                if b and 0 <= idx < len(b["items"]) else None)
+        if not item or item["status"] != "queued":
+            return                    # cancelled (or gone) while waiting
+        sid, action, cwd = item["session_id"], item["action"], item.get("cwd")
+    _batch_update(bid, idx, status="running", started_at=time.time())
+    try:
+        if action == "angles":
+            r = mine_angles(sid)
+            if not r.get("ok"):
+                raise RuntimeError(r.get("error") or "mine failed")
+        elif action == "timeline":
+            p = find_session(sid)
+            if p is None:
+                raise RuntimeError("transcript not found")
+            session_timeline.payload(sid, p, force=True)   # enqueue, one lane
+            t0 = time.time()
+            while True:
+                st = session_timeline.STATUS.get(sid) or ""
+                if st == "ok":
+                    break
+                if st and not st.startswith(("queued", "generating")):
+                    raise RuntimeError(st[:300])
+                if time.time() - t0 > BATCH_TIMELINE_WAIT_S:
+                    raise RuntimeError(
+                        f"timeline still running after {BATCH_TIMELINE_WAIT_S}s")
+                time.sleep(2)
+        elif action == "summarize":
+            _SUMMARIZE_SLOTS.acquire()   # bound concurrent claude -p children
+            try:
+                r = summarize_session(sid, cwd or "")
+            except BaseException:
+                _SUMMARIZE_SLOTS.release()
+                raise
+            if not r.get("ok"):
+                _SUMMARIZE_SLOTS.release()
+                raise RuntimeError(r.get("error") or "dispatch failed")
+            threading.Thread(target=_watch_batch_summary, args=(bid, idx, sid),
+                             daemon=True,
+                             name=f"batch-summary-{sid[:8]}").start()
+            return                    # the watcher resolves done/failed
+        else:
+            raise RuntimeError(f"unknown action {action!r}")
+        _batch_update(bid, idx, status="done", ended_at=time.time())
+    except Exception as exc:  # noqa: BLE001 — one bad item ≠ dead batch
+        _batch_update(bid, idx, status="failed", error=str(exc)[:300],
+                      ended_at=time.time())
+
+
+def _batch_worker_loop() -> None:
+    while True:
+        bid, idx = _BATCH_JOBS.get()
+        try:
+            _run_batch_item(bid, idx)
+        except Exception:  # noqa: BLE001 — the worker must never die
+            pass
+
+
+def _ensure_batch_worker() -> None:
+    global _BATCH_WORKER
+    with _BATCH_LOCK:
+        if _BATCH_WORKER is None or not _BATCH_WORKER.is_alive():
+            _BATCH_WORKER = threading.Thread(target=_batch_worker_loop,
+                                             daemon=True, name="batch-worker")
+            _BATCH_WORKER.start()
+
+
+def open_session_ids() -> tuple:
+    """(ids, error) — sessions the mgmt lens calls open (not CLOSED), minus
+    archived. The same verdicts the threads overlay shows."""
+    m = mgmt_payload(7, 15)
+    if m.get("error"):
+        return [], m["error"]
+    archived = _read_archive()
+    ids = [r["session_id"] for r in m.get("sessions", [])
+           if r.get("verdict") in OPEN_VERDICTS
+           and r["session_id"] not in archived]
+    return ids, None
+
+
+def create_batch(actions, session_ids, scope=None) -> tuple:
+    """(payload, http_code). Expands actions × sessions into queued items."""
+    acts = [a for a in (actions or []) if a in BATCH_ACTIONS]
+    if not acts:
+        return {"error": f"actions must be a non-empty subset of "
+                         f"{list(BATCH_ACTIONS)}"}, 400
+    if scope == "open":
+        ids, err = open_session_ids()
+        if err:
+            return {"error": f"open-scope unavailable: {err}"}, 502
+    else:
+        ids = [s for s in (session_ids or [])
+               if isinstance(s, str) and s.strip()]
+    seen: set = set()
+    ids = [s for s in ids if not (s in seen or seen.add(s))]
+    if not ids:
+        return {"error": "no sessions selected"}, 400
+    items = []
+    for act in acts:
+        for sid in ids:
+            if act in ("summarize", "timeline") and ":" in sid:
+                continue              # child transcripts: parent's business
+            cwd = None
+            if act == "summarize":
+                p = find_session(sid)
+                cwd = _session_cwd(p) if p else None
+            items.append({"session_id": sid, "action": act, "cwd": cwd,
+                          "status": "queued", "error": None})
+    if not items:
+        return {"error": "nothing to do for the selected sessions"}, 400
+    if len(items) > BATCH_MAX_ITEMS:
+        return {"error": f"batch too large (> {BATCH_MAX_ITEMS} items)"}, 400
+    bid = time.strftime("b%Y%m%d-%H%M%S") + "-" + secrets.token_hex(2)
+    batch = {"id": bid, "actions": acts, "scope": scope or "explicit",
+             "created_at": time.time(), "done": False, "items": items}
+    with _BATCH_LOCK:
+        _BATCHES[bid] = batch
+        _persist_batches_locked()
+    for i in range(len(items)):
+        _BATCH_JOBS.put((bid, i))
+    _ensure_batch_worker()
+    return {"ok": True, "batch": batch}, 200
+
+
+def cancel_batch(bid: str) -> dict:
+    """Cancel every still-queued item; running items finish on their own."""
+    with _BATCH_LOCK:
+        b = _BATCHES.get(bid)
+        if not b:
+            return {"ok": False, "error": "no such batch"}
+        n = 0
+        for it in b["items"]:
+            if it["status"] == "queued":
+                it["status"] = "cancelled"
+                n += 1
+        b["done"] = all(i["status"] in ("done", "failed", "cancelled")
+                        for i in b["items"])
+        if b["done"] and not b.get("ended_at"):
+            b["ended_at"] = time.time()
+        _persist_batches_locked()
+    return {"ok": True, "cancelled": n}
+
+
+def batches_payload() -> dict:
+    with _BATCH_LOCK:
+        out = sorted(_BATCHES.values(),
+                     key=lambda b: b.get("created_at") or 0, reverse=True)
+        return json.loads(json.dumps({"batches": out}))   # detached copy
+
+
+def _resume_batches() -> None:
+    """Reload batch.json at startup: re-enqueue queued items (the queue.json
+    doctrine — restart-safe), mark items caught mid-run as failed rather than
+    silently re-running them (summarize archives; a re-run must be explicit)."""
+    try:
+        d = json.loads(BATCH_FILE.read_text())
+        stored = d.get("batches") or []
+    except (OSError, ValueError):
+        return
+    requeue = []
+    with _BATCH_LOCK:
+        for b in stored:
+            if not isinstance(b, dict) or not b.get("id"):
+                continue
+            for i, it in enumerate(b.get("items") or []):
+                if it.get("status") == "running":
+                    it.update(status="failed",
+                              error="interrupted by console restart")
+                elif it.get("status") == "queued":
+                    requeue.append((b["id"], i))
+            b["done"] = all(i.get("status") in ("done", "failed", "cancelled")
+                            for i in b.get("items") or [])
+            _BATCHES[b["id"]] = b
+        if _BATCHES:
+            _persist_batches_locked()
+    for job in requeue:
+        _BATCH_JOBS.put(job)
+    if requeue:
+        _ensure_batch_worker()
 
 
 # ----------------------------------------------------------------------------
@@ -3078,6 +3536,8 @@ class Handler(SimpleHTTPRequestHandler):
             if p is None:
                 return self._json({"error": "not found"}, 404)
             return self._json({"timeline": session_timeline.payload(sid, p)})
+        if u.path == "/api/batch":
+            return self._json(batches_payload())
         return super().do_GET()
 
     def _do_POST(self):
@@ -3104,6 +3564,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q)})
             except Exception as e:              # DB unreachable → degrade, never 500
                 return self._json({"matches": {}, "error": str(e)})
+
+        # Batch ops are session-set-level, not single-session: route them
+        # before the session_id requirement below.
+        if route == "/api/batch":
+            payload, code = create_batch(body.get("actions"),
+                                         body.get("session_ids"),
+                                         scope=body.get("scope"))
+            return self._json(payload, code)
+        if route == "/api/batch/cancel":
+            r = cancel_batch(body.get("batch_id", ""))
+            return self._json(r, 200 if r["ok"] else 404)
 
         sid = body.get("session_id", "")
         cwd = body.get("cwd")
@@ -3246,6 +3717,7 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     # answer_blocked() clears (persisted queue — survives console restarts).
     threading.Thread(target=_queue_dispatcher, daemon=True,
                      name="reply-queue").start()
+    _resume_batches()               # restart-safe batch queue (batch.json)
 
     if _loopback(host) or no_auth:
         TOKEN = None

@@ -613,6 +613,27 @@
   #topicdlg .td-actions { display:flex; gap:6px; margin-top:14px; }
   #topicdlg .td-actions .primary { color:var(--purple); border-color:var(--purple); }
 
+  /* mine menu: pick which angles to mine — same popover idiom as #topicdlg
+     (own state, outside the polled #chdr so a 3s refresh can't wipe it) */
+  #minedlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:60;
+             display:none; align-items:center; justify-content:center; }
+  #minedlg.open { display:flex; }
+  #minedlg .mm-card { background:var(--surface); border:1px solid var(--border);
+                      border-radius:10px; padding:12px 10px; width:min(320px,92vw);
+                      display:flex; flex-direction:column; gap:1px; }
+  #minedlg .mm-h { font-size:13px; font-weight:600; margin:2px 6px 6px; }
+  #minedlg .mm-i { display:flex; gap:8px; align-items:baseline; padding:7px 8px;
+                   border-radius:6px; cursor:pointer; font:12px var(--mono);
+                   color:var(--ink); user-select:none; }
+  #minedlg .mm-i:hover { background:var(--surface2); }
+  #minedlg .mm-i .g { flex:0 0 14px; text-align:center; color:var(--muted); }
+  #minedlg .mm-i .st { margin-left:auto; padding-left:10px; color:var(--muted);
+                       font-size:10px; white-space:nowrap; }
+  #minedlg .mm-i .st.ok { color:var(--good); }
+  #minedlg .mm-all { border-bottom:1px solid var(--border); margin-bottom:4px;
+                     padding-bottom:9px; border-radius:6px 6px 0 0; }
+  #minedlg .mm-note { color:var(--muted); font:10.5px/1.4 var(--mono); margin:8px 6px 2px; }
+
   /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ---- */
   #pane-timeline .tlrow { display:grid; grid-template-columns:46px 1fr; gap:9px;
            padding:7px 0; border-bottom:1px solid var(--border); align-items:baseline; }
@@ -769,6 +790,9 @@
     #mgmt:has(#mgmtdigest.open) #mgmtbody{ display:none; }
     #topicdlg{ align-items:flex-start; padding-top:8vh; }
     #topicdlg .td-card{ max-height:85dvh; overflow:auto; }
+    #minedlg{ align-items:flex-start; padding-top:8vh; }
+    #minedlg .mm-card{ max-height:85dvh; overflow:auto; }
+    #minedlg .mm-i{ padding:11px 10px; }  /* tap-friendly rows */
     .tlrow{ grid-template-columns:52px 1fr; gap:8px; }
     .subhdr .back{ min-height:38px; display:inline-flex; align-items:center; }
   }
@@ -912,6 +936,11 @@
     </div>
   </div>
 
+  <!-- mine menu: all angles, or pick one (catalog served by /api/angles/catalog) -->
+  <div id="minedlg" onclick="if(event.target===this)closeMineMenu()">
+    <div class="mm-card" id="mm-card"></div>
+  </div>
+
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
@@ -1000,6 +1029,8 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
+  const mm = document.getElementById("minedlg");
+  if(mm && mm.classList.contains("open")){ closeMineMenu(); return; }
   const dlg = document.getElementById("topicdlg");
   if(dlg && dlg.classList.contains("open")){ closeTopicDlg(); return; }
   const fv = document.getElementById("fileview");
@@ -1024,6 +1055,7 @@ function ovDone(){
 }
 window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("minedlg").classList.contains("open")) return closeMineMenu(true);
   if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
   if(document.getElementById("fileview").classList.contains("open")) return closeFileView(true);
   if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
@@ -1707,7 +1739,8 @@ function renderHeader(s){
       <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
       <button class="act" onclick="act('summarize')"
         title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
-      <button class="act" onclick="mine()" title="Re-mine the latest turn's angles now">⟳ Mine angles</button>
+      <button class="act" onclick="openMineMenu()"
+        title="Mine the latest turn's angles now — all of them, or pick one from the menu">⟳ Mine angles ▾</button>
       <button class="act" onclick="setTitle()"
         title="Set or clear a human-readable title (overlay only — never touches the transcript)">✎ ${s.user_title?"Retitle":"Title"}</button>
       <button class="act" onclick="openTopicDlg()"
@@ -2060,12 +2093,68 @@ async function act(kind){
          "archived · independent summary dispatched (watch the summarizing chip)");
 }
 
-async function mine(){
+/* ---------- mine menu: all angles, or just one ------------------------------
+   The ⟳ button opens a popover listing the minable-angle catalog served by
+   /api/angles/catalog (never hard-coded in this page — a new angle in
+   ANGLE_SPECS shows up by itself). Each row mines JUST that angle for the
+   current session; "All angles" at the top keeps today's one-click re-mine.
+   The miner merges a subset result into the session's store when the turn is
+   unchanged, so picking one angle never wipes the others' items. */
+function openMineMenu(){
   if(!curSession) return;
-  actmsg("mining…");
-  const [ok, d] = await post("/api/angles/mine", {session_id: curSession.session_id});
+  document.getElementById("mm-card").innerHTML =
+    `<div class="mm-h">Mine angles</div><div class="mm-note">loading catalog…</div>`;
+  document.getElementById("minedlg").classList.add("open");
+  ovOpen();
+  loadMineMenu();
+}
+async function loadMineMenu(){
+  const sid = curSession?.session_id;
+  let d = null;
+  try { d = await (await fetch("/api/angles/catalog?id=" + encodeURIComponent(sid))).json(); }
+  catch(e){ /* d stays null → unreachable note below */ }
+  const dlg = document.getElementById("minedlg");
+  if(!dlg.classList.contains("open") || curSession?.session_id !== sid) return;
+  const card = document.getElementById("mm-card");
+  if(!d || d.error || !d.angles){
+    card.innerHTML = `<div class="mm-h">Mine angles</div>
+      <div class="mm-note">catalog unreachable${d?.error ? " — " + esc(d.error) : ""}</div>`;
+    return;
+  }
+  const KIND_HINT = {probe: "probe", retrieval: "retrieval"};
+  card.innerHTML = `<div class="mm-h">Mine angles</div>
+    <div class="mm-i mm-all" onclick="mine()"
+         title="Re-mine every angle for the latest turn (the classic one-click)">
+      <span class="g">⟳</span>All angles</div>` +
+    d.angles.map(a => `<div class="mm-i" onclick="mine(['${esc(a.id)}'])"
+         title="Mine just the ${esc(a.id)} angle${a.mined ? " again — overwrites its current items, keeps the rest" : ""}">
+      <span class="g">${esc(ANGLE_GLYPH[a.id] || "·")}</span>${esc(a.label || a.id)}
+      ${KIND_HINT[a.kind] ? `<span class="k" style="font-size:10px">· ${esc(KIND_HINT[a.kind])}</span>` : ""}
+      <span class="st ${a.mined ? "ok" : ""}"
+            title="${a.mined ? a.mined + " item(s) in the current store" : "no items mined for the latest turn"}">${
+        a.mined ? "✓ " + a.mined : "—"}</span>
+    </div>`).join("") +
+    `<div class="mm-note">✓ n = items already mined for the latest turn.
+     Picking an angle re-mines only it; the rest of the store is kept.</div>`;
+}
+function closeMineMenu(fromPop){
+  const dlg = document.getElementById("minedlg");
+  if(!dlg.classList.contains("open")) return;
+  dlg.classList.remove("open");
+  if(fromPop !== true) ovDone();
+}
+async function mine(angles){
+  if(!curSession) return;
+  closeMineMenu();
+  const label = angles && angles.length ? angles.join(", ") : "all angles";
+  actmsg("mining " + label + "…");
+  const body = {session_id: curSession.session_id};
+  if(angles && angles.length) body.angles = angles;
+  const [ok, d] = await post("/api/angles/mine", body);
   if(!ok || !d.ok){ actmsg(d.error || "mine failed", true); return; }
-  actmsg("mined"); await refreshSession(false, true);
+  // Success text AFTER the re-render — renderHeader rebuilds #actmsg (see act()).
+  await refreshSession(false, true);
+  actmsg("mined " + label);
 }
 
 /* ---------- batch operations: multi-select + queued fan-out ----------------

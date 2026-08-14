@@ -73,6 +73,7 @@ from urllib.parse import urlparse, parse_qs
 
 from .. import tldr
 from .. import session_timeline
+from ..angles import ANGLE_SPECS, ANGLE_LABELS
 
 ROOT = Path(__file__).parent
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -168,6 +169,25 @@ def angle_detail(sid: str, item_id: str):
     if not store:
         return None
     return (store.get("items") or {}).get(item_id.upper())
+
+
+def angle_catalog(sid: str):
+    """The minable-angle registry (for the mine menu), straight from
+    ANGLE_SPECS so a new angle appears without touching the console. When a
+    session is named, each row carries how many items its current store holds
+    for that angle (0 = not mined / nothing found for the latest turn)."""
+    store = _angles_store(sid) if sid else None
+    counts: dict[str, int] = {}
+    for item in ((store or {}).get("items") or {}).values():
+        a = item.get("angle")
+        counts[a] = counts.get(a, 0) + 1
+    return {
+        "generated_at": (store or {}).get("generated_at"),
+        "angles": [{"id": key, "prefix": prefix, "kind": kind,
+                    "label": ANGLE_LABELS.get(key, key),
+                    "mined": counts.get(key, 0)}
+                   for key, (prefix, kind) in ANGLE_SPECS.items()],
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -1995,11 +2015,15 @@ def _csd_bin():
     return shutil.which("csd") or None
 
 
-def mine_angles(sid: str, no_probes=False) -> dict:
-    """Run the miner for one session, the way we already shell out to claude."""
+def mine_angles(sid: str, no_probes=False, angles=None) -> dict:
+    """Run the miner for one session, the way we already shell out to claude.
+
+    `angles` (a validated subset of ANGLE_SPECS keys) mines just those angles;
+    the miner carries the rest of the store forward when the turn is unchanged.
+    """
     csd = _csd_bin()
     cmd = ([csd] if csd else [sys.executable, "-m", "claude_session_db.cli"])
-    cmd += ["angles", "--session", sid]
+    cmd += ["angles", *(angles or []), "--session", sid]
     if no_probes:
         cmd.append("--no-probes")
     try:
@@ -3438,6 +3462,12 @@ class Handler(SimpleHTTPRequestHandler):
             d = angle_detail(sid, item)
             return self._json(d) if d else self._json(
                 {"error": f"{item} not mined for {sid}"}, 404)
+        if u.path == "/api/angles/catalog":
+            q = parse_qs(u.query)
+            try:
+                return self._json(angle_catalog((q.get("id") or [""])[0]))
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/git":
             q = parse_qs(u.query)
             sid = (q.get("id") or [""])[0]
@@ -3651,7 +3681,21 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json(r, 200 if r["ok"] else 409)
 
         if route == "/api/angles/mine":
-            r = mine_angles(sid, bool(body.get("no_probes")))
+            wanted = body.get("angles")
+            if wanted is not None:
+                if (not isinstance(wanted, list) or not wanted
+                        or not all(isinstance(a, str) for a in wanted)):
+                    return self._json(
+                        {"ok": False,
+                         "error": "angles must be a non-empty list of angle "
+                                  f"keys (have: {', '.join(ANGLE_SPECS)})"}, 400)
+                unknown = [a for a in wanted if a not in ANGLE_SPECS]
+                if unknown:
+                    return self._json(
+                        {"ok": False,
+                         "error": f"unknown angle(s): {', '.join(unknown)} "
+                                  f"(have: {', '.join(ANGLE_SPECS)})"}, 400)
+            r = mine_angles(sid, bool(body.get("no_probes")), angles=wanted)
             return self._json(r, 200 if r["ok"] else 500)
 
         if route == "/api/angles/curate":

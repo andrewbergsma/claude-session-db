@@ -114,7 +114,8 @@
   body.navmin #nav .top { padding:10px 0 8px; border-bottom:none; text-align:center; }
   body.navmin #nav .top .toprow { justify-content:center; }
   body.navmin .navtabs, body.navmin #nav .top .sub, body.navmin .search,
-  body.navmin .scoperow, body.navmin #navlist, body.navmin #navflatbtn { display:none; }
+  body.navmin .scoperow, body.navmin .sortbar, body.navmin #navlist,
+  body.navmin #navflatbtn { display:none; }
   body.navmin #navrail { display:flex; }
   #navrail { display:none; flex-direction:column; align-items:center; gap:8px; padding:10px 0; }
   .railproj { position:relative; width:34px; height:34px; border-radius:8px; background:var(--surface3);
@@ -142,26 +143,26 @@
   .wk { flex:none; color:var(--accent); font:10px var(--mono); font-weight:600; }
   .pcount { flex:none; color:var(--muted); font:11px var(--mono); min-width:18px; text-align:right; }
 
-  /* session table */
-  .thead { display:grid; grid-template-columns:var(--cols); align-items:end; gap:8px;
-           padding:6px 14px 6px 26px; background:var(--bg); border-bottom:1px solid var(--border);
-           font-size:10px; letter-spacing:.4px; text-transform:uppercase; color:var(--muted); }
-  .thead.arch { padding-left:14px; }
-  .th { cursor:pointer; user-select:none; white-space:nowrap; display:flex; align-items:center; gap:3px; }
-  .th.num { justify-content:flex-end; }
-  .th:hover { color:var(--ink2); }
-  .th.on { color:var(--ink); }
-  .th .ar { font-size:9px; opacity:.9; }
-  .th.off .ar { opacity:0; }
-  .sess { display:grid; grid-template-columns:var(--cols); align-items:center; gap:8px;
-          padding:8px 14px 8px 26px; cursor:pointer; border-bottom:1px solid #1a1f27; }
+  /* session rows — two lines: full-width title, then a compact muted meta line.
+     Sorting moved off per-project column headers to the global sortbar above. */
+  .sortbar { margin-top:7px; font:11px var(--mono); color:var(--muted);
+             display:flex; align-items:center; gap:6px; }
+  .sortbar .ssel { background:var(--bg); color:var(--ink2); border:1px solid var(--border);
+                   border-radius:6px; font:11px var(--mono); padding:2px 4px; max-width:150px; }
+  .sortbar .ssel:focus { outline:none; border-color:var(--accent); }
+  .sortbar .sdir { cursor:pointer; padding:1px 8px; border:1px solid var(--border);
+                   border-radius:10px; color:var(--ink2); user-select:none; }
+  .sortbar .sdir:hover { color:var(--ink); }
+  .sess { display:grid; grid-template-columns:14px minmax(0,1fr) auto;
+          align-items:start; column-gap:8px;
+          padding:7px 14px 7px 26px; cursor:pointer; border-bottom:1px solid #1a1f27; }
   .sess.arch { padding-left:14px; }
   .sess:hover { background:var(--surface2); }
   .sess.active { background:var(--surface3); box-shadow:inset 2px 0 0 var(--accent); }
-  .cstate { display:flex; justify-content:center; align-items:center; }
+  .cstate { display:flex; justify-content:center; padding-top:5px; }
   .cstate .dot { margin-top:0; }
   .ctitle { min-width:0; }
-  .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; }
+  .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; min-width:0; }
   .ctitle .ttxt { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tmark { color:var(--muted); font-size:9px; }
   .edit { flex:none; color:var(--muted); font-size:11px; cursor:pointer; opacity:0; transition:opacity .1s; }
@@ -170,32 +171,27 @@
   .tedit { width:100%; background:var(--bg); border:1px solid var(--accent); border-radius:4px;
            color:var(--ink); font:12.5px inherit; padding:2px 5px; }
   .tedit:focus { outline:none; }
-  .ctitle .m { display:flex; align-items:center; gap:6px; margin-top:2px; color:var(--muted); font:10px var(--mono); }
-  .ctitle .m .mproj { min-width:0; flex:0 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  /* line 2: single-line meta — badges + turns + ctx + date range + idle.
+     Fixed-width segments; the shrinkable ones (project, worktree, date range)
+     give way first so the colored idle/active tail stays visible. */
+  .ctitle .m { display:flex; align-items:baseline; gap:5px; margin-top:2px; color:var(--muted);
+               font:10.5px var(--mono); white-space:nowrap; overflow:hidden; min-width:0; }
+  .ctitle .m > * { flex:none; }
+  .ctitle .m .mproj, .ctitle .m .mshrink { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .ctitle .m .mdates { flex:0 4 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .ctitle .m .msep { color:#3b434d; }
+  .ctitle .m .warn { color:var(--warn); } .ctitle .m .bad { color:var(--bad); }
+  .ctitle .m .hot { color:var(--accent); }
+  .ctitle .m .midle.on { color:var(--accent); font-weight:600; }
   .brc { color:var(--purple); } .agc { color:var(--cyan); }
   .snip { margin-top:2px; font:10px var(--mono); color:var(--ink2);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .snip mark { background:rgba(210,153,34,.25); color:var(--warn); border-radius:2px; padding:0 1px; }
-  .cproj { font:11px var(--mono); color:var(--ink2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .cnum { text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink); }
-  .ck { text-align:right; font:12px var(--mono); font-weight:600; color:var(--ink); }
-  .ck.warn { color:var(--warn); } .ck.bad { color:var(--bad); }
-  .cdt { font-family:var(--mono); line-height:1.15; text-align:left; }
-  .cdt b { font-size:11px; font-weight:600; color:var(--ink2); display:block; }
-  .cdt small { font-size:10px; color:var(--muted); }
-  .cdt.hot b { color:var(--accent); }
-  .cidle { text-align:right; font:11px var(--mono); color:var(--muted); white-space:nowrap; }
-  .cidle.active { color:var(--accent); font-weight:600; }
-  .cprio { display:flex; justify-content:center; }
-  .prio { cursor:pointer; font-size:13px; line-height:1; }
+  .cprio { display:flex; justify-content:center; padding-top:2px; }
+  .prio { cursor:pointer; font-size:13px; line-height:1.2; }
   .prio.critical { color:var(--bad); } .prio.high { color:var(--warn); }
   .prio.med { color:var(--accent); } .prio.low { color:var(--ink2); }
   .prio.normal { color:#3b434d; } .prio.normal:hover { color:var(--muted); }
-  .cexp { display:flex; justify-content:center; color:var(--muted); cursor:pointer; font-size:10px; }
-  .cexp:hover { color:var(--ink); }
-  .sdetail { display:flex; flex-wrap:wrap; gap:6px 16px; padding:2px 14px 10px 26px;
-             border-bottom:1px solid #1a1f27; font:10.5px var(--mono); color:var(--muted); background:#12161d; }
-  .sdetail b { color:var(--ink2); font-weight:600; }
   /* activity dot — palette makes the OPERATOR-ACTIONABLE state ("waiting for
      you") draw the eye. Deliberate inversion of the old green=done/orange=busy:
      amber now means "your move", blue means an agent is working. */
@@ -755,6 +751,9 @@
     body.navopen #navback{ display:block; }
     body.navmin #nav{ width:min(86vw,340px); }   /* slim mode is a desktop concept;
                                                     JS strips .navmin when the drawer opens */
+    /* narrow drawer: the date range would truncate to noise — idle already
+       conveys recency, so shed it and keep turns/ctx/idle readable */
+    .ctitle .m .mdates, .ctitle .m .mdates + .msep{ display:none; }
     #navgrip{ display:none; }
     .navham{ display:inline-flex; }
     #chdr{ padding:10px 12px; padding-top:calc(10px + env(safe-area-inset-top)); }
@@ -803,7 +802,9 @@
     #compose textarea, #topicdlg .td-in, .navfilter, .cur-row select{ font-size:16px; }
     .act, #compose button{ min-height:42px; }
     .act.sm, .pribtn{ min-height:36px; }
-    .sortchip, .navbtn, .navtog, .navham{ min-height:32px; display:inline-flex; align-items:center; }
+    .sortbar .sdir, .navbtn, .navtog, .navham{ min-height:32px; display:inline-flex; align-items:center; }
+    .sortbar .ssel{ min-height:32px; }
+    .prio{ min-height:32px; min-width:32px; display:inline-flex; align-items:center; justify-content:center; }
     .rtab{ min-height:40px; display:inline-flex; align-items:center; flex:1; justify-content:center; }
     .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re{ display:inline-flex; align-items:center;
       justify-content:center; min-height:44px; min-width:44px; }
@@ -830,6 +831,7 @@
       <div class="sub" id="navsub">loading…</div>
       <input class="search" id="navq" placeholder="search — titles & content…" autocomplete="off">
       <div class="scoperow" id="navscope"></div>
+      <div class="sortbar" id="navsortbar"></div>
     </div>
     <div id="navrail"></div>
     <div id="navlist"></div>
@@ -1209,9 +1211,7 @@ let navFlat  = localStorage.getItem("csd.navFlat") === "1";         // projects 
 let navScope = localStorage.getItem("csd.navScope") || "both";      // title | content | both
 let navQuery = "";
 let navSearchMatches = null;   // {session_id: snippet} from /api/search, or null while pending
-let navExpanded = new Set();   // mobile: rows expanded to reveal hidden columns
 let navEditing = null;         // session_id being renamed inline
-let navMobile = matchMedia("(max-width:760px)").matches;
 
 function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
                                      : (s.mtime ? s.mtime*1000 : 0); }
@@ -1253,13 +1253,20 @@ const NAVCMP = {
 };
 
 const NAV_MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
-function dtCell(ms, hot){
-  if(!ms) return `<div class="cdt"><b>—</b></div>`;
-  const d = new Date(ms), p = n => String(n).padStart(2,"0");
-  return `<div class="cdt${hot?" hot":""}"><b>${NAV_MON[d.getMonth()]} ${d.getDate()}</b><small>${p(d.getHours())}:${p(d.getMinutes())}</small></div>`;
-}
 function dtStr(ms){ if(!ms) return "—"; const d=new Date(ms),p=n=>String(n).padStart(2,"0");
   return `${NAV_MON[d.getMonth()]} ${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`; }
+/* compact "started → last" range for the meta line: same-day collapses to one
+   date ("Aug 14 09:12 → 16:05"), else "Aug 10 → Aug 14 16:05" */
+function rangeTxt(s){
+  const sMs = s.started_at ? startMs(s) : 0, lMs = lastMs(s);
+  if(!lMs) return "—";
+  const l = new Date(lMs), p = n => String(n).padStart(2,"0");
+  if(!sMs) return dtStr(lMs);
+  const st = new Date(sMs);
+  if(st.toDateString() === l.toDateString())
+    return `${dtStr(sMs)} → ${p(l.getHours())}:${p(l.getMinutes())}`;
+  return `${NAV_MON[st.getMonth()]} ${st.getDate()} → ${dtStr(lMs)}`;
+}
 function idleTxt(s){
   const t = lastMs(s); if(!t) return "—";
   const m = Math.max(0, Math.round((Date.now()-t)/60000));
@@ -1312,9 +1319,6 @@ function commitTitle(id, val){
   post("/api/title", {session_id:id, title: v || null});
 }
 
-/* mobile per-row expand */
-function toggleRowExpand(e, id){ e.stopPropagation(); navExpanded.has(id) ? navExpanded.delete(id) : navExpanded.add(id); renderNav(); }
-
 /* ---------- tabs / scope / sub / rail ---------- */
 function renderNavTabs(d){
   const nproj = navTab==="projects" ? new Set((d.sessions||[]).map(s=>s.project_label||s.project)).size : null;
@@ -1353,29 +1357,31 @@ function groupByProject(sessions){
   return [...m.values()].sort((a,b)=> a.label.toLowerCase().localeCompare(b.label.toLowerCase()));
 }
 
-function navCols(){
-  if(navMobile) return "12px minmax(0,1fr) 26px 46px 16px";
-  return navTab==="archive"
-    ? "12px minmax(0,1fr) 92px 44px 30px 54px 54px 46px"
-    : "12px minmax(0,1fr) 38px 44px 30px 54px 54px 46px";
-}
-function navTh(key, label, num){
-  const on = navSort===key, ar = on ? (navDir==="asc"?"▲":"▼") : "▲";
-  return `<div class="th ${num?"num":""} ${on?"on":"off"}" onclick="setNavSortKey('${key}')">${label}<span class="ar">${ar}</span></div>`;
-}
-
+/* two-line session row.
+   Line 1: state dot | full-width title (ellipsis only when genuinely long) |
+           priority flag (unchanged cycle behavior).
+   Line 2: one compact muted meta line — project (flat/archive), worktree,
+           subagent/live badges, turns, ctx (over-budget coloring carried
+           over), compact "started → last" range, idle/active state. The
+           shrinkable segments give way first so idle/active stays visible. */
 function sessRow(s, showProject){
   const id = s.session_id;
   const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
-  const wt = s.worktree ? `<span class="brc">⌥${esc(s.worktree)}</span>` : "";
-  const ag = s.agents && s.agents.total ? `<span class="agc" title="${s.agents.total} subagent(s)${s.agents.live?`, ${s.agents.live} live`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>` : "";
-  // showProject===true (archive): dedicated column on desktop. "inline" (flat
-  // mode) and any mobile variant: the project rides the dim meta line instead,
-  // so the title keeps its width and a flat row stays attributable.
-  const projInline = showProject==="inline" || (showProject && navMobile);
-  const pj = projInline ? `<span class="mproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>` : "";
-  const parts = [pj, wt, ag].filter(Boolean);
-  const meta = parts.length ? parts.join(" ") : `<span style="color:#3b434d">—</span>`;
+  const segs = [];
+  if(showProject)
+    segs.push(`<span class="mproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>`);
+  if(s.worktree)
+    segs.push(`<span class="brc mshrink" title="worktree: ${esc(s.worktree)}">⌥${esc(s.worktree)}</span>`);
+  if(s.agents && s.agents.total)
+    segs.push(`<span class="agc" title="${s.agents.total} subagent(s)${s.agents.live?`, ${s.agents.live} live`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>`);
+  segs.push(`<span title="turns">${s.msg_count!=null?s.msg_count:"—"} turns</span>`);
+  segs.push(`<span class="${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?"context ≈ "+s.ctx_tokens.toLocaleString()+" tokens":"context unknown"}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"} ctx</span>`);
+  const working = s.state==="working";
+  segs.push(`<span class="mdates${working?" hot":""}" title="started → last activity">${rangeTxt(s)}</span>`);
+  const it = idleTxt(s);
+  segs.push(working ? `<span class="midle on" title="agent active now">active</span>`
+                    : `<span class="midle" title="idle since last message">${it==="—"?"—":"idle "+it}</span>`);
+  const meta = segs.join(`<span class="msep">·</span>`);
   const m = navMatch(s);
   const snip = (navQuery.trim() && m.inC && m.snip) ? `<div class="snip">${m.snip}</div>` : "";
   const disp = s.user_title || s.title || id.slice(0,12);
@@ -1388,56 +1394,25 @@ function sessRow(s, showProject){
        </div>`;
   const p = prioOf(s);
   const prioCell = `<div class="cprio"><span class="prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span></div>`;
-  const working = s.state==="working";
-  const idleCell = working ? `<div class="cidle active" title="agent active now">active</div>`
-                           : `<div class="cidle" title="idle since last message">${idleTxt(s)}</div>`;
   const arc = showProject ? " arch" : "";
   /* batch mode: the row toggles selection instead of opening, and the state
-     dot becomes a checkbox — no column changes, so the grid is untouched */
+     dot becomes a checkbox — no layout changes, so the grid is untouched */
   const rowClick = batchMode ? `batchToggle(event,'${id}')` : `openSession('${id}')`;
   const selCls = batchMode && batchSel.has(id) ? " bselrow" : "";
   const stateCell = batchMode
     ? `<div class="cstate bchk">${batchSel.has(id)?"☑":"☐"}</div>`
     : `<div class="cstate">${stateDot(s)}</div>`;
-
-  if(navMobile){
-    const open = navExpanded.has(id);
-    const detail = open ? `<div class="sdetail">
-        <span>Turns <b>${s.msg_count!=null?s.msg_count:"—"}</b></span>
-        <span>Ctx <b class="ck ${ckCls(s.ctx_tokens||0)}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</b></span>
-        <span>Started <b>${s.started_at?dtStr(startMs(s)):"—"}</b></span>
-        <span>Last <b>${dtStr(lastMs(s))}</b></span>
-        ${showProject?`<span>Project <b>${esc(s.project_label||s.project||"")}</b></span>`:""}
-      </div>` : "";
-    return `<div class="sess${arc}${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
-      ${stateCell}
-      ${titleCell}
-      ${prioCell}
-      ${idleCell}
-      <div class="cexp" title="show more" onclick="toggleRowExpand(event,'${id}')">${open?"▾":"▸"}</div>
-    </div>${detail}`;
-  }
   return `<div class="sess${arc}${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
     ${stateCell}
     ${titleCell}
-    ${showProject===true ? `<div class="cproj" title="${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</div>` : `<div class="cnum">${s.msg_count!=null?s.msg_count:"—"}</div>`}
-    <div class="ck ${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?s.ctx_tokens.toLocaleString()+' tokens':''}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"}</div>
     ${prioCell}
-    ${dtCell(s.started_at?startMs(s):0)}
-    ${dtCell(lastMs(s), working)}
-    ${idleCell}
   </div>`;
 }
 
 function sessionTable(list, showProject){
   const sign = navDir==="asc" ? 1 : -1;
   const rows = [...list].sort((a,b)=> sign * (NAVCMP[navSort]||NAVCMP.recent)(a,b));
-  const cls = showProject ? " arch" : "";
-  const col3 = navMobile ? "" : (showProject===true ? navTh("project","Project") : navTh("turns","Turns",true));
-  const head = navMobile
-    ? `<div class="thead${cls}"><div class="th off">•</div>${navTh("title","Title")}${navTh("prio","Prio")}${navTh("idle","Idle",true)}<div class="th off"></div></div>`
-    : `<div class="thead${cls}"><div class="th off" onclick="setNavSortKey('state')" title="sort by state">•</div>${navTh("title","Title")}${col3}${navTh("ctx","Ctx",true)}${navTh("prio","Prio")}${navTh("started","Started")}${navTh("recent","Last")}${navTh("idle","Idle",true)}</div>`;
-  return head + rows.map(s=>sessRow(s, showProject)).join("");
+  return rows.map(s=>sessRow(s, showProject)).join("");
 }
 
 function renderProjects(d){
@@ -1489,10 +1464,29 @@ function toggleNavFlat(){
   localStorage.setItem("csd.navFlat", navFlat ? "1" : "0");
   renderNav();
 }
-function setNavSortKey(key){
-  if(navSort===key) navDir = navDir==="asc" ? "desc" : "asc";
-  else { navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc"; }
+/* global sort control (sidebar toolbar) — replaces the per-project column
+   headers. One key + direction, shared by the accordion tables, flat mode
+   and the Archive tab; same localStorage keys as the old headers. */
+const NAV_SORTS = [["recent","last activity"],["idle","idle"],["started","started"],
+                   ["turns","turns"],["ctx","context"],["prio","priority"],
+                   ["title","title"],["state","state"],["project","project"]];
+function renderNavSort(){
+  const el = document.getElementById("navsortbar"); if(!el) return;
+  const opts = NAV_SORTS.map(([k,l])=>`<option value="${k}"${navSort===k?" selected":""}>${l}</option>`).join("");
+  el.innerHTML = `<span>sort</span>
+    <select class="ssel" title="sort sessions by" onchange="setNavSortSel(this.value)">${opts}</select>
+    <span class="sdir" role="button" tabindex="0" title="toggle sort direction"
+          onclick="toggleNavSortDir()"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleNavSortDir();}">${navDir==="asc"?"▲ asc":"▼ desc"}</span>`;
+}
+function setNavSortSel(key){
+  navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc";
   localStorage.setItem("csd.navSort2", navSort); localStorage.setItem("csd.navDir2", navDir);
+  renderNav();
+}
+function toggleNavSortDir(){
+  navDir = navDir==="asc" ? "desc" : "asc";
+  localStorage.setItem("csd.navDir2", navDir);
   renderNav();
 }
 
@@ -1526,8 +1520,8 @@ function renderNav(){
     fb.title = navFlat ? "Flat list (most recent first) — tap to group by project"
                        : "Grouped by project — tap for a flat most-recent-first list";
   }
+  renderNavSort();
   const list = document.getElementById("navlist");
-  list.style.setProperty("--cols", navCols());
   list.innerHTML = navTab==="archive" ? renderArchiveList(d)
                  : navFlat            ? renderFlatList(d)
                  : renderProjects(d);
@@ -1569,12 +1563,10 @@ async function runContentSearch(){
 // the archived toggle name is still referenced elsewhere — map it to the tab
 function toggleArchived(){ setNavTab(navTab==="archive" ? "projects" : "archive"); }
 
-// wire the persistent search box + react to viewport (mobile) changes, once
+// wire the persistent search box, once
 (function(){
   const q = document.getElementById("navq");
   if(q) q.addEventListener("input", e => onNavSearch(e.target.value));
-  try { matchMedia("(max-width:760px)").addEventListener("change", e => { navMobile = e.matches; renderNav(); }); }
-  catch(_){ /* older Safari */ }
 })();
 
 /* ---------- session detail ---------- */

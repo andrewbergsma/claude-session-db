@@ -266,6 +266,12 @@
             letter-spacing:.4px; color:var(--warn); border:1px solid var(--warn);
             border-radius:3px; padding:0 4px; margin-left:6px; }
   .qbadge.bad { color:var(--bad); border-color:var(--bad); }
+  /* optimistic composer message: rendered the instant it is submitted, before
+     `claude -p --resume` has written it to the transcript (that write is
+     seconds away); same dashed "not yet in the ledger" look as queued. */
+  .turn.user.sending { border-style:dashed; opacity:.85; }
+  .turn.user.sending .who { color:var(--accent); }
+  .qbadge.sending { color:var(--accent); border-color:var(--accent); }
   .qcancel { float:right; cursor:pointer; color:var(--muted);
              font:10px var(--mono); text-transform:none; letter-spacing:0; }
   .qcancel:hover { color:var(--bad); }
@@ -1624,8 +1630,8 @@ async function refreshSession(scrollBottom, force){
 /* ---------- live status for a dispatched answer ---------- */
 function clearAwait(){ awaitReply = null; clearInterval(replyTicker); replyTicker = null; }
 
-function startAwait(){
-  awaitReply = { t0: Date.now(), baseEvents: curSession.events.length, sid: curId };
+function startAwait(pend){
+  awaitReply = { t0: Date.now(), baseEvents: curSession.events.length, sid: curId, pend };
   clearInterval(replyTicker);
   replyTicker = setInterval(tickRunning, 1000);
   tickRunning();
@@ -1652,6 +1658,7 @@ function syncReplyStatus(s){
   const secs = Math.round((Date.now() - awaitReply.t0) / 1000);
   const last = s.events[s.events.length - 1] || {};
   const landed = s.events.length > awaitReply.baseEvents && last.kind === "assistant";
+  if(awaitReply.pend){ dropPending(awaitReply.pend); renderStream(s); }
   clearAwait();
   const st = document.getElementById("cstatus");
   st.className = landed ? "ok" : "bad";
@@ -1942,6 +1949,18 @@ function renderStream(s){
           <span class="qcancel" onclick="cancelQueued('${esc(q.id)}')"
             title="${failed ? "dismiss this failed message" : "cancel this queued message"}">✕ ${failed ? "dismiss" : "cancel"}</span></div>
         <div class="txt">${esc(q.text)}</div>${err}
+      </div></div></div>`;
+  });
+  // Optimistic sends: a submitted answer only reaches the transcript once the
+  // spawned `claude -p --resume` writes its user record (2-5s of process
+  // startup) and the poll then picks it up — so render it NOW, badged
+  // "sending", and reconcile it away the moment a matching user turn lands.
+  reconcilePending(s);
+  pendingSends.filter(p => p.sid === s.session_id).forEach(p => {
+    html += `<div class="ev"><span class="gutter">${clock(p.ts)}</span>
+      <div class="b"><div class="turn user sending">
+        <div class="who">you <span class="qbadge sending">⏳ sending</span></div>
+        <div class="txt">${esc(p.text)}</div>
       </div></div></div>`;
   });
   const st = document.getElementById("stream");
@@ -3048,6 +3067,28 @@ function renderSummary(s){
 }
 
 /* ---------- answer / fork ---------- */
+/* Optimistic sends. {sid, text, ts, baseEvents}: rendered by renderStream as
+   a "⏳ sending" turn until a user event with the same text appears past
+   baseEvents (the transcript caught up), or the tracked turn ends without
+   one (dropPending from syncReplyStatus), or the send fails. Never persisted:
+   the transcript is the ledger; this is display latency only. */
+let pendingSends = [];
+function addPending(sid, text){
+  const p = {sid, text, ts: new Date().toISOString(),
+             baseEvents: curSession?.events?.length || 0};
+  pendingSends.push(p); return p;
+}
+function dropPending(p){ pendingSends = pendingSends.filter(x => x !== p); }
+function reconcilePending(s){
+  if(!pendingSends.length) return;
+  pendingSends = pendingSends.filter(p => {
+    if(p.sid !== s.session_id) return true;
+    // Also stale-out after 3 min: the ledger, not this list, is truth.
+    if(Date.now() - Date.parse(p.ts) > 180000) return false;
+    return !s.events.slice(p.baseEvents).some(e =>
+      e.kind === "user" && (e.text || "").trim() === p.text);
+  });
+}
 let sending = false;
 async function send(isFork){
   const inp = document.getElementById("cin"); const text = inp.value.trim();
@@ -3059,7 +3100,12 @@ async function send(isFork){
   const wasAns = bans.disabled, wasFork = bfork.disabled;
   bans.disabled = bfork.disabled = true;
   const st = document.getElementById("cstatus");
-  const fail = msg => { st.className = "bad"; st.textContent = "✗ " + msg; toast(msg, true); };
+  // Paint the message before the round-trip: an answer is a resume of THIS
+  // session, so it belongs in this pane; a fork lands in a new session file.
+  const pend = isFork ? null : addPending(curId, text);
+  if(pend){ inp.value = ""; growComposer(); renderStream(curSession); }
+  const fail = msg => { st.className = "bad"; st.textContent = "✗ " + msg; toast(msg, true);
+                        if(pend){ dropPending(pend); inp.value = inp.value || text; renderStream(curSession); } };
   st.className = ""; st.textContent = isFork ? "forking…" : "answering…";
   try {
     const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
@@ -3089,7 +3135,9 @@ async function send(isFork){
     // A plain answer resumes THIS session's file, so we can track it live.
     // Forks write a new session file — leave their one-shot status as-is.
     // A queued answer isn't running yet: just repaint so the queued turn shows.
-    if(d.action === "answer"){ startAwait(); refreshSession(false, true); }
+    // The server-side queue renders its own ⏸ badge — hand off to it.
+    if(d.action === "queued" && pend) dropPending(pend);
+    if(d.action === "answer"){ startAwait(pend); refreshSession(false, true); }
     else if(d.action === "queued"){ refreshSession(false, true); }
   } catch(e){ fail("no response (server error?) — "+e); }
   finally {

@@ -2145,6 +2145,14 @@ async function loadMineMenu(){
             title="${a.mined ? a.mined + " item(s) in the current store" : "no items mined for the latest turn"}">${
         a.mined ? "✓ " + a.mined : "—"}</span>
     </div>`).join("") +
+    `<div class="mm-i" onclick="closeMineMenu(); refreshTldr()"
+         title="Regenerate the tl;dr — a last-3-turns catch-up (its own engine, not a per-turn angle)">
+      <span class="g">T</span>tl;dr
+      <span class="k" style="font-size:10px">· last 3 turns</span>
+      <span class="st ${curSession?.tldr?.headline ? "ok" : ""}"
+            title="${curSession?.tldr?.headline ? "generated" : "not generated yet"}">${
+        curSession?.tldr?.headline ? "✓" : "—"}</span>
+    </div>` +
     `<div class="mm-note">✓ n = items already mined for the latest turn.
      Picking an angle re-mines only it; the rest of the store is kept.</div>`;
 }
@@ -3178,7 +3186,9 @@ async function openParent(parentId, anchorUuid){
 let tlTimer = null;
 
 function tlClock(t){ if(!t) return "?"; const d = new Date(t);
-  return d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+  // Fixed HH:MM (24h): the row's time column is 46px, and locale 12h output
+  // like "02:54 p.m." overflows into the summary text.
+  return String(d.getHours()).padStart(2,"0") + ":" + String(d.getMinutes()).padStart(2,"0"); }
 
 async function loadTimeline(){
   clearTimeout(tlTimer); tlTimer = null;

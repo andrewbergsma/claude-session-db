@@ -58,6 +58,21 @@ ANGLE_SPECS: dict[str, tuple[str, str]] = {
 _CAPS = {"files": 8, "commands": 8, "git": 6, "agents": 8, "kmcp": 8,
          "errors": 6, "metrics": 1, "direction": 5, "events": 6, "knowledge": 5}
 
+# Human-readable menu labels (the console's mine menu). Keyed like ANGLE_SPECS;
+# a new angle without a label falls back to its registry key.
+ANGLE_LABELS: dict[str, str] = {
+    "files":     "Files touched",
+    "commands":  "Commands run",
+    "git":       "Git activity",
+    "agents":    "Subagents",
+    "kmcp":      "kmcp writes",
+    "errors":    "Errors",
+    "metrics":   "Turn metrics",
+    "direction": "Direction",
+    "events":    "Events",
+    "knowledge": "Knowledge",
+}
+
 # Slice of a record-level toolUseResult worth keeping for the agents angle.
 _AGENT_RESULT_KEYS = ("agentId", "agentType", "status", "totalTokens",
                       "totalDurationMs", "totalToolUseCount", "resolvedModel")
@@ -536,6 +551,24 @@ def run_angles(cwd: str, angles: Optional[list[str]] = None,
                 except Exception as exc:  # noqa: BLE001 — degrade per-angle
                     failures[k] = f"{type(exc).__name__}: {exc}"
                     results[k] = []
+
+    # Subset mine (an angle picked from the console menu, or --no-probes):
+    # carry forward the un-mined angles' items from the existing store, but
+    # ONLY if that store is for the SAME turn — a store never mixes turns.
+    unmined = [a for a in ANGLE_SPECS if a not in results]
+    if unmined:
+        prev_f = _state_dir() / f"{delta.session_id}.json"
+        try:
+            prev = json.loads(prev_f.read_text()) if prev_f.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            prev = {}
+        if prev.get("turn_span") == [delta.started_at, delta.ended_at]:
+            for key in unmined:
+                carried = [{k: v for k, v in item.items() if k != "angle"}
+                           for item in prev.get("items", {}).values()
+                           if item.get("angle") == key]
+                if carried:
+                    results[key] = carried
 
     # Assign IDs, persist detail, render headlines.
     store: dict[str, Any] = {"session_id": delta.session_id,

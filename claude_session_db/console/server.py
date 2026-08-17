@@ -49,6 +49,13 @@ Endpoints
   POST /api/title/dismiss          {session_id, proposal} -> dismiss a proposed title
   POST /api/batch                  {actions, session_ids|scope, options?:{force}}
                                    -> queue a fan-out (see the batch-ops section)
+  GET  /api/cr/manifest?id=<sid>   CR manifest: one row per context block, with
+                                   deterministic defaults + scaffolding floor
+  POST /api/cr                     {session_id, stub[], refs[], confirm} —
+                                   two-phase context-reduction fork (preview,
+                                   then forge a redacted COPY; original untouched)
+  POST /api/cr/search              {q, app?} -> kmcp hybrid_search for the cart
+  POST /api/cr/compile             {refs[]} -> compiled context document only
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
@@ -75,6 +82,7 @@ from http.cookies import SimpleCookie
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
+from .. import cr as crlib
 from .. import tldr
 from .. import session_timeline
 from ..angles import ANGLE_SPECS, ANGLE_LABELS
@@ -1457,6 +1465,7 @@ def build_session(sid: str):
                             ]
                         events.append({
                             "kind": "read", "ts": ts, "uuid": uid, "sub": sub,
+                            "tid": tid,        # CR mode addresses the block
                             "tool": base, "app": app_, "path": path_,
                             "mode": mode, "sections": secs, "via": via,
                             "etype": inp.get("entity_type") or _etype_hint(path_),
@@ -1468,7 +1477,7 @@ def build_session(sid: str):
                         n_searches += 1
                         events.append({
                             "kind": "search", "ts": ts, "uuid": uid, "sub": sub,
-                            "tool": base, "via": via,
+                            "tid": tid, "tool": base, "via": via,
                             "query": (inp.get("query") or inp.get("path")
                                       or inp.get("application") or ""),
                             "app": inp.get("application"),
@@ -2319,6 +2328,146 @@ def point_fork(session_id: str, at_uuid: str):
     }))
     dst.write_text("\n".join(kept) + "\n")
     return new_id
+
+
+# ----------------------------------------------------------------------------
+# CR — context reduction: a fork with curation (engine: claude_session_db/cr.py)
+#
+# The operator selects which context survives; CR writes a NEW reduced session
+# file (redaction fork — every record kept structurally, unkept content swapped
+# for breadcrumbs in both copies) plus ONE synthetic preamble user record
+# carrying the compiled kmcp cart. Two-phase like curate(): confirm:false is a
+# PREVIEW (nothing written), confirm:true forges the fork. No spawn — the fork
+# appears in the sidebar; pull not push. The original is never touched, and the
+# fork id is minted HERE (house doctrine — never inferred from claude).
+#
+# kmcp is optional at every step: search surfaces a visible {error}, cart
+# hydration failure degrades the preamble to plain text pointers. Neither ever
+# blocks the fork.
+# ----------------------------------------------------------------------------
+def cr_manifest_payload(sid: str):
+    path = find_session(sid)
+    if path is None:
+        return {"error": "not found"}, 404
+    records, truncated = all_records(path)
+    records = [r for r in records if not r.get("isSidechain")]
+    m = crlib.build_manifest(records, bash_kmcp=_bash_kmcp)
+    m["session_id"] = sid
+    m["truncated"] = truncated
+    return m, 200
+
+
+def cr_search(q: str, app):
+    """hybrid_search proxied through the knowledge-cli path. Unreachable kmcp
+    is a visible {error}, never a block — the cart keeps plain-text refs."""
+    args = {"query": q, "limit": 8}
+    if app:
+        args["application"] = app
+    try:
+        r = _kmcp_call("hybrid_search", args)
+    except KmcpError as e:
+        return {"error": str(e)[:300], "results": []}
+    hits = r.get("results") or r.get("entries") or []
+    out = []
+    for h in hits if isinstance(hits, list) else []:
+        if not isinstance(h, dict):
+            continue
+        out.append({
+            "application": h.get("application"), "path": h.get("path"),
+            "title": h.get("title"), "description": h.get("description"),
+            "entity_type": h.get("entity_type"),
+            "score": h.get("score") or h.get("rrf_score"),
+            "chars": h.get("content_size") or h.get("size"),
+        })
+    return {"results": out}
+
+
+def cr_hydrate(refs):
+    """(entries, error) — ONE get_entries batch for the whole cart, input-
+    ordered. Any failure returns (None, why); the caller degrades to plain
+    pointers. Never raises."""
+    items = []
+    for ref in refs:
+        app, path = crlib.parse_ref(ref)
+        items.append({"application": app or "?", "path": path or str(ref)})
+    try:
+        r = _kmcp_call("get_entries", {"entries": items})
+    except KmcpError as e:
+        return None, str(e)[:300]
+    ents = r.get("entries") or r.get("results")
+    if not isinstance(ents, list):
+        return None, "unexpected get_entries response shape"
+    return ents, None
+
+
+def _cr_refs(body_refs) -> list:
+    return [str(x) for x in body_refs if isinstance(x, str) and x.strip()] \
+        if isinstance(body_refs, list) else []
+
+
+def cr_compile(refs):
+    """Compile-only mode: the cart document for composer/clipboard — no fork."""
+    refs = _cr_refs(refs)
+    entries = err = None
+    if refs:
+        entries, err = cr_hydrate(refs)
+    doc = crlib.render_preamble(refs, entries=entries, error=err)
+    return {"ok": True, "document": doc, "refs": refs,
+            "hydrated": bool(refs) and err is None, "error": err}
+
+
+def cr_apply(sid: str, stub, refs, confirm: bool):
+    """Two-phase CR (house curate idiom): confirm:false previews the before/
+    after totals + the compiled preamble draft; confirm:true writes the
+    redacted COPY and returns new_session. Original never touched."""
+    path = find_session(sid)
+    if path is None:
+        return {"error": "not found"}, 404
+    stub = [str(x) for x in stub if isinstance(x, str)] \
+        if isinstance(stub, list) else []
+    refs = _cr_refs(refs)
+
+    records = [r for r in crlib.load(path) if not r.get("isSidechain")]
+    bad = crlib.unsupported_versions(records)
+    if bad:
+        return {"error": "transcript carries record version(s) this redactor "
+                         "has not been validated against: "
+                         f"{', '.join(bad)} — refusing to fork"}, 409
+
+    entries = err = None
+    if refs:
+        entries, err = cr_hydrate(refs)
+    preamble = crlib.render_preamble(refs, entries=entries, error=err) \
+        if refs else None
+
+    if not confirm:
+        manifest = crlib.build_manifest(records, bash_kmcp=_bash_kmcp)
+        before = crlib.context_surface(records)
+        stats = crlib.apply_stubs(records, manifest, stub)   # in-memory only
+        after = crlib.context_surface(records) + len(preamble or "")
+        return {"ok": True, "phase": "preview",
+                "before_chars": before, "after_chars": after,
+                "before_tokens": crlib.est_tokens(before),
+                "after_tokens": crlib.est_tokens(after),
+                "saved_pct": round((before - after) / before * 100, 1)
+                if before else 0,
+                "floor": dict(crlib.FLOOR_TOKENS),
+                "stubbed": len(stats["stubbed"]), "ignored": stats["ignored"],
+                "preamble": preamble, "refs": refs,
+                "hydrated": bool(refs) and err is None,
+                "hydrate_error": err}, 200
+
+    new_id = str(uuidlib.uuid4())        # the console mints the fork id itself
+    res = crlib.forge_fork(path, stub, preamble_text=preamble, new_id=new_id,
+                           bash_kmcp=_bash_kmcp)
+    return {"ok": True, "phase": "forked", "action": "cr-fork",
+            "new_session": res["new_session"], "path": res["path"],
+            "before_tokens": res["before_tokens"],
+            "after_tokens": res["after_tokens"],
+            "saved_pct": res["saved_pct"],
+            "stubbed": len(res["stubbed"]), "ignored": res["ignored"],
+            "refs": refs, "hydrated": bool(refs) and err is None,
+            "hydrate_error": err}, 200
 
 
 # ----------------------------------------------------------------------------
@@ -3677,6 +3826,15 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"tldr": tldr.peek(sid, p)})
         if u.path == "/api/batch":
             return self._json(batches_payload())
+        if u.path == "/api/cr/manifest":
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                payload, code = cr_manifest_payload(sid)
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
         return super().do_GET()
 
     def _do_POST(self):
@@ -3703,6 +3861,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q)})
             except Exception as e:              # DB unreachable → degrade, never 500
                 return self._json({"matches": {}, "error": str(e)})
+
+        # CR search/compile are session-independent (the cart is client-side
+        # state): route them before the session_id requirement below.
+        if route == "/api/cr/search":
+            q = (body.get("q") or "").strip()
+            if len(q) < 2:
+                return self._json({"error": "q too short", "results": []}, 400)
+            return self._json(cr_search(q, (body.get("app") or "").strip()
+                                        or None))
+        if route == "/api/cr/compile":
+            return self._json(cr_compile(body.get("refs")))
 
         # Batch ops are session-set-level, not single-session: route them
         # before the session_id requirement below.
@@ -3823,6 +3992,23 @@ class Handler(SimpleHTTPRequestHandler):
                                   f"(have: {', '.join(ANGLE_SPECS)})"}, 400)
             r = mine_angles(sid, bool(body.get("no_probes")), angles=wanted)
             return self._json(r, 200 if r["ok"] else 500)
+
+        if route == "/api/cr":
+            # Two-phase context-reduction fork (see cr_apply). Child transcripts
+            # have no resumable session of their own — CR the parent.
+            if ":" in sid:
+                return self._json(
+                    {"error": "child (subagent) sessions cannot be CR-forked — "
+                              "reduce the parent session"}, 400)
+            try:
+                payload, code = cr_apply(sid, body.get("stub"),
+                                         body.get("refs"),
+                                         bool(body.get("confirm")))
+                return self._json(payload, code)
+            except crlib.CRUnsupported as e:
+                return self._json({"error": str(e)[:300]}, 409)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
 
         if route == "/api/angles/curate":
             try:

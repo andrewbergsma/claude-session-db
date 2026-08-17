@@ -1625,6 +1625,7 @@ def build_session(sid: str):
 #   skill.harness_hints.required_tools     -> --allowedTools (comma-joined)
 #   skill.harness_hints.fs_read + fs_write -> --add-dir
 #   agent.constraints.max_turns            -> --max-turns
+#   skill.harness_hints.model              -> --model (pin; else ambient default)
 #   agent.guardrails + the resolved paths  -> --append-system-prompt
 #
 # The last line is not decoration: the off-session summary skill locates its
@@ -1748,6 +1749,14 @@ def resolve_envelope(action, ctx=None):
     if isinstance(max_turns, int) and max_turns > 0:
         flags += ["--max-turns", str(max_turns)]
         applied.append(f"max_turns={max_turns}")
+
+    # Declared model pin: without it the child inherits the operator's ambient
+    # ~/.claude/settings.json model — measured as the top-tier default, which a
+    # transcript digest does not need. Declared in the skill, translated here.
+    model = hints.get("model")
+    if isinstance(model, str) and model:
+        flags += ["--model", model]
+        applied.append(f"model={model}")
 
     prompt = _envelope_prompt(env, ctx or {})
     if prompt:

@@ -45,6 +45,8 @@ Endpoints
   GET  /api/topics                 managed topic -> subtopics list (autocomplete)
   POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
   POST /api/timeline               {session_id} -> force-queue a whole-session timeline
+  POST /api/batch                  {actions, session_ids|scope, options?:{force}}
+                                   -> queue a fan-out (see the batch-ops section)
 
 Local: binds 127.0.0.1, no auth. Point-fork writes a NEW session file under
 ~/.claude/projects (never mutates the original).
@@ -2406,9 +2408,9 @@ def digest_payload(sid: str, delta: bool, head, tail, full: bool):
 # ----------------------------------------------------------------------------
 # batch operations — one per-session action fanned out over many sessions
 #
-# The three per-session buttons (Mine angles / Generate timeline / Summarize +
-# archive) as a queue, never a stampede. Doctrine mirrors angles-watch: a
-# SINGLE worker drains the job queue, so N sessions cannot hit the local
+# The per-session buttons (Mine angles / Generate timeline / Summarize +
+# archive / tl;dr) as a queue, never a stampede. Doctrine mirrors angles-watch:
+# a SINGLE worker drains the job queue, so N sessions cannot hit the local
 # Ollama concurrently. Per action:
 #   - angles:    mine_angles() (blocking subprocess) — strictly serial.
 #   - timeline:  reuses session_timeline's own single in-process worker via
@@ -2418,17 +2420,23 @@ def digest_payload(sid: str, delta: bool, head, tail, full: bool):
 #     (summarize_session — never --resume, archive on dispatch), bounded to
 #     SUMMARIZE_MAX_INFLIGHT concurrent `claude -p` children; a per-item
 #     watcher resolves the outcome off SUMMARIZING.
+#   - tldr:      same lane-sharing shape as timeline — tldr.enqueue() puts the
+#     job on tldr.py's own single worker (shared with the nav-poll path), then
+#     waits on tldr.STATUS. Skip-if-fresh by default: an item whose cached
+#     turn_key still matches the transcript is marked done (skipped) without a
+#     model call; per-batch options.force regenerates fresh ones too.
 # Failures isolate per item — one bad session never aborts the batch.
 # State is the console pattern: atomic-replace JSON (batch.json). On restart,
 # queued items are re-enqueued (same doctrine as queue.json); items caught
 # mid-run are marked failed ("interrupted") rather than silently re-run.
 # ----------------------------------------------------------------------------
 BATCH_FILE = CONSOLE_STATE / "batch.json"
-BATCH_ACTIONS = ("angles", "timeline", "summarize")
+BATCH_ACTIONS = ("angles", "timeline", "summarize", "tldr")
 BATCH_KEEP = 8                       # finished batches kept for the UI
 BATCH_MAX_ITEMS = 200
 SUMMARIZE_MAX_INFLIGHT = 2
 BATCH_TIMELINE_WAIT_S = int(os.environ.get("CSD_BATCH_TIMELINE_WAIT_S", "3600"))
+BATCH_TLDR_WAIT_S = int(os.environ.get("CSD_BATCH_TLDR_WAIT_S", "900"))
 BATCH_SUMMARY_WAIT_S = int(os.environ.get("CSD_BATCH_SUMMARY_WAIT_S", "7200"))
 _BATCH_LOCK = threading.Lock()
 _BATCHES: dict[str, dict] = {}       # id -> batch dict (mirrored to BATCH_FILE)
@@ -2490,6 +2498,7 @@ def _run_batch_item(bid: str, idx: int) -> None:
         if not item or item["status"] != "queued":
             return                    # cancelled (or gone) while waiting
         sid, action, cwd = item["session_id"], item["action"], item.get("cwd")
+        force = bool(item.get("force"))
     _batch_update(bid, idx, status="running", started_at=time.time())
     try:
         if action == "angles":
@@ -2512,6 +2521,36 @@ def _run_batch_item(bid: str, idx: int) -> None:
                     raise RuntimeError(
                         f"timeline still running after {BATCH_TIMELINE_WAIT_S}s")
                 time.sleep(2)
+        elif action == "tldr":
+            p = find_session(sid)
+            if p is None:
+                raise RuntimeError("transcript not found")
+            key = tldr.turn_key(p)
+            if key is None:
+                raise RuntimeError("no user prompt to digest")
+            cached = tldr.get_cached(sid)
+            if not force and cached and cached.get("turn_key") == key:
+                # Fresh: a real store is a skip, a negative-cache stub is a
+                # known failure — surface it without re-running the model.
+                if cached.get("headline"):
+                    _batch_update(bid, idx, status="done", skipped=True,
+                                  ended_at=time.time())
+                    return
+                raise RuntimeError(
+                    (cached.get("error") or "cached failure")[:250]
+                    + " (cached; force re-runs)")
+            tldr.enqueue(sid, p)      # tldr's own single lane, force path
+            t0 = time.time()
+            while True:
+                st = tldr.STATUS.get(sid) or ""
+                if st == "ok":
+                    break
+                if st and st not in ("queued", "generating"):
+                    raise RuntimeError(st[:300])
+                if time.time() - t0 > BATCH_TLDR_WAIT_S:
+                    raise RuntimeError(
+                        f"tldr still running after {BATCH_TLDR_WAIT_S}s")
+                time.sleep(1)
         elif action == "summarize":
             _SUMMARIZE_SLOTS.acquire()   # bound concurrent claude -p children
             try:
@@ -2565,8 +2604,12 @@ def open_session_ids() -> tuple:
     return ids, None
 
 
-def create_batch(actions, session_ids, scope=None) -> tuple:
-    """(payload, http_code). Expands actions × sessions into queued items."""
+def create_batch(actions, session_ids, scope=None, options=None) -> tuple:
+    """(payload, http_code). Expands actions × sessions into queued items.
+
+    options.force (bool) applies to tldr items only: regenerate even when the
+    cached tldr's turn_key still matches (default is skip-if-fresh)."""
+    force = bool(options.get("force")) if isinstance(options, dict) else False
     acts = [a for a in (actions or []) if a in BATCH_ACTIONS]
     if not acts:
         return {"error": f"actions must be a non-empty subset of "
@@ -2591,8 +2634,11 @@ def create_batch(actions, session_ids, scope=None) -> tuple:
             if act == "summarize":
                 p = find_session(sid)
                 cwd = _session_cwd(p) if p else None
-            items.append({"session_id": sid, "action": act, "cwd": cwd,
-                          "status": "queued", "error": None})
+            it = {"session_id": sid, "action": act, "cwd": cwd,
+                  "status": "queued", "error": None}
+            if act == "tldr":
+                it["force"] = force
+            items.append(it)
     if not items:
         return {"error": "nothing to do for the selected sessions"}, 400
     if len(items) > BATCH_MAX_ITEMS:
@@ -3600,7 +3646,8 @@ class Handler(SimpleHTTPRequestHandler):
         if route == "/api/batch":
             payload, code = create_batch(body.get("actions"),
                                          body.get("session_ids"),
-                                         scope=body.get("scope"))
+                                         scope=body.get("scope"),
+                                         options=body.get("options"))
             return self._json(payload, code)
         if route == "/api/batch/cancel":
             r = cancel_batch(body.get("batch_id", ""))

@@ -339,6 +339,26 @@ def request(sid: str, jsonl_path: Path, force: bool = False) -> Optional[dict]:
     return cached
 
 
+def enqueue(sid: str, jsonl_path: Path) -> bool:
+    """Unconditionally queue a force regeneration on the single worker lane.
+
+    The batch-ops path: the caller has already decided this session should
+    regenerate, so every auto-generation gate (child sidechain, >7d idle,
+    settle) is bypassed — but the job still goes through the ONE daemon
+    worker, so a bulk run can never hit the local Ollama in parallel with the
+    nav-poll path. Dedupes against an already-queued job; returns False when
+    one was already in flight (the caller waits on STATUS either way).
+    """
+    with _LOCK:
+        if sid in _QUEUED:
+            return False
+        _QUEUED.add(sid)
+    STATUS[sid] = "queued"
+    _JOBS.put((sid, jsonl_path, True))
+    _ensure_worker()
+    return True
+
+
 def payload(sid: str, jsonl_path: Path, force: bool = False) -> Optional[dict]:
     """The API-facing shape: cached fields + a staleness flag, or None."""
     cached = request(sid, jsonl_path, force=force)

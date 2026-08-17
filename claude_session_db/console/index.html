@@ -647,18 +647,81 @@
                      padding-bottom:9px; border-radius:6px 6px 0 0; }
   #minedlg .mm-note { color:var(--muted); font:10.5px/1.4 var(--mono); margin:8px 6px 2px; }
 
-  /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ---- */
-  #pane-timeline .tlrow { display:grid; grid-template-columns:46px 1fr; gap:9px;
+  /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ----
+     .tlrow/.tlfoot are unscoped: the digest reader popover renders the same
+     rows with the same renderer (tlRowsHtml). */
+  .tlrow { display:grid; grid-template-columns:46px 1fr; gap:9px;
            padding:7px 0; border-bottom:1px solid var(--border); align-items:baseline; }
-  #pane-timeline .tlrow .tm { font:10px var(--mono); color:var(--accent); white-space:nowrap; }
-  #pane-timeline .tlrow .sm { font-size:12px; line-height:1.45; color:var(--ink); }
-  #pane-timeline .tlrow.pending .sm { color:var(--muted); font-style:italic; }
-  #pane-timeline .tlfoot { color:var(--muted); font:10.5px var(--mono); margin-top:10px;
+  .tlrow .tm { font:10px var(--mono); color:var(--accent); white-space:nowrap; }
+  .tlrow .sm { font-size:12px; line-height:1.45; color:var(--ink); }
+  .tlrow.pending .sm { color:var(--muted); font-style:italic; }
+  .tlfoot { color:var(--muted); font:10.5px var(--mono); margin-top:10px;
            padding-top:8px; border-top:1px solid var(--border); }
   #pane-timeline .tlgen { margin-top:12px; }
   #pane-timeline h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
            float:right; }
   #pane-timeline h3 .re:hover { color:var(--accent); }
+
+  /* ---- digest presence chips (sidebar rows): tldr T / timeline ⧗ ----
+     Always visible (never hover-gated): presence IS the information. */
+  .dchip { flex:none; cursor:pointer; font:10px/1.5 var(--mono); font-weight:700;
+           padding:0 5px; border-radius:5px; border:1px solid var(--border);
+           color:var(--muted); }
+  .dchip.abs { border-style:dashed; opacity:.75; }
+  .dchip.stale { color:var(--warn); border-color:rgba(210,153,34,.55); }
+  .dchip.fresh { color:var(--good); border-color:rgba(63,185,80,.45); }
+  .dchip.err { color:var(--bad); border-color:rgba(248,81,73,.5); }
+  .dchip.gen { color:var(--accent); border-color:rgba(76,141,255,.55);
+               animation:dchip-pulse 1.2s ease-in-out infinite; }
+  @keyframes dchip-pulse { 50% { opacity:.35; } }
+  .dchip:hover { filter:brightness(1.25); }
+  /* ghost title: the tldr's proposed title standing in for a raw
+     first-prompt/uuid title until accepted (✓) or dismissed */
+  .ttxt.tghost { font-style:italic; color:var(--ink2); }
+  .tacc { flex:none; cursor:pointer; color:var(--good); font-size:11px; }
+  .tacc:hover { filter:brightness(1.3); }
+
+  /* ---- digest reader popover: read a tldr/timeline without opening the chat.
+     Same overlay idiom as #minedlg/#topicdlg (backdrop tap, Esc, back-gesture). */
+  /* z above the phone nav drawer (70): the reader opens FROM a drawer row
+     and must cover it, like #fileview covers the rail sheet */
+  #readerdlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:75;
+               display:none; align-items:flex-start; justify-content:center;
+               padding-top:9vh; }
+  #readerdlg.open { display:flex; }
+  #readerdlg .rd-card { background:var(--surface); border:1px solid var(--border);
+               border-radius:12px; padding:14px 16px; width:min(620px,94vw);
+               max-height:78dvh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5); }
+  .rd-h { display:flex; align-items:center; gap:8px; min-width:0; margin-bottom:8px; }
+  .rd-h .rd-t { font-size:13px; font-weight:600; min-width:0; overflow:hidden;
+                text-overflow:ellipsis; white-space:nowrap; }
+  .rd-h .re, .rd-h .rd-x { cursor:pointer; color:var(--muted); font:12px var(--mono);
+                flex:none; }
+  .rd-h .re:hover, .rd-h .rd-x:hover { color:var(--accent); }
+  .rd-h .rd-x { margin-left:2px; }
+  .rd-tabs { display:flex; gap:2px; margin-left:auto; flex:none; }
+  .rd-tabs .rtb { cursor:pointer; font:10px var(--mono); padding:2px 8px;
+                border:1px solid var(--border); color:var(--muted); }
+  .rd-tabs .rtb:first-child { border-radius:6px 0 0 6px; }
+  .rd-tabs .rtb:last-child { border-radius:0 6px 6px 0; }
+  .rd-tabs .rtb.on { color:var(--accent); border-color:var(--accent); }
+  .rd-sec { font-size:12.5px; line-height:1.5; color:var(--ink); margin:7px 0; }
+  .rd-sec .tldr-k { margin-right:6px; }
+  .rd-detail { font-size:12px; line-height:1.55; color:var(--ink2); margin-top:9px;
+               padding-top:8px; border-top:1px solid var(--border); }
+  .rd-empty { color:var(--muted); font-size:12px; padding:10px 0; }
+  /* proposed-title strip (reader + chat header): suggestion, one-press accept */
+  .tprop { display:flex; align-items:center; gap:7px; font-size:12px;
+           color:var(--ink2); min-width:0; }
+  .tprop i { font-style:italic; color:var(--ink); min-width:0; overflow:hidden;
+             text-overflow:ellipsis; white-space:nowrap; }
+  .tprop .tp-b { flex:none; cursor:pointer; font:11px var(--mono);
+                 padding:1px 7px; border:1px solid var(--border); border-radius:6px;
+                 color:var(--muted); }
+  .tprop .tp-b.acc { color:var(--good); border-color:rgba(63,185,80,.45); }
+  .tprop .tp-b:hover { filter:brightness(1.3); }
+  #readerdlg .tprop { margin:2px 0 8px; padding-bottom:8px;
+                      border-bottom:1px solid var(--border); }
 
   /* ---- Files rail tab: lazy tree + preview overlay ---- */
   .fcrumb { font:11px var(--mono); color:var(--ink2); margin:2px 0 8px;
@@ -817,6 +880,8 @@
     #minedlg{ align-items:flex-start; padding-top:8vh; }
     #minedlg .mm-card{ max-height:85dvh; overflow:auto; }
     #minedlg .mm-i{ padding:11px 10px; }  /* tap-friendly rows */
+    #readerdlg{ padding-top:6vh; }
+    #readerdlg .rd-card{ max-height:84dvh; }
     .tlrow{ grid-template-columns:52px 1fr; gap:8px; }
     .subhdr .back{ min-height:38px; display:inline-flex; align-items:center; }
   }
@@ -831,8 +896,12 @@
     .sortbar .ssel{ min-height:32px; }
     .prio{ min-height:32px; min-width:32px; display:inline-flex; align-items:center; justify-content:center; }
     .rtab{ min-height:40px; display:inline-flex; align-items:center; flex:1; justify-content:center; }
-    .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re{ display:inline-flex; align-items:center;
+    .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re,
+    .rd-h .re, .rd-h .rd-x{ display:inline-flex; align-items:center;
       justify-content:center; min-height:44px; min-width:44px; }
+    .dchip, .tacc, .tprop .tp-b{ min-height:26px; min-width:28px;
+      display:inline-flex; align-items:center; justify-content:center; }
+    .rd-tabs .rtb{ min-height:32px; display:inline-flex; align-items:center; }
     .tline.cmd{ padding:5px 4px; }
     .read{ padding:8px 10px; }
     .tline.cmd:active, .read:active, .ang-i:active, .sess:active{ background:var(--surface2); }
@@ -968,6 +1037,12 @@
     <div class="mm-card" id="mm-card"></div>
   </div>
 
+  <!-- digest reader: read a session's tl;dr / timeline straight off a sidebar
+       row, without loading the chat (same popover idiom as the mine menu) -->
+  <div id="readerdlg" onclick="if(event.target===this)closeReader()">
+    <div class="rd-card" id="rd-card"></div>
+  </div>
+
 
 <script>
 const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
@@ -1056,6 +1131,8 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
+  const rd = document.getElementById("readerdlg");
+  if(rd && rd.classList.contains("open")){ closeReader(); return; }
   const mm = document.getElementById("minedlg");
   if(mm && mm.classList.contains("open")){ closeMineMenu(); return; }
   const dlg = document.getElementById("topicdlg");
@@ -1082,6 +1159,7 @@ function ovDone(){
 }
 window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("readerdlg").classList.contains("open")) return closeReader(true);
   if(document.getElementById("minedlg").classList.contains("open")) return closeMineMenu(true);
   if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
   if(document.getElementById("fileview").classList.contains("open")) return closeFileView(true);
@@ -1122,9 +1200,9 @@ document.addEventListener("click", e => {
   // and dismiss the drawer. A detached target can only mean the tap landed
   // INSIDE live UI that repainted itself — never treat it as outside.
   if(e.target instanceof Node && !e.target.isConnected) return;
-  // the file-preview overlay sits ABOVE the sheet/drawer — a tap inside it
-  // must not count as "outside" and close (or history-pop) what's beneath it
-  if(e.target.closest("#fileview")) return;
+  // the file-preview / digest-reader overlays sit ABOVE the sheet/drawer — a
+  // tap inside them must not count as "outside" and close what's beneath
+  if(e.target.closest("#fileview") || e.target.closest("#readerdlg")) return;
   if(document.body.classList.contains("rail-open") &&
      Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
     closeRailSheet();
@@ -1439,12 +1517,17 @@ function sessRow(s, showProject){
   const meta = segs.join(`<span class="msep">·</span>`);
   const m = navMatch(s);
   const snip = (navQuery.trim() && m.inC && m.snip) ? `<div class="snip">${m.snip}</div>` : "";
-  const disp = s.user_title || s.title || id.slice(0,12);
+  // Ghost title: a session with no REAL title (no manual title, no ai-title
+  // record — just the raw first-prompt/uuid fallback) shows the tldr's
+  // proposed title as an italic placeholder with a one-press ✓ accept.
+  const ghost = !s.user_title && s.title_src !== "set" && s.title_proposal;
+  const disp = s.user_title || (ghost ? s.title_proposal : s.title) || id.slice(0,12);
   const mark = s.user_title ? `<span class="tmark" title="custom title">✎</span>` : "";
+  const acc = ghost ? `<span class="tacc" title="accept the proposed title: “${esc(s.title_proposal)}”" onclick="acceptProposal(event,'${id}')">✓</span>` : "";
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div></div>`
     : `<div class="ctitle">
-         <div class="t"><span class="ttxt">${esc(disp)}${mark}</span>${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span><span class="edit" title="generate this session's tl;dr now (last-3-turns catch-up) — no need to open it" onclick="rowTldr(event,'${id}')">T</span></div>
+         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span>${acc}${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span>${digestChips(s)}</div>
          <div class="m">${meta}</div>${snip}
        </div>`;
   const p = prioOf(s);
@@ -1563,14 +1646,70 @@ async function tldrAll(force){
   toast(`tl;dr queued — ${d.batch.items.length} session(s)`);
   pollBatch();
 }
-/* Single-session tl;dr straight off a sidebar row (the hover T glyph):
-   POST /api/tldr force-queues on the tldr worker; the fresh headline lands
-   on the next nav/session poll. No batch, no selection mode. */
-async function rowTldr(e, id){
+/* ---------- digest presence chips + reader (per sidebar row) ----------
+   Every row carries two always-visible chips: T (last-3-turns tl;dr) and
+   ⧗ (whole-session timeline). Color = presence: dashed/dim absent, amber
+   stale, green fresh, red failed, pulsing blue generating. A tap opens the
+   READER popover; if the digest is absent or stale the tap also ensures a
+   (re)generation through POST /api/tldr | /api/timeline — server-side
+   run-if-needed (fresh is a no-op), so the tap is the pull, never a poll. */
+const DCHIP_STATE_TIP = {
+  abs:   "not generated — tap to run it",
+  gen:   "generating…  tap to watch",
+  stale: "stale — tap to read (regenerates in the background)",
+  fresh: "up to date — tap to read",
+  err:   "failed — tap to see why (⟳ retries)",
+};
+function tldrStateOf(s){
+  const t = s && s.tldr;
+  if(t && (t.status === "queued" || t.status === "generating")) return "gen";
+  if(!t) return "abs";
+  if(!t.headline) return "err";
+  return t.stale ? "stale" : "fresh";
+}
+function tlStateOf(s){
+  const st = (s && s.timeline && s.timeline.state) || "absent";
+  return {absent:"abs", generating:"gen", stale:"stale",
+          error:"err", fresh:"fresh"}[st] || "abs";
+}
+function digestChips(s){
+  const id = s.session_id;
+  const ts = tldrStateOf(s), ls = tlStateOf(s);
+  return `<span class="dchip ${ts}" title="tl;dr: ${DCHIP_STATE_TIP[ts]}"
+      onclick="rowDigest(event,'${id}','tldr')">T</span>` +
+    `<span class="dchip ${ls}" title="timeline: ${DCHIP_STATE_TIP[ls]}"
+      onclick="rowDigest(event,'${id}','timeline')">⧗</span>`;
+}
+function rowDigest(e, id, kind){
   e.stopPropagation();
-  const [ok, d] = await post("/api/tldr", {session_id: id});
-  if(!ok || d.error){ toast(d.error || "tl;dr failed", true); return; }
-  toast(`tl;dr queued — ${batchLabel(id)}`);
+  openReader(id, kind);
+}
+
+/* ---------- title proposal: one-press accept / dismiss ---------- */
+function proposalOf(id){
+  const s = (navData && navData.sessions || []).find(x => x.session_id === id);
+  if(s && s.title_proposal) return s.title_proposal;
+  return (curId === id && curSession) ? curSession.title_proposal : null;
+}
+async function acceptProposal(e, id){
+  if(e) e.stopPropagation();
+  const prop = proposalOf(id);
+  if(!prop) return;
+  const [ok, d] = await post("/api/title", {session_id: id, title: prop});
+  if(!ok || d.error){ toast(d.error || "title failed", true); return; }
+  toast(`title set — ${prop}`);
+  loadNav(); if(curId === id) refreshSession(false, true);
+  if(readerFor && readerFor.id === id) loadReader();
+}
+async function dismissProposal(e, id){
+  if(e) e.stopPropagation();
+  const prop = proposalOf(id);
+  if(!prop) return;
+  const [ok, d] = await post("/api/title/dismiss", {session_id: id, proposal: prop});
+  if(!ok || d.error){ toast(d.error || "dismiss failed", true); return; }
+  toast("suggestion dismissed");
+  loadNav(); if(curId === id) refreshSession(false, true);
+  if(readerFor && readerFor.id === id) loadReader();
 }
 function setNavSortSel(key){
   navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc";
@@ -1773,9 +1912,24 @@ function tldrLine(s){
 async function refreshTldr(){
   if(!curId) return;
   actmsg("tl;dr queued…");
-  const [ok, d] = await post("/api/tldr", {session_id: curId});
+  // Explicit ⟳ = force: regenerate even when the cache is fresh.
+  const [ok, d] = await post("/api/tldr", {session_id: curId, force: true});
   if(!ok || d.error){ actmsg(d.error || "tldr failed", true); return; }
   actmsg("tl;dr regenerating — lands on the next poll");
+}
+
+/* Proposed-title strip under the tl;dr line: the tldr model's suggested
+   session title, accepted with one press (writes through /api/title — a
+   normal title afterwards; rename still works) or dismissed. Server-side
+   guard: a manual title is NEVER auto-overwritten; this strip is the only
+   way a proposal becomes a title. */
+function proposalLine(s){
+  if(!s.title_proposal || s.subagent) return "";
+  return `<div class="tldr tprop"><span class="tldr-k">title?</span><i>${esc(s.title_proposal)}</i>
+    <span class="tp-b acc" onclick="acceptProposal(null,'${s.session_id}')"
+      title="accept as the session title">✓ accept</span>
+    <span class="tp-b" onclick="dismissProposal(null,'${s.session_id}')"
+      title="dismiss this suggestion">✕</span></div>`;
 }
 
 function renderHeader(s){
@@ -1821,6 +1975,7 @@ function renderHeader(s){
         "⚠ "+esc(s.summarizing)}</span>`:""}
     </div>
     ${tldrLine(s)}
+    ${proposalLine(s)}
     <div class="acts">
       <button class="act danger ${s.stoppable?"":"is-disabled"}"
         onclick="${s.stoppable?"act('stop')":"actmsg(this.title, true)"}"
@@ -2296,7 +2451,8 @@ async function mine(angles){
    timeline + tldr serial; summarize bounded to 2 in-flight off-session runs)
    and the bar polls /api/batch for per-session progress. Failures isolate.
    tl;dr also runs without selection mode: "T all" on the sortbar batches the
-   whole visible list, and each row's hover T fires POST /api/tldr solo. */
+   whole visible list, and each row's presence chips (T / ⧗) ensure a single
+   session's digest solo — run-if-needed through the same worker lanes. */
 let batchMode = false, batchSel = new Set(), batchData = null, batchTimer = null;
 const OPEN_VERDICTS = ["LIVE", "OPEN", "OPEN-delta", "OPEN?"];
 
@@ -3321,13 +3477,42 @@ async function genTimeline(){
   if(!curId) return;
   document.getElementById("tlinfo").innerHTML =
     `<h3>Timeline</h3><div class="rl-empty">mining the whole session… one local-model pass per turn.</div>`;
-  const [ok, d] = await post("/api/timeline", {session_id: curId});
+  // Explicit Generate/⟳ = force: regenerate even when the cache is fresh.
+  const [ok, d] = await post("/api/timeline", {session_id: curId, force: true});
   if(!ok || d.error){
     document.getElementById("tlinfo").innerHTML =
       `<h3>Timeline</h3><div class="rl-empty">timeline failed — ${esc(d.error || "?")}</div>`;
     return;
   }
   renderTimeline(d.timeline);
+}
+/* Shared row/footer renderers — the rail tab and the digest reader paint the
+   same timeline store the same way. */
+function tlRowsHtml(tl){
+  const rows = (tl && tl.rows) || [];
+  return rows.length
+    ? rows.map(r => {
+        const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
+        return `<div class="tlrow${pending ? " pending" : ""}" title="${esc(mgmtClock(r.t))}">
+          <span class="tm">${esc(tlClock(r.t))}</span>
+          <span class="sm">${esc(r.summary || "…")}</span></div>`;
+      }).join("")
+    : `<div class="rl-empty">${tl && tl.generating ? "mining…" : "no turns to summarize"}</div>`;
+}
+function tlFootTxt(tl){
+  const rows = (tl && tl.rows) || [];
+  const bits = [];
+  if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
+  if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
+  if(tl.model) bits.push(esc(tl.model));
+  if(tl.generating){
+    // felt progress: rows fill in as each turn's summary lands
+    const done = rows.filter(r => r.summary && r.summary.indexOf("(unavailable") !== 0).length;
+    if(rows.length) bits.push(`${done}/${rows.length} mined`);
+    bits.push(esc(tl.status || "generating") + "…");
+  } else if(tl.stale) bits.push("stale — ⟳ to refresh");
+  if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
+  return bits.join(" · ");
 }
 function renderTimeline(tl){
   if(railTab !== "timeline") return;         // tab switched away mid-fetch
@@ -3342,29 +3527,109 @@ function renderTimeline(tl){
     return;
   }
   if(tl.error){ el.innerHTML = `<h3>Timeline ${regen}</h3><div class="rl-empty">unavailable — ${esc(tl.error)}</div>`; return; }
-  const rows = tl.rows || [];
-  const body = rows.length
-    ? rows.map(r => {
-        const pending = !r.summary || r.summary.indexOf("(unavailable") === 0;
-        return `<div class="tlrow${pending ? " pending" : ""}" title="${esc(mgmtClock(r.t))}">
-          <span class="tm">${esc(tlClock(r.t))}</span>
-          <span class="sm">${esc(r.summary || "…")}</span></div>`;
-      }).join("")
-    : `<div class="rl-empty">${tl.generating ? "mining…" : "no turns to summarize"}</div>`;
-  const bits = [];
-  if(tl.turn_count != null) bits.push(tl.turn_count + " turns");
-  if(tl.truncated_older) bits.push(tl.truncated_older + " older omitted");
-  if(tl.model) bits.push(esc(tl.model));
-  if(tl.generating){
-    // felt progress: rows fill in as each turn's summary lands
-    const done = rows.filter(r => r.summary && r.summary.indexOf("(unavailable") !== 0).length;
-    if(rows.length) bits.push(`${done}/${rows.length} mined`);
-    bits.push(esc(tl.status || "generating") + "…");
-  } else if(tl.stale) bits.push("stale — ⟳ to refresh");
-  if(tl.latency_s != null && !tl.generating) bits.push(tl.latency_s + "s");
-  el.innerHTML = `<h3>Timeline ${regen}</h3><div class="tlrows">${body}</div>` +
-                 `<div class="tlfoot">${bits.join(" · ")}</div>`;
+  el.innerHTML = `<h3>Timeline ${regen}</h3><div class="tlrows">${tlRowsHtml(tl)}</div>` +
+                 `<div class="tlfoot">${tlFootTxt(tl)}</div>`;
   if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+}
+
+/* ---------- digest reader popover ------------------------------------------
+   Read a session's tl;dr or timeline WITHOUT opening the chat — the sidebar
+   chips' tap target. Opening on an absent/stale digest also fires the ensure
+   POST (run-if-needed lives server-side: tldr.ensure / session_timeline.ensure
+   — the same seam a future ambient runner would call). Polls only while a
+   generation is in flight; ⟳ forces one. */
+let readerFor = null, readerTimer = null;
+
+function openReader(id, kind){
+  readerFor = {id, kind};
+  const dlg = document.getElementById("readerdlg");
+  if(!dlg.classList.contains("open")){ dlg.classList.add("open"); ovOpen(); }
+  document.getElementById("rd-card").innerHTML =
+    `<div class="rd-h"><span class="rd-t">${esc(batchLabel(id))}</span></div>
+     <div class="rd-empty">loading…</div>`;
+  const s = (navData && navData.sessions || []).find(x => x.session_id === id);
+  const st = kind === "tldr" ? tldrStateOf(s) : tlStateOf(s);
+  if(st === "abs" || st === "stale")
+    post(kind === "tldr" ? "/api/tldr" : "/api/timeline", {session_id: id});
+  loadReader();
+}
+function switchReader(kind){ if(readerFor) openReader(readerFor.id, kind); }
+function closeReader(fromPop){
+  const dlg = document.getElementById("readerdlg");
+  if(!dlg.classList.contains("open")) return;
+  dlg.classList.remove("open");
+  readerFor = null; clearTimeout(readerTimer); readerTimer = null;
+  if(fromPop !== true) ovDone();
+}
+async function readerForce(){
+  if(!readerFor) return;
+  const {id, kind} = readerFor;
+  readerFor.polls = 0;                       // re-arm the null-store poll cap
+  await post(kind === "tldr" ? "/api/tldr" : "/api/timeline",
+             {session_id: id, force: true});
+  loadReader();
+}
+async function loadReader(){
+  clearTimeout(readerTimer); readerTimer = null;
+  if(!readerFor) return;
+  const {id, kind} = readerFor;
+  let d = null;
+  try {
+    d = await (await fetch((kind === "tldr" ? "/api/tldr?id=" : "/api/timeline?id=")
+                           + encodeURIComponent(id))).json();
+  } catch(e){ /* renders the unreachable note below */ }
+  if(!readerFor || readerFor.id !== id || readerFor.kind !== kind) return;
+  renderReader(d && (kind === "tldr" ? d.tldr : d.timeline));
+}
+function renderReader(t){
+  if(!readerFor) return;
+  const {id, kind} = readerFor;
+  const tabs = `<div class="rd-tabs">
+      <span class="rtb ${kind==="tldr"?"on":""}" onclick="switchReader('tldr')">tl;dr</span>
+      <span class="rtb ${kind==="timeline"?"on":""}" onclick="switchReader('timeline')">timeline</span>
+    </div>`;
+  const head = `<div class="rd-h"><span class="rd-t">${esc(batchLabel(id))}</span>${tabs}
+      <span class="re" onclick="readerForce()" title="${kind==="tldr"
+        ? "regenerate the tl;dr from the latest turns"
+        : "regenerate the whole-session timeline"}">⟳</span>
+      <span class="rd-x" onclick="closeReader()" title="close (Esc)">✕</span></div>`;
+  const prop = proposalOf(id);
+  const propRow = (kind === "tldr" && prop)
+    ? `<div class="tprop"><span class="tldr-k">title?</span><i>${esc(prop)}</i>
+        <span class="tp-b acc" onclick="acceptProposal(event,'${id}')" title="accept as the session title (writes the normal title overlay; rename still works)">✓ accept</span>
+        <span class="tp-b" onclick="dismissProposal(event,'${id}')" title="dismiss this suggestion (a different future proposal will surface again)">✕</span></div>`
+    : "";
+  let body, foot = "";
+  if(!t){
+    body = `<div class="rd-empty">${kind === "tldr"
+      ? "no tl;dr yet — a last-3-turns catch-up generates in the background; this pane refreshes when it lands."
+      : "no timeline yet — the whole-session catch-up generates in the background; rows fill in as they land."}</div>`;
+  } else if(t.error && !(t.rows && t.rows.length) && !t.headline){
+    body = `<div class="rd-empty">unavailable — ${esc(t.error)}<br>⟳ retries.</div>`;
+  } else if(kind === "tldr"){
+    body = (t.generating && !t.headline)
+      ? `<div class="rd-empty">generating…</div>`
+      : `<div class="rd-sec"><span class="tldr-k">about</span>${esc(t.about||"")}</div>
+         <div class="rd-sec"><span class="tldr-k">doing</span>${esc(t.doing||"")}</div>` +
+        (t.detail ? `<div class="rd-detail">${esc(t.detail)}</div>` : "");
+    const bits = [];
+    if(t.generating) bits.push(esc(t.status || "generating") + "…");
+    else if(t.stale) bits.push("stale — refreshing in the background");
+    if(t.model) bits.push(esc(t.model));
+    if(t.generated_at) bits.push("generated " + esc(String(t.generated_at).slice(0,16).replace("T"," ")));
+    foot = bits.join(" · ");
+  } else {
+    body = `<div class="tlrows">${tlRowsHtml(t)}</div>`;
+    foot = tlFootTxt(t);
+  }
+  document.getElementById("rd-card").innerHTML =
+    head + propRow + body + (foot ? `<div class="tlfoot">${foot}</div>` : "");
+  // Poll while a run is in flight. A still-null store polls too (the first
+  // persist may be a model call away) but gives up after ~60s so a session
+  // that CANNOT generate doesn't poll forever — ⟳ re-arms it.
+  if(t && t.generating){ readerFor.polls = 0; readerTimer = setTimeout(loadReader, 1500); }
+  else if(!t && (readerFor.polls = (readerFor.polls || 0) + 1) <= 40)
+    readerTimer = setTimeout(loadReader, 1500);
 }
 
 /* ---------- threads overlay: the session-management lens -------------------

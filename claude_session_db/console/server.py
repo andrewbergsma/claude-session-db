@@ -43,8 +43,10 @@ Endpoints
   POST /api/title                  {session_id, title: str|null} -> set/clear a title
   POST /api/topic                  {session_id, topic, subtopic} -> set/clear taxonomy
   GET  /api/topics                 managed topic -> subtopics list (autocomplete)
-  POST /api/tldr                   {session_id} -> force-queue a tldr regeneration
-  POST /api/timeline               {session_id} -> force-queue a whole-session timeline
+  GET  /api/tldr?id=<sid>          cached tldr store (pure read, never generates)
+  POST /api/tldr                   {session_id, force?} -> ensure (run-if-stale; force regenerates)
+  POST /api/timeline               {session_id, force?} -> ensure a whole-session timeline
+  POST /api/title/dismiss          {session_id, proposal} -> dismiss a proposed title
   POST /api/batch                  {actions, session_ids|scope, options?:{force}}
                                    -> queue a fan-out (see the batch-ops section)
 
@@ -314,7 +316,7 @@ PRIORITY_FILE = CONSOLE_STATE / "priority.json"     # legacy, migrated once
 TITLES_FILE = CONSOLE_STATE / "titles.json"         # legacy, migrated once
 _META_LOCK = threading.Lock()
 _TOPICS_LOCK = threading.Lock()
-META_FIELDS = ("title", "priority", "topic", "subtopic")
+META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed")
 MAX_TITLE_LEN = 200
 MAX_TOPIC_LEN = 80
 
@@ -370,6 +372,35 @@ def set_title(sid: str, title) -> dict:
     title = (title or "").strip()[:MAX_TITLE_LEN]
     _update_meta(sid, title=title or None)
     return {"ok": True, "session_id": sid, "title": title or None}
+
+
+def dismiss_title_proposal(sid: str, proposal) -> dict:
+    """Remember a dismissed tldr title proposal so it stops being offered.
+
+    Stored by VALUE (not a flag): a later tldr run that proposes a different
+    title is a new suggestion and surfaces again. Overlay-only, like every
+    other meta field."""
+    proposal = (proposal or "").strip()[:MAX_TITLE_LEN]
+    if not proposal:
+        return {"ok": False, "error": "proposal required"}
+    _update_meta(sid, tp_dismissed=proposal)
+    return {"ok": True, "session_id": sid, "dismissed": proposal}
+
+
+def _pending_proposal(tl, user_title, dismissed):
+    """The tldr's proposed title for a session, or None when there is nothing
+    to offer: no proposal, the operator dismissed exactly this proposal, or
+    the effective title already IS the proposal (accepted). A differing
+    MANUAL title never suppresses the suggestion — it is surfaced beside it,
+    and only an explicit accept ever writes a title."""
+    prop = ((tl or {}).get("title_proposal") or "").strip()
+    if not prop:
+        return None
+    if dismissed and dismissed.strip() == prop:
+        return None
+    if user_title and user_title.strip().lower() == prop.lower():
+        return None
+    return prop
 
 
 def set_priority(sid: str, priority) -> dict:
@@ -918,7 +949,12 @@ def summarize_nav(path: Path):
                 if isinstance(u, dict):
                     usage = u
     mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
+    # title_src: "set" = a real title record (ai-title/custom-title);
+    # "prompt"/"id" = raw fallbacks — those rows may show the tldr's proposed
+    # title as a ghost placeholder until it's accepted or dismissed.
+    title_src = "set"
     if not title:
+        title_src = "prompt" if last_user else "id"
         title = (last_user[:70] + "…") if last_user else path.stem[:12]
     label, worktree = _project_identity(cwd, str(path.parent.name))
     ctx_tokens = None
@@ -939,6 +975,7 @@ def summarize_nav(path: Path):
         "project_label": label,
         "worktree": worktree,
         "cwd": cwd, "branch": branch, "title": title.strip(),
+        "title_src": title_src,
         "state": state,
         "sub_working": sub_working,
         "stoppable": stop,
@@ -991,6 +1028,13 @@ def discover_sessions(archived=False):
             s["subtopic"] = m.get("subtopic")
             # Cached-or-nothing; stale rows queue an async regeneration.
             s["tldr"] = tldr.payload(p.stem, p)
+            # Per-row digest presence for the sidebar glance: does a
+            # timeline exist, and is it current? Signature-memoized in
+            # session_timeline — the poll never re-reads unchanged stores.
+            s["timeline"] = session_timeline.presence(p.stem, p)
+            # Pending title suggestion (None once accepted/dismissed).
+            s["title_proposal"] = _pending_proposal(
+                s["tldr"], m.get("title"), m.get("tp_dismissed"))
             out.append(s)
     return out
 
@@ -1530,6 +1574,8 @@ def build_session(sid: str):
         "topic": _m.get("topic"),
         "subtopic": _m.get("subtopic"),
     }
+    out["title_proposal"] = _pending_proposal(
+        out["tldr"], _m.get("title"), _m.get("tp_dismissed"))
     if is_child:
         from ..subagent import read_agent_meta
         parent, aid = sid.split(":", 1)
@@ -3612,6 +3658,16 @@ class Handler(SimpleHTTPRequestHandler):
             if p is None:
                 return self._json({"error": "not found"}, 404)
             return self._json({"timeline": session_timeline.payload(sid, p)})
+        if u.path == "/api/tldr":
+            # Pure read for the reader popover: cached store + staleness +
+            # worker status. Never enqueues (peek, not request).
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            p = find_session(sid)
+            if p is None:
+                return self._json({"error": "not found"}, 404)
+            return self._json({"tldr": tldr.peek(sid, p)})
         if u.path == "/api/batch":
             return self._json(batches_payload())
         return super().do_GET()
@@ -3701,23 +3757,36 @@ class Handler(SimpleHTTPRequestHandler):
                                         body.get("subtopic")))
 
         if route == "/api/tldr":
-            # Force-queue a regeneration (the per-session refresh affordance).
-            # Never blocks: the fresh tldr lands on a later /api/session poll.
+            # Ensure semantics: run-if-absent-or-stale (fresh is a no-op);
+            # body.force regenerates unconditionally (the ⟳ affordance).
+            # Never blocks: the fresh tldr lands on a later poll.
             p = find_session(sid)
             if p is None:
                 return self._json({"error": "not found"}, 404)
-            return self._json({"ok": True, "tldr": tldr.payload(sid, p, force=True),
+            r = tldr.ensure(sid, p, force=bool(body.get("force")))
+            return self._json({"ok": r["ok"], "ensure": r,
+                               "tldr": tldr.peek(sid, p),
                                "status": tldr.STATUS.get(sid)})
 
         if route == "/api/timeline":
-            # Button-launched whole-session catch-up. Force-enqueues a
-            # (re)generation; the fresh timeline lands on a later poll of the
-            # GET /api/timeline endpoint. Never blocks.
+            # Whole-session catch-up, same ensure semantics: run-if-absent-
+            # or-stale; body.force regenerates a fresh (or error) store too.
+            # The result lands on a later poll of GET /api/timeline.
             p = find_session(sid)
             if p is None:
                 return self._json({"error": "not found"}, 404)
-            return self._json(
-                {"ok": True, "timeline": session_timeline.payload(sid, p, force=True)})
+            r = session_timeline.ensure(sid, p, force=bool(body.get("force")))
+            return self._json({"ok": r["ok"], "ensure": r,
+                               "timeline": session_timeline.payload(sid, p)})
+
+        if route == "/api/title/dismiss":
+            # Dismiss the tldr's proposed title (stored by value in the meta
+            # overlay; a future different proposal surfaces again).
+            if ":" in sid:
+                return self._json({"error": "child (subagent) sessions carry "
+                                            "no title proposal"}, 400)
+            r = dismiss_title_proposal(sid, body.get("proposal"))
+            return self._json(r, 200 if r["ok"] else 400)
 
         if route == "/api/summarize":
             if ":" in sid:

@@ -2358,7 +2358,11 @@ def _await_summary(sid: str, proc, log_path: Path, base_size: int):
                         else "summary produced no output")
 
 
-def summarize_session(sid: str, cwd: str) -> dict:
+def summarize_session(sid: str, cwd: str, archive: bool = True) -> dict:
+    """Dispatch the off-session summary. archive=True (the default, and the
+    only behaviour until the digest-reader actions) also archives the session
+    the moment the summary is dispatched; archive=False leaves the session in
+    the sidebar — summary only. The dispatch itself is identical either way."""
     if SUMMARIZING.get(sid) == "running":
         return {"ok": False, "error": "a summary is already running"}
     # Off-session: fresh `claude -p`, the UUID as the /session-summary argument.
@@ -2382,13 +2386,16 @@ def summarize_session(sid: str, cwd: str) -> dict:
     except OSError:
         base_size = 0
     SUMMARIZING[sid] = "running"
-    set_archived(sid, True, reason="session-summary")
+    if archive:
+        set_archived(sid, True, reason="session-summary")
     threading.Thread(target=_await_summary,
                      args=(sid, proc, log_path, base_size),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
+            "archived": archive,
             "envelope": getattr(proc, "envelope_note", None),
-            "note": "independent off-session summary dispatched; session archived"}
+            "note": "independent off-session summary dispatched; "
+                    + ("session archived" if archive else "session not archived")}
 
 
 # ----------------------------------------------------------------------------
@@ -3793,7 +3800,10 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(
                     {"error": "child (subagent) sessions are not summarized "
                               "on their own — summarize the parent"}, 400)
-            r = summarize_session(sid, cwd)
+            # body.archive=false → summary only (the digest reader's plain
+            # Summarize). Absent/true keeps the historical archive-on-dispatch.
+            r = summarize_session(sid, cwd,
+                                  archive=body.get("archive", True) is not False)
             return self._json(r, 200 if r["ok"] else 409)
 
         if route == "/api/angles/mine":

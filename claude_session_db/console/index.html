@@ -710,6 +710,15 @@
   .rd-detail { font-size:12px; line-height:1.55; color:var(--ink2); margin-top:9px;
                padding-top:8px; border-top:1px solid var(--border); }
   .rd-empty { color:var(--muted); font-size:12px; padding:10px 0; }
+  /* close-out actions at the reader's foot: triage a session without opening
+     the chat. Quiet .act.sm buttons (pointer:coarse already bumps their tap
+     target); post-click state lands in the inline .rd-actmsg. */
+  .rd-acts { display:flex; align-items:center; gap:6px; flex-wrap:wrap;
+             margin-top:10px; padding-top:9px; border-top:1px solid var(--border); }
+  .rd-acts .rd-actmsg { font:10px var(--mono); color:var(--ink2); min-width:0; }
+  .rd-acts .rd-actmsg:not(:empty) { padding:1px 6px; border-radius:4px;
+             background:var(--surface2); }
+  .rd-acts .rd-actmsg.bad { color:var(--warn); }
   /* proposed-title strip (reader + chat header): suggestion, one-press accept */
   .tprop { display:flex; align-items:center; gap:7px; font-size:12px;
            color:var(--ink2); min-width:0; }
@@ -3541,7 +3550,18 @@ function renderTimeline(tl){
 let readerFor = null, readerTimer = null;
 
 function openReader(id, kind){
+  // Same-session reopen (the tl;dr/timeline tab switch) keeps the action
+  // state — archived/dispatched must survive the tab flip, and the nav row
+  // may already be gone (archiving removes it from the Projects list).
+  const prev = (readerFor && readerFor.id === id) ? readerFor : null;
   readerFor = {id, kind};
+  if(prev) for(const k of ["archived","dispatched","cwd","msg","bad","busy"])
+    readerFor[k] = prev[k];
+  const row = (navData && navData.sessions || []).find(x => x.session_id === id);
+  if(row){
+    if(readerFor.archived === undefined) readerFor.archived = !!row.archived;
+    if(row.cwd) readerFor.cwd = row.cwd;
+  }
   const dlg = document.getElementById("readerdlg");
   if(!dlg.classList.contains("open")){ dlg.classList.add("open"); ovOpen(); }
   document.getElementById("rd-card").innerHTML =
@@ -3623,13 +3643,85 @@ function renderReader(t){
     foot = tlFootTxt(t);
   }
   document.getElementById("rd-card").innerHTML =
-    head + propRow + body + (foot ? `<div class="tlfoot">${foot}</div>` : "");
+    head + propRow + body + (foot ? `<div class="tlfoot">${foot}</div>` : "")
+    + readerActsHtml();
   // Poll while a run is in flight. A still-null store polls too (the first
   // persist may be a model call away) but gives up after ~60s so a session
   // that CANNOT generate doesn't poll forever — ⟳ re-arms it.
   if(t && t.generating){ readerFor.polls = 0; readerTimer = setTimeout(loadReader, 1500); }
   else if(!t && (readerFor.polls = (readerFor.polls || 0) + 1) <= 40)
     readerTimer = setTimeout(loadReader, 1500);
+}
+
+/* ---------- digest reader close-out actions --------------------------------
+   Triage from the reader itself: summarize (off-session, NO archive),
+   summarize + archive (the existing combined action), archive only. All three
+   hit the endpoints the chat header / batch bar already use — /api/summarize
+   (body.archive=false for the plain variant) and /api/archive. Confirm-free
+   by design; the post-click state lands inline in .rd-actmsg, and disabled
+   states carry their reason in the title. */
+function readerActsHtml(){
+  const r = readerFor;
+  if(!r) return "";
+  const child = r.id.includes(":");
+  const running = r.dispatched
+    || ((navData && navData.summarizing || {})[r.id] === "running");
+  const sumDis = r.busy || running || child;
+  const sumWhy = child ? "child (subagent) sessions are summarized via their parent"
+    : r.busy ? "working…"
+    : r.dispatched ? "summary dispatched — watch the summarizing chip"
+    : running ? "a summary is already running for this session" : "";
+  const btn = (label, fn, dis, title) =>
+    `<button class="act sm" ${dis ? "disabled" : ""} onclick="readerAct('${fn}')"
+       title="${esc(title)}">${label}</button>`;
+  return `<div class="rd-acts" id="rd-acts">
+    ${btn("✎ Summarize", "summarize", sumDis, sumWhy ||
+      "Independent off-session summary (a separate claude run digests the transcript from disk and writes to kmcp — it never touches this session). The session is NOT archived.")}
+    ${btn("✎⇩ Sum + archive", "sumarch", sumDis, sumWhy ||
+      "Off-session summary, and the session is archived the moment it is dispatched — the existing Summarize + archive.")}
+    ${btn(r.archived ? "⇧ Unarchive" : "⇩ Archive", "archive", r.busy,
+      r.busy ? "working…" : r.archived
+        ? "Bring the session back to the sidebar (an index entry flips — nothing on disk changes)"
+        : "Archive only, no summary — an index entry, never a mutation; retrievable from the Archive tab")}
+    <span class="rd-actmsg${r.bad ? " bad" : ""}">${esc(r.msg || "")}</span>
+  </div>`;
+}
+function renderReaderActs(){
+  const el = document.getElementById("rd-acts");
+  if(el) el.outerHTML = readerActsHtml();
+}
+async function readerAct(kind){
+  const r = readerFor;
+  if(!r || r.busy) return;
+  r.busy = true; r.bad = false;
+  r.msg = kind === "archive" ? (r.archived ? "unarchiving…" : "archiving…")
+                             : "dispatching…";
+  renderReaderActs();
+  let ok, d;
+  try {
+    [ok, d] = kind === "archive"
+      ? await post("/api/archive", {session_id: r.id, archived: !r.archived})
+      : await post("/api/summarize", {session_id: r.id, cwd: r.cwd || "",
+                                      archive: kind === "sumarch"});
+  } catch(e){ ok = false; d = {error: "console unreachable"}; }
+  r.busy = false;
+  if(!ok || (d && d.error)){
+    r.msg = (d && d.error) || "failed"; r.bad = true;
+    renderReaderActs(); return;
+  }
+  if(kind === "archive"){
+    r.archived = !r.archived;
+    r.msg = r.archived ? "archived ✓ — moved to the Archive tab"
+                       : "unarchived ✓ — back in the sidebar";
+  } else if(kind === "sumarch"){
+    r.archived = true; r.dispatched = true;
+    r.msg = "summary dispatched ✓ · archived — moved to the Archive tab";
+  } else {
+    r.dispatched = true;
+    r.msg = "summary dispatched ✓ — session stays in the sidebar";
+  }
+  renderReaderActs();
+  loadNav();                 // archived rows leave/rejoin the list; chips update
 }
 
 /* ---------- threads overlay: the session-management lens -------------------

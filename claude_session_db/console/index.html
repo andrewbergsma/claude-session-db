@@ -153,6 +153,7 @@
   .sortbar .sdir { cursor:pointer; padding:1px 8px; border:1px solid var(--border);
                    border-radius:10px; color:var(--ink2); user-select:none; }
   .sortbar .sdir:hover { color:var(--ink); }
+  .sortbar .tall { margin-left:auto; }   /* tl;dr-all sits at the toolbar's right edge */
   .sess { display:grid; grid-template-columns:14px minmax(0,1fr) auto;
           align-items:start; column-gap:8px;
           padding:7px 14px 7px 26px; cursor:pointer; border-bottom:1px solid #1a1f27; }
@@ -830,7 +831,7 @@
           <span id="navflatbtn" class="navbtn" onclick="toggleNavFlat()"
                 title="Grouped by project — tap for a flat most-recent-first list">▤</span>
           <span id="navbatchbtn" class="navbtn" onclick="toggleBatchMode()"
-                title="Batch actions: select multiple sessions, then mine angles / generate timelines / summarize them as a queue">▣</span>
+                title="Batch actions: select multiple sessions, then mine angles / generate timelines / summarize / tl;dr them as a queue">▣</span>
           <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
         </span>
       </div>
@@ -1395,7 +1396,7 @@ function sessRow(s, showProject){
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div></div>`
     : `<div class="ctitle">
-         <div class="t"><span class="ttxt">${esc(disp)}${mark}</span>${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span></div>
+         <div class="t"><span class="ttxt">${esc(disp)}${mark}</span>${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span><span class="edit" title="generate this session's tl;dr now (last-3-turns catch-up) — no need to open it" onclick="rowTldr(event,'${id}')">T</span></div>
          <div class="m">${meta}</div>${snip}
        </div>`;
   const p = prioOf(s);
@@ -1483,7 +1484,45 @@ function renderNavSort(){
     <select class="ssel" title="sort sessions by" onchange="setNavSortSel(this.value)">${opts}</select>
     <span class="sdir" role="button" tabindex="0" title="toggle sort direction"
           onclick="toggleNavSortDir()"
-          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleNavSortDir();}">${navDir==="asc"?"▲ asc":"▼ desc"}</span>`;
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleNavSortDir();}">${navDir==="asc"?"▲ asc":"▼ desc"}</span>
+    <span class="sdir tall" role="button" tabindex="0"
+          title="Generate the last-3-turns tl;dr for EVERY session listed below (respects the current tab + search filter). Queued as a serial batch on the single Ollama lane; fresh tl;drs are skipped — ⌥-click to force-regenerate those too. Progress shows in the bar at the sidebar foot."
+          onclick="tldrAll(event.altKey)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();tldrAll(event.altKey);}">T all</span>`;
+}
+/* The session ids the sidebar is currently listing: the active tab's set
+   (recent or archived) after the search filter — the same predicate the
+   grouped/flat/archive renderers apply. This IS the "all sessions" target
+   set for the tl;dr-all batch: what you see is what queues. */
+function visibleSessionIds(){
+  const q = navQuery.trim().toLowerCase();
+  return ((navData && navData.sessions) || [])
+    .filter(s => !q || navMatch(s).hit ||
+                 (s.project_label || s.project || "").toLowerCase().includes(q))
+    .map(s => s.session_id);
+}
+async function tldrAll(force){
+  const ids = visibleSessionIds();
+  if(!ids.length){ toast("no sessions in the list", true); return; }
+  if(!confirm(`Queue tl;dr generation for ${ids.length} session(s)?\n\n` +
+      (force ? "Force: fresh tl;drs are regenerated too."
+             : "Sessions whose tl;dr is already fresh are skipped.")))
+    return;
+  const body = {actions: ["tldr"], session_ids: ids};
+  if(force) body.options = {force: true};
+  const [ok, d] = await post("/api/batch", body);
+  if(!ok || d.error){ toast(d.error || "batch failed", true); return; }
+  toast(`tl;dr queued — ${d.batch.items.length} session(s)`);
+  pollBatch();
+}
+/* Single-session tl;dr straight off a sidebar row (the hover T glyph):
+   POST /api/tldr force-queues on the tldr worker; the fresh headline lands
+   on the next nav/session poll. No batch, no selection mode. */
+async function rowTldr(e, id){
+  e.stopPropagation();
+  const [ok, d] = await post("/api/tldr", {session_id: id});
+  if(!ok || d.error){ toast(d.error || "tl;dr failed", true); return; }
+  toast(`tl;dr queued — ${batchLabel(id)}`);
 }
 function setNavSortSel(key){
   navSort = key; navDir = (key==="title"||key==="project") ? "asc" : "desc";
@@ -2181,8 +2220,10 @@ async function mine(angles){
    selection; the state dot becomes a checkbox). "All open" selects every
    session the threads lens calls open (verdict != CLOSED). Run buttons POST
    /api/batch — the server queues the work through a single worker (angles +
-   timeline serial; summarize bounded to 2 in-flight off-session runs) and
-   the bar polls /api/batch for per-session progress. Failures isolate. */
+   timeline + tldr serial; summarize bounded to 2 in-flight off-session runs)
+   and the bar polls /api/batch for per-session progress. Failures isolate.
+   tl;dr also runs without selection mode: "T all" on the sortbar batches the
+   whole visible list, and each row's hover T fires POST /api/tldr solo. */
 let batchMode = false, batchSel = new Set(), batchData = null, batchTimer = null;
 const OPEN_VERDICTS = ["LIVE", "OPEN", "OPEN-delta", "OPEN?"];
 
@@ -2209,7 +2250,7 @@ async function batchAllOpen(){
   toast(n ? `selected ${n} open session(s)` : "no open sessions in the sidebar");
   renderNav(); renderBatchBar();
 }
-async function runBatch(action){
+async function runBatch(action, force){
   if(!batchSel.size) return;
   if(action === "summarize" && !confirm(
       `Summarize + archive ${batchSel.size} session(s)?\n\n` +
@@ -2217,7 +2258,9 @@ async function runBatch(action){
       "digests the transcript from disk — it never resumes or touches the " +
       "session. Each session is archived when its summary is dispatched."))
     return;
-  const [ok, d] = await post("/api/batch", {actions: [action], session_ids: [...batchSel]});
+  const body = {actions: [action], session_ids: [...batchSel]};
+  if(force) body.options = {force: true};
+  const [ok, d] = await post("/api/batch", body);
   if(!ok || d.error){ toast(d.error || "batch failed", true); return; }
   toast(`batch queued — ${d.batch.items.length} item(s)`);
   pollBatch();
@@ -2259,6 +2302,7 @@ function renderBatchBar(){
         <button class="act sm" onclick="runBatch('angles')" title="Mine the latest turn's angles for each selected session (serial queue)">⟳ Angles</button>
         <button class="act sm" onclick="runBatch('timeline')" title="Generate the whole-session timeline for each selected session (serial queue, one Ollama lane)">⧗ Timelines</button>
         <button class="act sm" onclick="runBatch('summarize')" title="Off-session summarize + archive each selected session (max 2 claude runs in flight)">✎ Summarize</button>
+        <button class="act sm" onclick="runBatch('tldr', event.altKey)" title="Generate the last-3-turns tl;dr for each selected session (serial queue, one Ollama lane). Sessions whose tl;dr is already fresh are skipped — ⌥-click to force-regenerate those too">T tl;dr</button>
       </div>`;
   }
   if(last){
@@ -2267,7 +2311,8 @@ function renderBatchBar(){
     const parts = [];
     if(c.running) parts.push(`<span class="st-running">${c.running} running</span>`);
     if(c.queued) parts.push(`${c.queued} queued`);
-    if(c.done) parts.push(`<span class="st-done">${c.done} done</span>`);
+    const sk = last.items.filter(it => it.skipped).length;
+    if(c.done) parts.push(`<span class="st-done">${c.done} done${sk?` (${sk} fresh, skipped)`:""}</span>`);
     if(c.failed) parts.push(`<span class="st-failed">${c.failed} failed</span>`);
     if(c.cancelled) parts.push(`${c.cancelled} cancelled`);
     const cancelBtn = (c.queued && !last.done)

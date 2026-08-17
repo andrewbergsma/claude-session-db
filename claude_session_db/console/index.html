@@ -224,8 +224,14 @@
   #chdr { padding:12px 20px; border-bottom:1px solid var(--border); background:var(--surface);
           display:flex; flex-direction:column; gap:5px; }
   #chdr .row1 { display:flex; align-items:center; gap:10px; }
-  #chdr h2 { font-size:15px; font-weight:600; min-width:0; overflow:hidden;
+  #chdr h2 { font-size:15px; font-weight:600; flex:1; min-width:0; overflow:hidden;
              text-overflow:ellipsis; white-space:nowrap; }
+  /* row1 icon buttons (mobile-only): rail sheet + details expand — they live in
+     the ALWAYS-VISIBLE first line, never in the scrollable .acts strip */
+  .hbtn { display:none; cursor:pointer; flex:none; align-items:center; justify-content:center;
+          font-size:15px; padding:4px 10px; min-height:32px; border:1px solid var(--border);
+          border-radius:8px; background:var(--surface2); color:var(--ink); user-select:none; }
+  .hbtn.on { color:var(--accent); border-color:var(--accent); }
   #chdr .chips { display:flex; gap:6px; flex-wrap:wrap; }
   .chip { font-size:11px; font-family:var(--mono); color:var(--ink2);
           background:var(--surface2); border:1px solid var(--border);
@@ -256,6 +262,10 @@
   .turn.assistant { background:transparent; }
   .who { font:10px var(--mono); font-weight:700; text-transform:uppercase;
          letter-spacing:.5px; margin-bottom:3px; }
+  /* inline timestamp inside the turn header — hidden on desktop (the gutter
+     column carries time there), shown on phones where the gutter is dropped */
+  .who .tstamp { display:none; font-weight:400; text-transform:none; letter-spacing:0;
+                 color:var(--muted); font-size:9.5px; margin-left:6px; }
   .turn.user .who { color:var(--accent); }
   /* queued composer messages: visibly "not sent yet" — dashed, amber badge,
      cancellable; a failed dispatch flips the accents to --bad. */
@@ -763,14 +773,22 @@
     .ctitle .m .mdates, .ctitle .m .mdates + .msep{ display:none; }
     #navgrip{ display:none; }
     .navham{ display:inline-flex; }
-    #chdr{ padding:10px 12px; padding-top:calc(10px + env(safe-area-inset-top)); }
+    #chdr{ padding:8px 12px; padding-top:calc(8px + env(safe-area-inset-top)); gap:4px; }
     #chdr .chips, #chdr .acts{ flex-wrap:nowrap; overflow-x:auto;
       -webkit-overflow-scrolling:touch; scrollbar-width:none; }
     #chdr .chips::-webkit-scrollbar, #chdr .acts::-webkit-scrollbar{ display:none; }
     #chdr .acts{ padding-bottom:4px; }
+    /* compact header: one line by default — title + ham + rail + ⋯. The meta
+       (chips, tl;dr, action strip) is demoted behind the ⋯ tap-to-expand. */
+    .hbtn{ display:inline-flex; }
+    #chdr:not(.x) .chips, #chdr:not(.x) .acts{ display:none; }
+    #chdr:not(.x) .tldr{ display:none; }
     #stream{ padding:12px 12px 8px; }
-    .ev{ gap:6px; }
-    .ev .gutter{ min-width:34px; font-size:10px; }
+    /* full-width messages: drop the timestamp gutter column — time renders as
+       a tiny inline element in the turn header (.who .tstamp) instead */
+    .ev{ gap:0; }
+    .ev .gutter{ display:none; }
+    .who .tstamp{ display:inline; }
     .chip.sid{ max-width:140px; overflow:hidden; text-overflow:ellipsis; }
     #compose{ padding:10px 12px;
               padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
@@ -1163,22 +1181,49 @@ function composerKey(e){
   }
 }
 
+/* ---------- compact mobile header: tap ⋯ to expand the demoted meta ----------
+   State lives OUT here (not on #chdr) so the 3s poll re-render can't wipe it —
+   renderHeader re-applies the class after every paint. */
+let chdrX = false;
+function toggleChdrX(){
+  chdrX = !chdrX;
+  document.getElementById("chdr").classList.toggle("x", chdrX);
+  const b = document.getElementById("chdrxbtn");
+  if(b) b.classList.toggle("on", chdrX);
+}
+
 /* ---------- iOS keyboard: pin the app to the VISIBLE viewport ----------
    iOS Safari overlays the keyboard instead of resizing the layout, hiding the
-   composer behind it. Sizing <body> to visualViewport.height keeps the
-   composer (and the answering/✓ status line) above the keyboard. */
+   composer behind it (Chrome/Android honors interactive-widget=resizes-content
+   in the viewport meta; iOS ignores it). The fix is the visualViewport API:
+   size <body> to vv.height so the grid (header/stream/composer) lays out inside
+   the VISIBLE viewport, and ride vv.offsetTop with a translateY for the moments
+   iOS pans the layout viewport (focus scroll) — otherwise the composer is
+   correct-height but shifted off-screen. rAF-coalesced: resize + scroll can
+   fire in bursts while the keyboard animates. */
 (function(){
   const vv = window.visualViewport;
   if(!vv) return;
-  const sync = () => {
+  let raf = 0;
+  const apply = () => {
+    raf = 0;
     if(!matchMedia("(max-width:760px)").matches){
-      document.body.style.height = ""; return;
+      document.body.style.height = ""; document.body.style.transform = ""; return;
     }
     document.body.style.height = vv.height + "px";
+    document.body.style.transform = vv.offsetTop ? `translateY(${vv.offsetTop}px)` : "";
     window.scrollTo(0, 0);
+    // keep the conversation tail visible above the keyboard
+    if(pinnedBottom){
+      const st = document.getElementById("stream");
+      st.scrollTop = st.scrollHeight;
+    }
   };
+  const sync = () => { if(!raf) raf = requestAnimationFrame(apply); };
   vv.addEventListener("resize", sync);
   vv.addEventListener("scroll", sync);
+  // focusing the composer raises the keyboard — sync once the pan settles
+  document.getElementById("cin").addEventListener("focus", () => setTimeout(sync, 60));
 })();
 
 let curId = null, curSession = null, selIdx = null, pinnedBottom = true;
@@ -1191,6 +1236,9 @@ function rel(ts){ const s=Math.max(0,(Date.now()-new Date(ts).getTime())/1000);
   if(s<60)return Math.floor(s)+"s"; if(s<3600)return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; }
 function clock(ts){ if(!ts)return""; const d=new Date(ts);
   return d.toLocaleTimeString([], {hour:"2-digit",minute:"2-digit",second:"2-digit"}); }
+/* fixed 24h HH:MM — the phone's inline turn timestamp (.who .tstamp) */
+function hm(ts){ if(!ts)return""; const d=new Date(ts);
+  return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0"); }
 function kb(n){ if(n==null)return "—"; if(n<1024)return n+" ch"; return (n/1024).toFixed(1)+" kB"; }
 
 /* ---------- nav ---------- */
@@ -1744,11 +1792,16 @@ function renderHeader(s){
       ${sub.spawn_depth!=null?`<span>· depth ${sub.spawn_depth}</span>`:""}
       <span>· agent ${esc((sub.agent_id||"").slice(0,8))}</span>
     </div>` : "";
-  document.getElementById("chdr").innerHTML = `
+  const html = `
     <div class="row1">
       <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
       ${stateDot(s)}
       <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
+      <span class="hbtn" onclick="openRailSheet()" role="button"
+            aria-label="Open rail" title="Angles / context / writes / git rail">◫</span>
+      <span class="hbtn" id="chdrxbtn" onclick="toggleChdrX()" role="button"
+            aria-label="Toggle session details"
+            title="Show/hide session details (chips, tl;dr, actions)">⋯</span>
     </div>
     ${subhdr}
     <div class="chips">
@@ -1793,6 +1846,25 @@ function renderHeader(s){
       </span>
       <span id="actmsg" class="actmsg"></span>
     </div>`;
+  // Idempotent paint: the 3s poll must NOT rebuild #chdr when nothing changed.
+  // A full innerHTML wipe detaches whatever the operator is mid-tapping (a tap
+  // whose target is removed between touchstart and click is silently dropped on
+  // iOS) and resets the .chips/.acts strips' scrollLeft to 0 — the root cause
+  // of the "Rail button won't open the sheet" mobile bug. Same idiom as
+  // renderStream._last.
+  const chdr = document.getElementById("chdr");
+  if(renderHeader._last !== html){
+    renderHeader._last = html;
+    const strips = [...chdr.querySelectorAll(".chips,.acts")].map(n => n.scrollLeft);
+    chdr.innerHTML = html;
+    [...chdr.querySelectorAll(".chips,.acts")].forEach((n, i) => {
+      if(strips[i]) n.scrollLeft = strips[i];
+    });
+  }
+  // expand/collapse state lives OUTSIDE the polled subtree (like the popovers)
+  chdr.classList.toggle("x", chdrX);
+  const xb = document.getElementById("chdrxbtn");
+  if(xb) xb.classList.toggle("on", chdrX);
   if(sub){
     // Child (subagent) transcripts are read-only: there is no session to
     // resume — answers and forks belong to the parent.
@@ -1956,11 +2028,12 @@ function renderStream(s){
     // The uuid id anchors spawn back-links (child header -> parent message).
     const w = `<div class="ev"${e.uuid?` id="ev-${esc(e.uuid)}"`:""}>` +
               `<span class="gutter">${clock(e.ts)}</span>`;
+    const tst = `<span class="tstamp">${hm(e.ts)}</span>`;
     if(e.kind==="user")
-      html += `${w}<div class="b"><div class="turn user"><div class="who">you</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+      html += `${w}<div class="b"><div class="turn user"><div class="who">you${tst}</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
       const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools, e.ts, live)}</div>` : "";
-      html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+      html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent${tst}</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
@@ -1984,7 +2057,7 @@ function renderStream(s){
       : "";
     html += `<div class="ev"><span class="gutter">${clock(q.queued_at)}</span>
       <div class="b"><div class="turn user queued${failed ? " qfailed" : ""}">
-        <div class="who">you <span class="qbadge${failed ? " bad" : ""}">${failed ? "✗ failed" : "⏸ queued"}</span>
+        <div class="who">you<span class="tstamp">${hm(q.queued_at)}</span> <span class="qbadge${failed ? " bad" : ""}">${failed ? "✗ failed" : "⏸ queued"}</span>
           <span class="qcancel" onclick="cancelQueued('${esc(q.id)}')"
             title="${failed ? "dismiss this failed message" : "cancel this queued message"}">✕ ${failed ? "dismiss" : "cancel"}</span></div>
         <div class="txt">${esc(q.text)}</div>${err}
@@ -1998,7 +2071,7 @@ function renderStream(s){
   pendingSends.filter(p => p.sid === s.session_id).forEach(p => {
     html += `<div class="ev"><span class="gutter">${clock(p.ts)}</span>
       <div class="b"><div class="turn user sending">
-        <div class="who">you <span class="qbadge sending">⏳ sending</span></div>
+        <div class="who">you<span class="tstamp">${hm(p.ts)}</span> <span class="qbadge sending">⏳ sending</span></div>
         <div class="txt">${esc(p.text)}</div>
       </div></div></div>`;
   });

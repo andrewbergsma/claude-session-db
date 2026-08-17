@@ -184,6 +184,20 @@ when two runs share a project dir, and blind between spawn and first write.
   only things that force a run, and the tab polls only while one is in flight.
   Bounded by `CSD_TIMELINE_MAX_TURNS` (150; older turns omitted, surfaced in the
   footer). State: `$CSD_STATE_DIR/timeline/<sid>.json`.
+- **Digests at the session row** — every sidebar row carries two presence chips
+  (`T` tl;dr, `⧗` timeline; absent/stale/fresh/error/generating by color). A tap
+  opens the **digest reader** popover (read the tldr or timeline without loading
+  the chat) and, when absent/stale, also fires the ensure POST. Run-if-needed is
+  server-side — `tldr.ensure()` / `session_timeline.ensure()` (fresh = no-op,
+  error stores not retried unless forced) — the seam a future ambient runner
+  calls. Row presence ships in `/api/sessions` signature-memoized (store files
+  re-read only when their `(mtime_ns, size)` changes), so the nav poll costs
+  stats, not reads. The tldr's single model call also yields a **proposed
+  session title** (`title_proposal` in the store): surfaced as a suggestion in
+  the row (ghost placeholder when the session has only a raw fallback title),
+  the reader, and the chat header — one-press ✓ accept writes through
+  `/api/title`; ✕ dismiss is remembered by value (`tp_dismissed` in meta.json).
+  A manual title is never auto-overwritten.
 
 ### Side-session permission envelope (`spawn_claude` as resolver/translator)
 

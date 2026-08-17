@@ -254,6 +254,76 @@ def get_cached(sid: str) -> Optional[dict]:
         return None
 
 
+# ---- nav-grade presence: cheap enough for the sidebar's 3-5s poll ----------
+#
+# Timeline stores are big (rows + the per-uuid memo of a 150-turn session), so
+# the presence check must not re-read them per session per poll. Only the
+# light header is memoized, keyed on the store file's (mtime_ns, size) — an
+# atomic-replace persist always changes that signature. An unchanged poll
+# costs one stat() per store plus the transcript turn_key, which tldr already
+# memoizes on the transcript's own signature.
+_PRES_MEMO: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
+def presence(sid: str, jsonl_path: Path) -> dict:
+    """{state, rows, generated_at}; state ∈ absent|generating|stale|error|fresh.
+
+    The sidebar's per-row glance: does a timeline exist, and is it current
+    against the transcript's turn_key? Never reads rows, never generates."""
+    status = STATUS.get(sid) or ""
+    generating = status.startswith(("queued", "generating"))
+    f = _state_dir() / f"{_safe_name(sid)}.json"
+    try:
+        st = f.stat()
+    except OSError:
+        _PRES_MEMO.pop(sid, None)
+        return {"state": "generating" if generating else "absent", "rows": 0}
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _PRES_MEMO.get(sid)
+    if hit and hit[0] == sig:
+        m = hit[1]
+    else:
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            d = {}
+        m = {"turn_key": d.get("turn_key"),
+             "rows": len(d.get("rows") or []),
+             "error": bool(d.get("error")),
+             "partial": bool(d.get("partial")),
+             "generated_at": d.get("generated_at")}
+        _PRES_MEMO[sid] = (sig, m)
+    out = {"rows": m["rows"], "generated_at": m["generated_at"]}
+    key = turn_key(jsonl_path)
+    if generating:
+        out["state"] = "generating"
+    elif m["error"] and not m["rows"]:
+        out["state"] = "error"
+    elif m["partial"] or (key and m["turn_key"] != key):
+        out["state"] = "stale"
+    else:
+        out["state"] = "fresh"
+    return out
+
+
+def ensure(sid: str, jsonl_path: Path, force: bool = False) -> dict:
+    """Run-if-absent-or-stale on the single worker lane.
+
+    The automation seam (mirror of tldr.ensure): a future ambient runner calls
+    exactly this. Fresh is a no-op; an error store (negative cache) is NOT
+    retried unless forced, so automation can never loop on a failing session.
+    Returns {ok, state: fresh|error|generating|queued|no-turns, queued}."""
+    p = presence(sid, jsonl_path)
+    if p["state"] == "generating":
+        return {"ok": True, "state": "generating", "queued": False}
+    if p["state"] in ("fresh", "error") and not force:
+        return {"ok": True, "state": p["state"], "queued": False}
+    if turn_key(jsonl_path) is None:
+        return {"ok": False, "state": "no-turns", "queued": False}
+    _enqueue(sid, jsonl_path)
+    return {"ok": True, "state": "queued", "queued": True}
+
+
 # --- async worker: serve cached now, generate off the request path ------------------
 
 _JOBS: "queue.Queue[tuple[str, Path]]" = queue.Queue()

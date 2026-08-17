@@ -172,6 +172,8 @@ Return ONLY JSON:
 {"about": "what this conversation is about - one clause, max 100 chars",
  "doing": "what the agent has been doing / is doing now - one clause, \
 present tense, max 120 chars",
+ "title": "a specific 3-8 word name for this session, usable as a list \
+title - name the subject, not the activity kind",
  "detail": "a fuller 3-5 sentence catch-up paragraph"}
 
 %s
@@ -237,6 +239,11 @@ def generate(sid: str, jsonl_path: Path,
         "headline": headline,
         "about": about,
         "doing": doing,
+        # A proposed session TITLE from the same single model call. Stored
+        # alongside, never applied: the console surfaces it as a one-press
+        # suggestion, and only an explicit accept writes it through the
+        # /api/title overlay path (a manual title is never auto-overwritten).
+        "title_proposal": _one_line(str(out.get("title") or ""), 90) or None,
         "detail": _one_line(str(out.get("detail") or ""), 2000),
         "backend": backend,
         "model": model or (DEFAULT_MODEL if backend == "ollama" else CLAUDE_MODEL),
@@ -258,11 +265,34 @@ def _safe_name(sid: str) -> str:
     return sid.replace(":", "__")        # child keys carry ':'
 
 
+# Store reads are signature-memoized: the nav poll asks for every listed
+# session's tldr every few seconds, and 40+ store files must not be re-read
+# per poll. _persist() replaces the file atomically, so (mtime_ns, size) is a
+# reliable change signal. A shallow copy is returned so a caller spreading /
+# augmenting the dict can never poison the memo.
+_STORE_MEMO: dict[str, tuple[tuple[int, int], dict]] = {}
+
+
 def get_cached(sid: str) -> Optional[dict]:
+    f = _state_dir() / f"{_safe_name(sid)}.json"
     try:
-        return json.loads((_state_dir() / f"{_safe_name(sid)}.json").read_text())
-    except (OSError, ValueError):
+        st = f.stat()
+    except OSError:
+        _STORE_MEMO.pop(sid, None)
         return None
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _STORE_MEMO.get(sid)
+    if hit and hit[0] == sig:
+        store = hit[1]
+    else:
+        try:
+            store = json.loads(f.read_text())
+        except (OSError, ValueError):
+            return None
+        if not isinstance(store, dict):
+            return None
+        _STORE_MEMO[sid] = (sig, store)
+    return dict(store)
 
 
 # --- async worker: serve stale-or-absent now, regenerate off the request path -----
@@ -368,3 +398,40 @@ def payload(sid: str, jsonl_path: Path, force: bool = False) -> Optional[dict]:
     return {**cached,
             "stale": bool(key and cached.get("turn_key") != key),
             "status": STATUS.get(sid)}
+
+
+def peek(sid: str, jsonl_path: Path) -> Optional[dict]:
+    """The pure-read shape: cached store + staleness + worker status, NEVER
+    enqueues anything (request() is the enqueue path). This is what the
+    reader popover polls while a run is in flight."""
+    cached = get_cached(sid)
+    status = STATUS.get(sid)
+    generating = (status or "").startswith(("queued", "generating"))
+    if not cached:
+        return ({"session_id": sid, "generating": True, "status": status}
+                if generating else None)
+    key = turn_key(jsonl_path)
+    return {**cached,
+            "stale": bool(key and cached.get("turn_key") != key),
+            "generating": generating,
+            "status": status}
+
+
+def ensure(sid: str, jsonl_path: Path, force: bool = False) -> dict:
+    """Run-if-absent-or-stale, through the same single worker lane.
+
+    The automation seam: a future ambient runner (angles_watch settle hook, a
+    sweep tick) calls exactly this — run-if-needed lives server-side, never as
+    UI glue. Fresh stores are a no-op; a fresh negative-cache stub (a session
+    that cannot tldr) is respected, not retried, unless forced. Returns
+    {ok, state: fresh|error|queued|no-turns, queued}."""
+    key = turn_key(jsonl_path)
+    if key is None:
+        return {"ok": False, "state": "no-turns", "queued": False}
+    cached = get_cached(sid)
+    if not force and cached and cached.get("turn_key") == key:
+        state = ("error" if cached.get("error") and not cached.get("headline")
+                 else "fresh")
+        return {"ok": True, "state": state, "queued": False}
+    queued = enqueue(sid, jsonl_path)
+    return {"ok": True, "state": "queued", "queued": queued}

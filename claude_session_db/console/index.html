@@ -647,6 +647,74 @@
                      padding-bottom:9px; border-radius:6px 6px 0 0; }
   #minedlg .mm-note { color:var(--muted); font:10.5px/1.4 var(--mono); margin:8px 6px 2px; }
 
+  /* ---- CR (context reduction) mode: manifest verbs + cart rail ----
+     Mode state (crMode/crActions/crCart) lives OUTSIDE the polled #chdr —
+     popover-state idiom — and the cart replaces the rail tabs while active. */
+  .crc { cursor:pointer; user-select:none; font:11px var(--mono); flex:none;
+         border:1px solid var(--border); border-radius:5px; padding:0 6px;
+         margin-right:6px; color:var(--muted); display:inline-flex; gap:4px;
+         align-items:center; }
+  .crc.keep { color:var(--good); border-color:rgba(63,185,80,.45); }
+  .crc.stub { color:var(--muted); border-style:dashed; }
+  .crc.ref  { color:var(--purple); border-color:var(--purple); }
+  .crc:hover { filter:brightness(1.25); }
+  body.crmode .crstub > .turn > .txt, body.crmode .read.crstub,
+  body.crmode .trow.crstub .tline { opacity:.45; }
+  #crcart { display:none; }
+  body.crmode #crcart { display:block; }
+  body.crmode #railtabs, body.crmode .rtabpane, body.crmode #raildetail,
+  body.crmode #rail > h3 { display:none; }
+  .cr-tot { font:13px var(--mono); margin:6px 0 2px; }
+  .cr-tot .aft { color:var(--good); }
+  .cr-tot .pct { color:var(--purple); }
+  .cr-floor { color:var(--muted); font:10.5px/1.45 var(--mono); margin-bottom:10px; }
+  .cr-grp { display:flex; align-items:baseline; gap:6px; font:11px var(--mono);
+            padding:4px 0; border-bottom:1px solid var(--border); }
+  .cr-grp .gl { color:var(--ink); flex:none; }
+  .cr-grp .n { color:var(--muted); margin-left:auto; padding-left:8px;
+               white-space:nowrap; }
+  .cr-grp .gb { cursor:pointer; border:1px solid var(--border); border-radius:5px;
+                padding:0 6px; color:var(--muted); flex:none; }
+  .cr-grp .gb:hover { color:var(--ink); }
+  .cr-grp .gb.on { color:var(--accent); border-color:var(--accent); }
+  .cr-sec { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
+            color:var(--ink2); margin:14px 0 6px; }
+  .cr-in { width:100%; box-sizing:border-box; background:var(--bg);
+           border:1px solid var(--border); border-radius:7px; color:var(--ink);
+           padding:7px 9px; font:12px var(--mono); outline:none; margin-bottom:4px; }
+  .cr-in:focus { border-color:var(--accent); }
+  .cr-hit { display:flex; gap:6px; align-items:baseline; font:11px var(--mono);
+            padding:5px 4px; border-bottom:1px solid var(--border); min-width:0; }
+  .cr-hit .t { color:var(--ink); min-width:0; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+  .cr-hit .sz { color:var(--muted); flex:none; }
+  .cr-hit .add { cursor:pointer; color:var(--good); margin-left:auto; flex:none; }
+  .cr-hit .add:hover { filter:brightness(1.3); }
+  .cr-ref { display:flex; gap:6px; align-items:baseline; font:11px var(--mono);
+            padding:4px 2px; min-width:0; }
+  .cr-ref .sz { color:var(--muted); flex:none; white-space:nowrap; }
+  .cr-ref .t { min-width:0; overflow:hidden; text-overflow:ellipsis;
+               white-space:nowrap; }
+  .cr-ref .rm { cursor:pointer; color:var(--bad); margin-left:auto; flex:none; }
+  .cr-err { color:var(--bad); font:10.5px var(--mono); margin:4px 0; }
+  .cr-acts { display:flex; gap:6px; margin:12px 0 6px; flex-wrap:wrap; }
+  .cr-acts .primary { color:var(--purple); border-color:var(--purple); }
+  .cr-hint { color:var(--muted); font:10.5px/1.45 var(--mono); margin-top:8px; }
+  #compose #bcr.on { color:var(--purple); border-color:var(--purple); }
+  /* CR preview / compile dialog — same overlay idiom as #readerdlg */
+  #crdlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:75;
+           display:none; align-items:flex-start; justify-content:center;
+           padding-top:9vh; }
+  #crdlg.open { display:flex; }
+  #crdlg .cr-card { background:var(--surface); border:1px solid var(--border);
+           border-radius:12px; padding:14px 16px; width:min(680px,94vw);
+           max-height:78dvh; overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,.5);
+           display:flex; flex-direction:column; gap:8px; }
+  #crdlg .cr-card pre { background:var(--bg); border:1px solid var(--border);
+           border-radius:8px; padding:10px 12px; font:11px/1.5 var(--mono);
+           white-space:pre-wrap; word-break:break-word; max-height:44dvh;
+           overflow:auto; margin:0; }
+
   /* ---- tl;dr timeline (whole-session catch-up), Timeline rail tab ----
      .tlrow/.tlfoot are unscoped: the digest reader popover renders the same
      rows with the same renderer (tlRowsHtml). */
@@ -901,6 +969,11 @@
       justify-content:center; min-height:44px; min-width:44px; }
     .dchip, .tacc, .tprop .tp-b{ min-height:26px; min-width:28px;
       display:inline-flex; align-items:center; justify-content:center; }
+    /* CR mode on a phone: fat verb chips + tap-friendly cart controls */
+    .crc{ min-height:28px; min-width:44px; justify-content:center; }
+    .cr-grp .gb{ min-height:26px; display:inline-flex; align-items:center; }
+    .cr-hit .add, .cr-ref .rm{ min-height:28px; min-width:36px;
+      display:inline-flex; align-items:center; justify-content:center; }
     .rd-tabs .rtb{ min-height:32px; display:inline-flex; align-items:center; }
     .tline.cmd{ padding:5px 4px; }
     .read{ padding:8px 10px; }
@@ -946,6 +1019,8 @@
                 oninput="growComposer()" onkeydown="composerKey(event)"></textarea>
       <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
       <button id="bfork" disabled onclick="send(true)">Fork</button>
+      <button id="bcr" disabled onclick="toggleCR()"
+        title="CR — context reduction: fork with curation. Pick which context survives (keep / stub / → ref), compile kmcp refs into a preamble, and write a NEW reduced session file. The original is never touched.">CR</button>
     </div>
   </main>
 
@@ -970,6 +1045,8 @@
     <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
     <div id="pane-files" class="rtabpane"><div id="filesinfo"></div></div>
     <div id="pane-timeline" class="rtabpane"><div id="tlinfo"></div></div>
+    <!-- CR cart: replaces the tab panes while CR mode is active (body.crmode) -->
+    <div id="crcart"></div>
   </aside>
   <div id="railgrip" title="Drag to resize · double-click to reset"></div>
 
@@ -1041,6 +1118,12 @@
        row, without loading the chat (same popover idiom as the mine menu) -->
   <div id="readerdlg" onclick="if(event.target===this)closeReader()">
     <div class="rd-card" id="rd-card"></div>
+  </div>
+
+  <!-- CR preview / compile dialog: the two-phase gate — the preamble draft and
+       before/after totals are reviewed here BEFORE anything is written -->
+  <div id="crdlg" onclick="if(event.target===this)closeCrDlg()">
+    <div class="cr-card" id="cr-dlg-card"></div>
   </div>
 
 
@@ -1131,6 +1214,8 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
+  const cd = document.getElementById("crdlg");
+  if(cd && cd.classList.contains("open")){ closeCrDlg(); return; }
   const rd = document.getElementById("readerdlg");
   if(rd && rd.classList.contains("open")){ closeReader(); return; }
   const mm = document.getElementById("minedlg");
@@ -1159,6 +1244,7 @@ function ovDone(){
 }
 window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("crdlg").classList.contains("open")) return closeCrDlg(true);
   if(document.getElementById("readerdlg").classList.contains("open")) return closeReader(true);
   if(document.getElementById("minedlg").classList.contains("open")) return closeMineMenu(true);
   if(document.getElementById("topicdlg").classList.contains("open")) return closeTopicDlg(true);
@@ -1202,7 +1288,8 @@ document.addEventListener("click", e => {
   if(e.target instanceof Node && !e.target.isConnected) return;
   // the file-preview / digest-reader overlays sit ABOVE the sheet/drawer — a
   // tap inside them must not count as "outside" and close what's beneath
-  if(e.target.closest("#fileview") || e.target.closest("#readerdlg")) return;
+  if(e.target.closest("#fileview") || e.target.closest("#readerdlg")
+     || e.target.closest("#crdlg")) return;
   if(document.body.classList.contains("rail-open") &&
      Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
     closeRailSheet();
@@ -1803,6 +1890,7 @@ function toggleArchived(){ setNavTab(navTab==="archive" ? "projects" : "archive"
 
 /* ---------- session detail ---------- */
 async function openSession(id){
+  if(crMode && id !== curId) exitCR();   // CR selection is per-session
   curId = id; selIdx = null; pinnedBottom = true;
   closeNavDrawer(); closeRailSheet();   // phone: selecting a session dismisses both
   clearTimeout(tlTimer); tlTimer = null;   // drop any stale poll from the prior session
@@ -2028,6 +2116,7 @@ function renderHeader(s){
       "subagent transcript — read-only; answer the parent session";
     document.getElementById("bans").disabled = true;
     document.getElementById("bfork").disabled = true;
+    document.getElementById("bcr").disabled = true;
     return;
   }
   // Answer gating — from process reality, not transcript shape. An EXITED
@@ -2053,6 +2142,7 @@ function renderHeader(s){
     : "answer this session…";
   document.getElementById("bans").disabled = false;
   document.getElementById("bfork").disabled = false;
+  document.getElementById("bcr").disabled = false;
 }
 
 /* "app:path" ref → [app, path] (path may itself contain no colon worth splitting) */
@@ -2074,8 +2164,8 @@ function readRow(e, idx){
     if(e.count) cnt = `<span class="sz">×${e.count}</span>`;
   }
   const tip = e.targets?.length ? ` title="${esc(e.targets.join("\n"))}"` : "";
-  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})"${tip}>
-    <span class="ic">📖</span>
+  return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}${e.tid?crCls("t:"+e.tid):""}" onclick="selectEvent(${idx})"${tip}>
+    ${e.tid?crc("t:"+e.tid):""}<span class="ic">📖</span>
     <span class="pth">${pth}</span>
     ${cnt}<span class="badge ${mode}">${mode}</span>${secs}
     <span class="sz">${kb(e.chars)}</span>
@@ -2085,8 +2175,8 @@ function readRow(e, idx){
 function searchRow(e, idx){
   const n = e.result?.total;
   const got = e.result?.hits?.length;
-  return `<div class="read search ${e.sub?"sub":""} ${idx===selIdx?"sel":""}" onclick="selectEvent(${idx})">
-    <span class="ic">🔍</span>
+  return `<div class="read search ${e.sub?"sub":""} ${idx===selIdx?"sel":""}${e.tid?crCls("t:"+e.tid):""}" onclick="selectEvent(${idx})">
+    ${e.tid?crc("t:"+e.tid):""}<span class="ic">🔍</span>
     <span class="pth"><span class="app">${esc(e.tool)}:</span> ${esc(e.query)}</span>
     ${n!=null?`<span class="badge srf">${n.toLocaleString()} hits</span>`:""}
     ${got?`<span class="sz">▸${got}</span>`:""}
@@ -2169,7 +2259,8 @@ function toolRow(t, ts, live){
     : `<span class="tlabel">${esc(t.label||t.name)}</span>`;
   const click = hasCmd ? ` class="tline cmd" onclick="toggleCmd('${esc(t.id)}')"` : ` class="tline"`;
   const cmdBlock = open ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "";
-  return `<div class="trow"><div${click}><span class="tg">${glyph}</span>${caret}
+  const crCtl = t.id ? crc("t:" + t.id) : "";
+  return `<div class="trow${t.id ? crCls("t:" + t.id) : ""}"><div${click}>${crCtl}<span class="tg">${glyph}</span>${caret}
     ${label}${stat}${err}${size}</div>${det}${cmdBlock}</div>`;
 }
 function toolRows(tools, ts, live){ return (tools||[]).map(t => toolRow(t, ts, live)).join(""); }
@@ -2185,10 +2276,10 @@ function renderStream(s){
               `<span class="gutter">${clock(e.ts)}</span>`;
     const tst = `<span class="tstamp">${hm(e.ts)}</span>`;
     if(e.kind==="user")
-      html += `${w}<div class="b"><div class="turn user"><div class="who">you${tst}</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+      html += `${w}<div class="b${crCls('u:'+e.uuid)}"><div class="turn user"><div class="who">${crc('u:'+e.uuid)}you${tst}</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
       const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools, e.ts, live)}</div>` : "";
-      html += `${w}<div class="b"><div class="turn assistant"><div class="who">agent${tst}</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+      html += `${w}<div class="b${crCls('a:'+e.uuid)}"><div class="turn assistant"><div class="who">${crc('a:'+e.uuid)}agent${tst}</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
@@ -3346,6 +3437,301 @@ function renderSummary(s){
     <div class="kv"><span class="k">≈ tokens read</span><span class="v">≈${Math.round(total/4/1000)}k</span></div>
     ${modes?`<div style="margin-top:8px">${modes}</div>`:""}
     ${entries?`<div class="rl-hits"><div class="rl-hits-h">consumed entries — linked into /browse</div>${entries}</div>`:""}`;
+}
+
+/* ---------- CR: context-reduction fork (fork with curation) ----------------
+   The operator picks which context survives — ☑ keep / ☐ stub / ◫ ref (kmcp
+   rows only) — searches kmcp for refs to inject, and CR writes a NEW reduced
+   session file (two-phase: preview the preamble + totals, then confirm). Mode
+   state lives OUT here (popover-state idiom): the 3s poll re-render of #chdr
+   and #stream can never wipe it. Selection + cart persist per-session in
+   localStorage; the server stays stateless. */
+let crMode = false, crManifest = null, crActions = {}, crCart = [], crHits = null;
+const CR_STUB_TOK = 10;              // ≈ tokens a breadcrumb costs
+const CR_REF_TOK_CAP = 2500 / 4;     // preamble caps entry bodies at 2500 chars
+const CR_GLYPH = {keep: "☑ keep", stub: "☐ stub", ref: "◫ ref"};
+const CR_KINDS = [                   // group rows for the cart summary
+  ["prompt", "user prompts"], ["narration", "assistant narration"],
+  ["result", "tool results"], ["kmcp", "kmcp reads"],
+  ["injection", "skill injections"], ["thinking", "thinking (locked)"]];
+
+function crKey(){ return "csd.cr." + curId; }
+function crSave(){
+  try { localStorage.setItem(crKey(),
+    JSON.stringify({actions: crActions, cart: crCart})); } catch(e){}
+}
+function crAct(id){
+  const r = crManifest?.byId?.[id];
+  if(!r) return null;
+  return r.locked ? "keep" : (crActions[id] || r.default);
+}
+/* the verb chip a stream row grows in CR mode ("" outside it) */
+function crc(id){
+  const a = crMode ? crAct(id) : null;
+  if(!a) return "";
+  const r = crManifest.byId[id];
+  const cyc = r.locked ? "thinking blocks always travel (signatures must survive)"
+    : r.kind === "kmcp" ? "tap: keep → stub → ref (ref stubs the body AND adds its app:path to the cart)"
+    : "tap: keep ↔ stub";
+  return `<span class="crc ${a}" title="${esc(cyc)}${r.dup ? " · sha1-duplicate of an earlier result" : ""}"
+    onclick="event.stopPropagation();crCycle('${esc(id)}')">${CR_GLYPH[a]}</span>`;
+}
+function crCls(id){
+  const a = crMode ? crAct(id) : null;
+  return (a === "stub" || a === "ref") ? " crstub" : "";
+}
+function crCycle(id){
+  const r = crManifest?.byId?.[id];
+  if(!r || r.locked) return;
+  const order = r.kind === "kmcp" ? ["keep", "stub", "ref"] : ["keep", "stub"];
+  crActions[id] = order[(order.indexOf(crAct(id)) + 1) % order.length];
+  crSave(); renderStream(curSession); renderCrCart();
+}
+function crGroupSet(kind, action){
+  for(const r of crManifest.rows)
+    if(r.kind === kind && !r.locked &&
+       (action !== "ref" || r.kind === "kmcp"))
+      crActions[r.id] = action;
+  crSave(); renderStream(curSession); renderCrCart();
+}
+function crKeepRecent(){
+  for(const r of crManifest.rows)
+    if(r.recent && !r.locked) crActions[r.id] = "keep";
+  crSave(); renderStream(curSession); renderCrCart();
+}
+function crRowRefs(){          // refs contributed by rows set to ◫ ref
+  const out = [];
+  for(const r of crManifest.rows)
+    if(crAct(r.id) === "ref") for(const x of (r.refs || []))
+      if(!out.includes(x)) out.push(x);
+  return out;
+}
+function crAllRefs(){
+  const out = crRowRefs();
+  for(const c of crCart) if(!out.includes(c.ref)) out.push(c.ref);
+  return out;
+}
+function crTotals(){
+  const m = crManifest;
+  let after = m.fixed_tokens;
+  for(const r of m.rows)
+    after += crAct(r.id) === "keep" ? r.est_tokens : CR_STUB_TOK;
+  for(const _ of crAllRefs())
+    after += CR_REF_TOK_CAP;         // preamble weight, capped per entry
+  return {before: m.totals.est_tokens, after: Math.round(after)};
+}
+function crPayload(){
+  const keep = [], stub = [];
+  for(const r of crManifest.rows)
+    (crAct(r.id) === "keep" ? keep : stub).push(r.id);
+  return {session_id: curId, keep, stub, refs: crAllRefs()};
+}
+
+async function toggleCR(){
+  if(crMode){ exitCR(); return; }
+  if(!curSession || curSession.subagent) return;
+  actmsg("loading CR manifest…");
+  let d = null;
+  try { d = await (await fetch("/api/cr/manifest?id="
+                               + encodeURIComponent(curId))).json(); }
+  catch(e){ d = {error: "manifest unreachable"}; }
+  if(!d || d.error){ actmsg("CR: " + (d?.error || "failed"), true); return; }
+  if(!d.version_ok){
+    actmsg("CR: transcript carries unvalidated record version(s): "
+           + d.unsupported_versions.join(", "), true);
+    return;
+  }
+  d.byId = {}; d.rows.forEach(r => d.byId[r.id] = r);
+  crManifest = d; crActions = {}; crCart = []; crHits = null;
+  try {          // restore this session's saved curation, if any
+    const saved = JSON.parse(localStorage.getItem(crKey()) || "null");
+    if(saved){
+      for(const [k, v] of Object.entries(saved.actions || {}))
+        if(d.byId[k]) crActions[k] = v;
+      crCart = (saved.cart || []).filter(c => c && c.ref);
+    }
+  } catch(e){}
+  crMode = true;
+  document.body.classList.add("crmode");
+  document.getElementById("bcr").classList.add("on");
+  actmsg("CR mode — pick what survives, then Preview / Fork");
+  renderStream(curSession); renderCrCart();
+  openRailSheet();   // ≤1100px the cart lives in the bottom sheet
+}
+function exitCR(){
+  crMode = false; crManifest = null; crHits = null;
+  document.body.classList.remove("crmode");
+  document.getElementById("bcr").classList.remove("on");
+  if(curSession) renderStream(curSession);
+  actmsg("");
+}
+
+function renderCrCart(){
+  if(!crMode || !crManifest) return;
+  const m = crManifest, t = crTotals();
+  const pct = t.before ? Math.round((1 - t.after / t.before) * 100) : 0;
+  const groups = CR_KINDS.filter(([k]) => m.groups[k]).map(([k, label]) => {
+    const g = m.groups[k];
+    const rows = m.rows.filter(r => r.kind === k);
+    const kept = rows.filter(r => crAct(r.id) === "keep").length;
+    const btn = (a, txt) => {
+      const all = rows.length > 0 && rows.every(r => r.locked || crAct(r.id) === a);
+      return `<span class="gb ${all ? "on" : ""}" onclick="crGroupSet('${k}','${a}')">${txt}</span>`;
+    };
+    const btns = k === "thinking" ? "" :
+      btn("keep", "keep") + btn("stub", "stub") + (k === "kmcp" ? btn("ref", "ref") : "");
+    return `<div class="cr-grp"><span class="gl">${esc(label)}</span>${btns}
+      <span class="n">${kept}/${g.count} · ≈${(g.est_tokens/1000).toFixed(1)}K</span></div>`;
+  }).join("");
+  const refs = crAllRefs();
+  const cartRows = refs.map(ref => {
+    const c = crCart.find(x => x.ref === ref);
+    const fromRow = !c;
+    const sz = c?.chars ? `≈${Math.round(Math.min(c.chars, 2500)/4/100)/10}K` : "≈?K";
+    return `<div class="cr-ref"><span class="t" title="${esc(ref)}">${esc(ref)}</span>
+      <span class="sz">${fromRow ? "from ◫ row" : sz}</span>
+      ${fromRow ? "" : `<span class="rm" title="remove from cart"
+        onclick="crDropRef('${esc(ref)}')">✕</span>`}</div>`;
+  }).join("") || `<div class="cr-hint">no refs yet — set a kmcp row to ◫ ref, or search below</div>`;
+  const hits = crHits === null ? "" :
+    crHits.error ? `<div class="cr-err">kmcp search failed — ${esc(crHits.error)}</div>` :
+    !crHits.results.length ? `<div class="cr-hint">no hits</div>` :
+    crHits.results.map(h => {
+      const ref = `${h.application}:${h.path}`;
+      const inCart = refs.includes(ref);
+      return `<div class="cr-hit"><span class="t" title="${esc(h.description || ref)}">${esc(h.title || ref)}</span>
+        <span class="sz">${esc(h.application || "")}</span>
+        <span class="add" onclick="crAddRef(${jsArg(ref)},${jsArg(h.title || "")},${h.chars || 0})">${inCart ? "✓" : "＋"}</span></div>`;
+    }).join("");
+  document.getElementById("crcart").innerHTML = `
+    <h3>CR — context reduction</h3>
+    <div class="cr-tot">BEFORE ≈${(t.before/1000).toFixed(0)}K →
+      <span class="aft">AFTER ≈${(t.after/1000).toFixed(0)}K</span>
+      <span class="pct">(−${pct}%)</span></div>
+    <div class="cr-floor">+ scaffolding floor ≈${(m.floor.low/1000)|0}–${(m.floor.high/1000)|0}K
+      (system prompt, tools, memory — not reducible from here) · chars/4, all numbers ≈</div>
+    ${groups}
+    <div class="cr-grp"><span class="gl">last ${m.recent_turns} turns</span>
+      <span class="gb" onclick="crKeepRecent()">keep all</span>
+      <span class="n">${m.turns} turns total</span></div>
+    <div class="cr-sec">kmcp cart (travels in the fork's preamble)</div>
+    ${cartRows}
+    <div class="cr-sec">search the base</div>
+    <input class="cr-in" id="crq" placeholder="hybrid_search query…" autocomplete="off"
+      value="${esc(document.getElementById("crq")?.value ?? "")}"
+      onkeydown="if(event.key==='Enter')crSearch()">
+    <input class="cr-in" id="crapp" placeholder="application filter (optional)" autocomplete="off"
+      value="${esc(document.getElementById("crapp")?.value ?? "")}"
+      onkeydown="if(event.key==='Enter')crSearch()">
+    <button class="act sm" onclick="crSearch()">🔍 search</button>
+    ${hits}
+    <div class="cr-acts">
+      <button class="act sm" onclick="crPreview()">Preview</button>
+      <button class="act sm primary" onclick="crPreview(true)">Fork ⑂</button>
+      <button class="act sm" onclick="crCompile()">Compile only</button>
+      <button class="act sm" onclick="exitCR()">✕ exit CR</button>
+    </div>
+    <div class="cr-hint">Stubs shrink bytes, not turn count — turns are gutted,
+      not removed. Cart size is awareness only (no budget gate). The fork is a
+      NEW session file; the original is never touched.</div>`;
+}
+function crAddRef(ref, title, chars){
+  if(!crCart.find(c => c.ref === ref)) crCart.push({ref, title, chars});
+  crSave(); renderCrCart();
+}
+function crDropRef(ref){
+  crCart = crCart.filter(c => c.ref !== ref);
+  crSave(); renderCrCart();
+}
+async function crSearch(){
+  const q = document.getElementById("crq")?.value?.trim();
+  if(!q || q.length < 2) return;
+  const app = document.getElementById("crapp")?.value?.trim();
+  crHits = {results: []};
+  try {
+    const [ok, d] = await post("/api/cr/search", {q, app: app || undefined});
+    crHits = ok ? d : {error: d.error || "search failed", results: []};
+  } catch(e){ crHits = {error: "unreachable", results: []}; }
+  renderCrCart();
+}
+
+/* two-phase gate: preview shows the compiled preamble + honest totals BEFORE
+   anything is written; the fork button inside it posts confirm:true. */
+function openCrDlg(html){
+  document.getElementById("cr-dlg-card").innerHTML = html;
+  document.getElementById("crdlg").classList.add("open");
+  ovOpen();
+}
+function closeCrDlg(fromPop){
+  const dlg = document.getElementById("crdlg");
+  if(!dlg.classList.contains("open")) return;
+  dlg.classList.remove("open");
+  if(fromPop !== true) ovDone();
+}
+async function crPreview(intentFork){
+  if(!crManifest) return;
+  actmsg("compiling preview…");
+  const [ok, d] = await post("/api/cr", {...crPayload(), confirm: false});
+  if(!ok || !d.ok){ actmsg("CR preview failed: " + (d.error || ""), true); return; }
+  actmsg("");
+  const hyd = d.refs.length
+    ? (d.hydrated ? `<div class="cr-hint">✓ ${d.refs.length} ref(s) hydrated in ONE get_entries batch</div>`
+                  : `<div class="cr-err">refs not hydrated — ${esc(d.hydrate_error || "kmcp unreachable")};
+                     plain pointers travel instead (the fork is not blocked)</div>`)
+    : "";
+  openCrDlg(`
+    <div class="rd-h"><span class="rd-t">CR preview — nothing written yet</span>
+      <span class="rd-x" onclick="closeCrDlg()">✕</span></div>
+    <div class="cr-tot">BEFORE ≈${(d.before_tokens/1000).toFixed(0)}K →
+      <span class="aft">AFTER ≈${(d.after_tokens/1000).toFixed(0)}K</span>
+      <span class="pct">(−${d.saved_pct}%)</span>
+      · ${d.stubbed} block(s) stubbed</div>
+    <div class="cr-floor">+ scaffolding floor ≈${(d.floor.low/1000)|0}–${(d.floor.high/1000)|0}K on resume · numbers are chars/4 ≈</div>
+    ${d.ignored?.length ? `<div class="cr-err">ignored ids: ${esc(d.ignored.join(", "))}</div>` : ""}
+    ${hyd}
+    ${d.preamble ? `<div class="cr-sec">preamble draft (ONE user record at the fork tip)</div>
+                    <pre>${esc(d.preamble)}</pre>`
+                 : `<div class="cr-hint">empty cart — no preamble record will be appended</div>`}
+    <div class="cr-acts">
+      <button class="act sm primary" onclick="crForkNow()">⑂ Fork now</button>
+      <button class="act sm" onclick="closeCrDlg()">Back to curation</button>
+    </div>`);
+  if(intentFork === true){ /* same gate — Fork ⑂ also reviews before writing */ }
+}
+async function crForkNow(){
+  if(!crManifest) return;
+  actmsg("forging CR fork…");
+  const [ok, d] = await post("/api/cr", {...crPayload(), confirm: true});
+  if(!ok || !d.ok){ actmsg("CR fork failed: " + (d.error || ""), true); return; }
+  closeCrDlg();
+  try { localStorage.removeItem(crKey()); } catch(e){}
+  exitCR();
+  toast(`⑂ CR fork → ${d.new_session.slice(0,8)} · ≈${(d.before_tokens/1000).toFixed(0)}K → ≈${(d.after_tokens/1000).toFixed(0)}K (−${d.saved_pct}%)`);
+  actmsg(`⑂ CR fork ${d.new_session.slice(0,8)} written — it's in the sidebar`);
+  loadNav();     // pull not push: the fork appears in the sidebar, no spawn
+}
+async function crCompile(){
+  const refs = crAllRefs();
+  actmsg("compiling…");
+  const [ok, d] = await post("/api/cr/compile", {refs});
+  if(!ok || !d.ok){ actmsg("compile failed: " + (d.error || ""), true); return; }
+  actmsg("");
+  openCrDlg(`
+    <div class="rd-h"><span class="rd-t">Compiled context document</span>
+      <span class="rd-x" onclick="closeCrDlg()">✕</span></div>
+    ${d.error ? `<div class="cr-err">refs not hydrated — ${esc(d.error)}; plain pointers below</div>` : ""}
+    <pre id="crdoc">${esc(d.document)}</pre>
+    <div class="cr-acts">
+      <button class="act sm" onclick="navigator.clipboard?.writeText(document.getElementById('crdoc').textContent).then(()=>toast('copied'))">⧉ copy</button>
+      <button class="act sm primary" onclick="crInsertDoc()">↳ insert into composer</button>
+      <button class="act sm" onclick="closeCrDlg()">close</button>
+    </div>`);
+}
+function crInsertDoc(){
+  const t = document.getElementById("cin");
+  const doc = document.getElementById("crdoc")?.textContent || "";
+  t.value = (t.value ? t.value.replace(/\s+$/, "") + "\n\n" : "") + doc;
+  growComposer(); closeCrDlg(); t.focus();
 }
 
 /* ---------- answer / fork ---------- */

@@ -157,7 +157,6 @@ def build_manifest(records, bash_kmcp=None) -> dict:
 
     # Pass 3: rows.
     rows, seen = [], {}
-    fixed_chars = 0            # non-row transcript overhead (tool_use inputs)
     for ri, r in enumerate(records):
         t = r.get("type")
         if t not in ("user", "assistant") or r.get("isSidechain"):
@@ -208,8 +207,6 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 elif bt == "thinking":
                     row(f"th:{uid}", "thinking",
                         len(b.get("thinking") or ""), locked=True)
-                elif bt == "tool_use":
-                    fixed_chars += content_chars(b.get("input") or {})
             if isinstance(content, str):
                 narr = len(content)
             if narr:
@@ -254,7 +251,13 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         g["count"] += 1
         g["chars"] += rw["chars"]
         g["est_tokens"] += est_tokens(rw["chars"])
-    total = sum(rw["chars"] for rw in rows) + fixed_chars
+    # fixed = everything in the resumed context surface that no row covers:
+    # tool_use inputs, thinking signatures, block/JSON overhead. Derived from
+    # the SAME measure the preview/fork report (context_surface), so the
+    # manifest's BEFORE and the preview's BEFORE cannot disagree.
+    surface = context_surface(records)
+    fixed_chars = max(0, surface - sum(rw["chars"] for rw in rows))
+    total = surface
 
     return {
         "version_ok": not bad,

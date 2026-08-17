@@ -198,6 +198,13 @@ when two runs share a project dir, and blind between spawn and first write.
   the reader, and the chat header — one-press ✓ accept writes through
   `/api/title`; ✕ dismiss is remembered by value (`tp_dismissed` in meta.json).
   A manual title is never auto-overwritten.
+  The reader's foot carries **close-out actions** so a session can be triaged
+  without opening the chat: plain **Summarize** (the same off-session dispatch,
+  `/api/summarize` with `archive:false` — the session stays in the sidebar),
+  **Sum + archive** (the historical coupled action), and **Archive/Unarchive**
+  (index-entry flip only). Confirm-free; post-click state lands inline
+  (`summary dispatched ✓` / `archived ✓`), and a summarize already running for
+  the session disables both summarize buttons with the reason in the title.
 
 ### Side-session permission envelope (`spawn_claude` as resolver/translator)
 

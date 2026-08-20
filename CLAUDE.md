@@ -28,7 +28,9 @@ csd ingest --rebuild    # DROP SCHEMA + rebuild from scratch
 csd ingest --force      # Re-sync all files regardless of mtime
 csd stats               # Table row counts + db size
 csd recent [N]          # Most recent sessions
-csd query "SQL"         # Ad-hoc SQL (--csv for CSV)
+csd query "SQL"         # Ad-hoc SQL (--csv for CSV). SQL goes through psycopg
+                        #   execute(): literal % (LIKE '%x%') breaks — use
+                        #   starts_with()/strpos() or escape as %%
 csd views               # List analytic views
 csd dsn                 # Print connection target (password redacted)
 csd open                # Interactive shell (pgcli/psql)
@@ -115,7 +117,12 @@ Three commands, one seam — **the state dir**. Nothing serves what it mines.
 
 - `csd angles` — the operator's synchronous pull for one turn.
 - `csd angles-watch` (`angles_watch.py`) — the same miner, headless and
-  ambient. Watches every live transcript; mines a session's latest turn once
+  ambient. The console now hosts this watcher **in-process** by default
+  (ambient miner: settle-detected active sessions get angles mined, then
+  tldr.ensure + timeline.ensure chained; archived / run-in-flight sessions
+  vetoed; `--no-ambient` / `CSD_CONSOLE_AMBIENT=0` to disable) — run the
+  standalone command only when no console is up, and never both against the
+  same Ollama. Watches every live transcript; mines a session's latest turn once
   its JSONL **settles** (`(mtime_ns, size)` signature unchanged and quiet for
   `DEBOUNCE_S`), so a turn is never mined mid-write. A **single worker** drains
   the job queue, so N live sessions cannot stampede the local Ollama. It writes

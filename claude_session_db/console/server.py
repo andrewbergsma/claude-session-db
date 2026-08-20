@@ -4070,8 +4070,61 @@ class Handler(SimpleHTTPRequestHandler):
         return self._json({"error": "unknown endpoint"}, 404)
 
 
+# ----------------------------------------------------------------------------
+# ambient miner — angles/tldr/timeline kept warm for ACTIVE sessions
+#
+# The AngleWatcher (angles_watch.py) runs in-process: settle-detection means a
+# session is touched only when its transcript changed and went quiet (~8s), so
+# idle sessions cost one stat per scan and nothing else; the single worker
+# means N live sessions cannot stampede Ollama. Doctrine intact — this warms
+# the caches the UI already serves off disk (pull stays pull, Generate/⟳ stay
+# the only forced runs). Disable with CSD_CONSOLE_AMBIENT=0 or --no-ambient.
+# ----------------------------------------------------------------------------
+AMBIENT = None                      # the live AngleWatcher, for status surfacing
+
+
+def _ambient_skip(sid: str) -> bool:
+    """Veto ambient mining for a session: archived, or the console has a run
+    in flight for it (settle-detect covers most of that window; this closes
+    the rest). Child keys ('<parent>:<agent_id>') inherit the parent verdict."""
+    main_sid = sid.split(":", 1)[0]
+    if main_sid in _read_archive():
+        return True
+    return bool(_live_procs(main_sid))
+
+
+def _ambient_after_mine(sid: str) -> None:
+    """Post-mine chain: tldr + timeline via their ensure() seams (built for
+    exactly this runner). Both enqueue on their own single-worker lanes and
+    return immediately; fresh is a no-op and error stores are never retried,
+    so this can't loop on a failing session. Main sessions only — the digest
+    chips live on main rows, and a child transcript has no tldr/timeline."""
+    if ":" in sid:
+        return
+    p = find_session(sid)
+    if not p:
+        return
+    tldr.ensure(sid, p)
+    session_timeline.ensure(sid, p)
+
+
+def _start_ambient() -> None:
+    global AMBIENT
+    from ..angles_watch import AngleWatcher, DEFAULT_LIVE_WINDOW_S
+    from .. import angles as _A
+    window = int(os.environ.get("CSD_CONSOLE_AMBIENT_WINDOW_S",
+                                str(DEFAULT_LIVE_WINDOW_S)))
+    AMBIENT = AngleWatcher(window_s=window, model=_A.DEFAULT_MODEL,
+                           base_url=_A.DEFAULT_OLLAMA_URL, kmcp_dsn=KMCP_DSN,
+                           no_probes=False, skip_fn=_ambient_skip,
+                           after_mine=_ambient_after_mine)
+    AMBIENT.start()
+    print(f"  ambient miner: on (window {window}s; CSD_CONSOLE_AMBIENT=0 "
+          "or --no-ambient to disable)", flush=True)
+
+
 def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
-          csd_dsn=None):
+          csd_dsn=None, no_ambient=False):
     """Bind and serve. Non-loopback binds are authenticated unless no_auth."""
     global TOKEN, KMCP_DSN, CSD_DSN
 
@@ -4083,6 +4136,8 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     threading.Thread(target=_queue_dispatcher, daemon=True,
                      name="reply-queue").start()
     _resume_batches()               # restart-safe batch queue (batch.json)
+    if not no_ambient and os.environ.get("CSD_CONSOLE_AMBIENT", "1") != "0":
+        _start_ambient()            # angles/tldr/timeline warm for active sessions
 
     if _loopback(host) or no_auth:
         TOKEN = None

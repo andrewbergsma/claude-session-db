@@ -768,9 +768,13 @@ def angles_watch(ctx: click.Context, window: int, model: str, ollama_url: str,
 @click.option("--kmcp-dsn", default=None,
               help="Knowledge DB DSN for angle curation writes "
                    "(default: archive DSN with db=knowledge).")
+@click.option("--no-ambient", is_flag=True,
+              help="Do not run the in-process ambient miner (angles/tldr/"
+                   "timeline kept warm for active sessions; also "
+                   "CSD_CONSOLE_AMBIENT=0).")
 @click.pass_context
 def console(ctx: click.Context, host: str, port: int, token: str | None,
-            no_auth: bool, kmcp_dsn: str | None) -> None:
+            no_auth: bool, kmcp_dsn: str | None, no_ambient: bool) -> None:
     """Reply-capable session console: chat + kmcp reads + angle rail.
 
     Renders each session's transcript as a chronological event stream with the
@@ -799,7 +803,7 @@ def console(ctx: click.Context, host: str, port: int, token: str | None,
     except Exception:
         resolved_kmcp = None
     serve(host=host, port=port, token=token, no_auth=no_auth,
-          kmcp_dsn=resolved_kmcp, csd_dsn=ctx.obj["dsn"])
+          kmcp_dsn=resolved_kmcp, csd_dsn=ctx.obj["dsn"], no_ambient=no_ambient)
 
 
 @main.command(name="dsn")

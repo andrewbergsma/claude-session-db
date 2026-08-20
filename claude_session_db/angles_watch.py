@@ -25,7 +25,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 from . import angles as A
 from . import tldr
@@ -39,13 +39,23 @@ class AngleWatcher(threading.Thread):
     """Polls live transcripts; queues one mining job per settled change."""
 
     def __init__(self, window_s: int, model: str, base_url: str,
-                 kmcp_dsn: Optional[str], no_probes: bool):
+                 kmcp_dsn: Optional[str], no_probes: bool,
+                 skip_fn: Optional[Callable[[str], bool]] = None,
+                 after_mine: Optional[Callable[[str], None]] = None):
+        """skip_fn(sid) -> True suppresses a session at SCAN time (a host can
+        exclude archived sessions or ones it has a run in flight for).
+        after_mine(sid) runs after a successful mine IN PLACE OF the built-in
+        tldr refresh — the host owns the whole post-mine step (e.g. the console
+        chains tldr.ensure + timeline.ensure). Both are best-effort: an
+        exception in either never kills the watcher."""
         super().__init__(daemon=True, name="angle-watcher")
         self.window_s = window_s
         self.model = model
         self.base_url = base_url
         self.kmcp_dsn = kmcp_dsn
         self.no_probes = no_probes
+        self.skip_fn = skip_fn
+        self.after_mine = after_mine
         self.mined_sig: dict[str, tuple[int, int]] = {}
         self.status: dict[str, str] = {}   # sid -> "mining" | "ok" | error text
         self.jobs: "queue.Queue[tuple[str, tuple[int, int]]]" = queue.Queue()
@@ -85,6 +95,12 @@ class AngleWatcher(threading.Thread):
             sig = (st.st_mtime_ns, st.st_size)
             if self.mined_sig.get(sid) == sig or sid in self.queued:
                 continue
+            if self.skip_fn is not None:
+                try:
+                    if self.skip_fn(sid):
+                        continue
+                except Exception:  # noqa: BLE001 — host veto is best-effort
+                    pass
             self.queued.add(sid)
             self.jobs.put((sid, sig))
 
@@ -101,8 +117,14 @@ class AngleWatcher(threading.Thread):
                 self.status[sid] = "ok"
                 # Same settle moment = a full turn just landed: refresh the
                 # session tldr too (async on tldr's own worker; cache-keyed
-                # by turn, so an unchanged turn is a no-op).
-                if not self.no_probes:
+                # by turn, so an unchanged turn is a no-op). A host-supplied
+                # after_mine REPLACES this step and owns the whole chain.
+                if self.after_mine is not None:
+                    try:
+                        self.after_mine(sid)
+                    except Exception:  # noqa: BLE001 — best-effort
+                        pass
+                elif not self.no_probes:
                     try:
                         tldr.request(sid, A.find_session_jsonl("", sid))
                     except Exception:  # noqa: BLE001 — tldr is best-effort

@@ -47,7 +47,11 @@ DEFAULT_MODEL = os.environ.get(
     "CSD_TIMELINE_MODEL", os.environ.get("CSD_ANGLES_MODEL", "qwen2.5vl:7b"))
 DEFAULT_OLLAMA_URL = os.environ.get("CSD_OLLAMA_URL", "http://localhost:11434")
 GEN_TIMEOUT_S = int(os.environ.get("CSD_TIMELINE_TIMEOUT_S", "60"))
-NUM_CTX = int(os.environ.get("CSD_TIMELINE_NUM_CTX", "4096"))
+# 8192 to MATCH tldr/angles: Ollama reloads the model (~2s, measured 2026-08-17)
+# whenever consecutive calls disagree on num_ctx, and the three consumers
+# interleave constantly. Same-value = no reload; the smaller per-turn prompts
+# never needed the smaller window anyway.
+NUM_CTX = int(os.environ.get("CSD_TIMELINE_NUM_CTX", "8192"))
 MAX_TURNS = int(os.environ.get("CSD_TIMELINE_MAX_TURNS", "150"))
 SEG_CAP = 4000
 SUMMARY_CAP = 260

@@ -149,11 +149,14 @@ class ReconcileStats:
             f"  pending      {self.pending}" + (f"  (incl. {self.grown} grown past watermark)" if self.grown else ""),
         ]
         if self.duplicates:
-            cross = sum(1 for c in self.duplicates if c.apps > 1)
-            collide = sum(1 for c in self.duplicates if c.apps == 1)
+            passes = sum(1 for c in self.duplicates if c.resolved)
+            cross = sum(1 for c in self.duplicates if not c.resolved and c.apps > 1)
+            collide = sum(1 for c in self.duplicates
+                          if not c.resolved and c.apps == 1)
             lines.append(
                 f"session_id reuse: {len(self.duplicates)} ids claimed by >1 entry "
-                f"({cross} cross-app copies, {collide} in-app id collisions) — "
+                f"({passes} repeat passes — resolved to the latest entry, "
+                f"{cross} cross-app copies, {collide} in-app id collisions) — "
                 f"not duplicate documents; each entry has a unique path:"
             )
             for c in self.duplicates[:10]:
@@ -166,23 +169,30 @@ class ReconcileStats:
 class Collision:
     """A session_id claimed by >1 kmcp session entry. Investigation (2026-06-11)
     found these are NOT duplicate documents — every entry sits at a unique
-    (application, path). They split into two kinds:
+    (application, path). They split into three kinds:
+      - repeat passes: SAME app + SAME project_path — the delta-capture case.
+        Re-summarizing a session that grew writes a second entry for the same
+        thread; the id is not "reused", it is legitimately claimed twice. These
+        are RESOLVED (latest entry wins) instead of dropped.
       - cross_app: the same entry copied into another app (migration artifact).
-      - distinct paths within one app: genuinely different sessions/topics that
-        were stamped with the same (wrong/placeholder) session_id at authoring.
+      - distinct project paths: genuinely different sessions/topics that were
+        stamped with the same (wrong/placeholder) session_id at authoring.
     `entries` is therefore almost never a deletable-dup count."""
     session_id: str
     entries: int
     paths: int
     apps: int
+    resolved: bool = False   # same app + project => canonical = latest entry
 
     @property
     def kind(self) -> str:
+        if self.resolved:
+            return "repeat passes"
         if self.apps > 1 and self.paths <= 1:
             return "cross-app copy"
         if self.apps > 1:
             return "cross-app + collision"
-        return "id collision"  # distinct paths, one app
+        return "id collision"  # distinct project paths, one app
 
 
 def fetch_kmcp_session_map(
@@ -197,49 +207,60 @@ def fetch_kmcp_session_map(
     3. natkey -> (application, path) — (normalized project_path, start-minute) for
        entries where that key is UNIQUE corpus-wide; the fallback index for the
        28% of entries that carry no/wrong session_id. Ambiguous keys are dropped.
+
+    Collision discrimination (2026-08-20, repeatable-summarization): a blanket
+    "drop every id claimed twice" also drops the DELTA-CAPTURE case, which is not
+    id reuse at all — a second pass over the SAME session writes a second entry in
+    the same application for the same project_path. Live corpus: 182 colliding
+    ids, 97 of them same-app+same-project. Those keep the id and resolve to the
+    LATEST entry (the newest pass is the canonical summary); only genuinely
+    cross-project / cross-app claims still fall through to the natural-key
+    disambiguator.
     """
     sql = """
-        SELECT application, path,
+        SELECT application, path, created_at,
                content->>'session_id'   AS session_id,
                content->>'project_path' AS project_path,
                content->>'started_at'   AS started_at
         FROM entries
         WHERE entity_type = 'session'
-        ORDER BY created_at
+        ORDER BY created_at NULLS FIRST, application, path
     """
     seen: dict[str, tuple[str, str]] = {}
-    rows: dict[str, int] = {}
-    paths: dict[str, set[str]] = {}
-    apps: dict[str, set[str]] = {}
+    per_sid: dict[str, list[dict[str, Any]]] = {}
     natkey_all: dict[NatKey, set[tuple[str, str]]] = {}
     with psycopg.connect(kmcp_dsn, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
             for r in cur.fetchall():
-                where = (r["application"], r["path"])
                 sid = r["session_id"]
                 if sid:
-                    sid = sid.lower()
-                    seen.setdefault(sid, where)  # first (oldest) wins
-                    rows[sid] = rows.get(sid, 0) + 1
-                    paths.setdefault(sid, set()).add(r["path"])
-                    apps.setdefault(sid, set()).add(r["application"])
+                    per_sid.setdefault(sid.lower(), []).append(r)
                 nk = _natkey(_norm_path(r["project_path"]), _minute_iso(r["started_at"]))
                 if nk:
-                    natkey_all.setdefault(nk, set()).add(where)
-    collisions = [
-        Collision(sid, rows[sid], len(paths[sid]), len(apps[sid]))
-        for sid in rows if rows[sid] > 1
-    ]
-    # A colliding session_id (>1 kmcp entry) is non-unique, so the bare-id map's
-    # first-wins pick is arbitrary — for cross-stamped ids it can be a foreign
-    # entry, yielding a false "summarized". Drop those ids from the primary map so
-    # the affected archive sessions fall through to the natural-key disambiguator,
-    # which only matches when unique on both sides. See
-    # claudecode:lesson/session-id-unreliable-as-kmcp-session-key.
-    for sid in rows:
-        if rows[sid] > 1:
-            seen.pop(sid, None)
+                    natkey_all.setdefault(nk, set()).add((r["application"], r["path"]))
+
+    collisions: list[Collision] = []
+    for sid, ents in per_sid.items():
+        if len(ents) == 1:
+            seen[sid] = (ents[0]["application"], ents[0]["path"])
+            continue
+        projects = {_norm_path(e["project_path"]) for e in ents}
+        apps = {e["application"] for e in ents}
+        paths = {e["path"] for e in ents}
+        # Same app AND same (non-null) project => repeat passes over one session.
+        resolved = len(apps) == 1 and len(projects) == 1 and None not in projects
+        if resolved:
+            # The query is ordered by created_at, so the last row is the newest
+            # pass — the canonical entry for the session as it stands today.
+            seen[sid] = (ents[-1]["application"], ents[-1]["path"])
+        # Otherwise the bare-id pick would be arbitrary — for cross-stamped ids it
+        # can be a FOREIGN entry, yielding a false "summarized". Leave the id out of
+        # the primary map so those archive sessions fall through to the natural-key
+        # disambiguator, which only matches when unique on both sides. See
+        # claudecode:lesson/session-id-unreliable-as-kmcp-session-key.
+        collisions.append(Collision(sid, len(ents), len(paths), len(apps),
+                                    resolved=resolved))
     # Keep only natural keys that resolve to exactly one kmcp entry.
     natkey_unique = {nk: next(iter(v)) for nk, v in natkey_all.items() if len(v) == 1}
     return seen, sorted(collisions, key=lambda c: -c.entries), natkey_unique
@@ -368,6 +389,17 @@ def reconcile(archive_conn: psycopg.Connection, kmcp_dsn: str,
         else:
             verdict.update(state="pending")
             stats.pending += 1
+
+        # NEVER null an existing watermark. A session that was summarized once and
+        # whose kmcp entry no longer resolves (moved, renamed, id restamped) still
+        # HAS a captured prefix — dropping the watermark would make the next pass
+        # re-summarize the whole transcript and claim it as new work. Carry the
+        # prior watermark forward; kmcp_application/path stay NULL because the
+        # ledger no longer backs them (truth from the ledger, not the narrator).
+        if not kmcp_hit and r["prev_watermark"] is not None:
+            verdict["message_count_at_summary"] = r["prev_watermark"]
+            verdict["leaf_uuid_at_summary"] = r["prev_leaf"]
+
         upserts.append(verdict)
 
     emit(f"writing summary_state ({len(upserts)} rows)…")
@@ -394,7 +426,18 @@ def mark_summarized(archive_conn: psycopg.Connection, session_id: str,
                 (session_id, state, reason, kmcp_application, kmcp_path,
                  message_count_at_summary, leaf_uuid_at_summary, updated_at)
             SELECT s.session_id, 'summarized', NULL, %s, %s,
-                   s.message_count, s.last_prompt_leaf_uuid, now()
+                   s.message_count,
+                   -- The TRUE message tail, not s.last_prompt_leaf_uuid: that
+                   -- column is the last USER PROMPT leaf, which resolves for only
+                   -- ~18% of sessions (261/1432) and points behind everything the
+                   -- session did after its last prompt. The delta window opens at
+                   -- the watermark, so a stale leaf re-renders work already
+                   -- summarized. See session_mgmt._watermark_for (leaf -> count
+                   -- -> kmcp resolution order).
+                   (SELECT m.uuid FROM messages m
+                    WHERE m.session_id = s.session_id AND m.ts IS NOT NULL
+                    ORDER BY m.ts DESC LIMIT 1),
+                   now()
             FROM sessions s WHERE s.session_id = %s
             ON CONFLICT (session_id) DO UPDATE SET
                 state = 'summarized', reason = NULL,

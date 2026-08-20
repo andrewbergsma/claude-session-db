@@ -424,10 +424,17 @@ def _summarize_guard() -> SweepGuard:
 @click.option("--kmcp-dsn", default=None,
               help="Knowledge DB DSN (default: archive DSN with db=knowledge).")
 @click.option("--dry-run", is_flag=True, help="List what would be summarized; no LLM, no writes.")
+@click.option("--delta/--no-delta", default=True,
+              help="Summarize an already-captured session's post-watermark TAIL only "
+                   "(default). --no-delta forces full-transcript scope.")
+@click.option("--min-delta-records", type=int, default=ph4.MIN_DELTA_RECORDS,
+              help=f"Minimum post-watermark transcript records before a re-capture "
+                   f"is worth a pass (default {ph4.MIN_DELTA_RECORDS}; env "
+                   f"CSD_SUMMARIZE_MIN_DELTA_RECORDS).")
 @click.pass_context
 def summarize(ctx: click.Context, limit: int, min_idle: int, model: str,
               ollama_url: str, only_session: str | None, kmcp_dsn: str | None,
-              dry_run: bool) -> None:
+              dry_run: bool, delta: bool, min_delta_records: int) -> None:
     """Phase-4 roll-up: digest → local LLM → kmcp session entry (unattended).
 
     Drains the reconcile gate's PENDING queue through the canonical off-session
@@ -435,6 +442,12 @@ def summarize(ctx: click.Context, limit: int, min_idle: int, model: str,
     mark-summarized watermark). Never resumes a session, never replays a raw
     transcript. Run `csd reconcile-summaries` first for a fresh queue; a small
     default limit lets the launchd timer drain the backlog gradually.
+
+    REPEATABLE: a session that grew past its watermark is re-captured as a
+    CONTINUATION pass — only the tail is digested, and the new entry is dated to
+    the window's end, tagged `delta-capture`, and linked back to the pass it
+    continues. A pass is only spent when the tail is substantive (classified
+    `real` and at least --min-delta-records records).
     """
     dsn = ctx.obj["dsn"]
     guard = _summarize_guard()
@@ -450,7 +463,8 @@ def summarize(ctx: click.Context, limit: int, min_idle: int, model: str,
             stats = ph4.run_summarize(
                 a.connect(), dsn, limit=limit, min_idle_s=min_idle, model=model,
                 ollama_url=ollama_url, only_session=only_session,
-                dry_run=dry_run, kmcp_dsn=kmcp_dsn, log=click.echo)
+                dry_run=dry_run, kmcp_dsn=kmcp_dsn, delta=delta,
+                min_delta_records=min_delta_records, log=click.echo)
     except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
         guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
         click.echo(f"summarize: FAILED — {type(exc).__name__}: {exc}", err=True)
@@ -506,19 +520,33 @@ def summarize_health(ctx: click.Context, stale_intervals: int) -> None:
 @click.argument("session_id")
 @click.option("--app", "application", required=True, help="kmcp application of the summary entry.")
 @click.option("--path", required=True, help="kmcp path of the summary entry.")
+@click.option("--pass", "pass_no", type=int, default=None,
+              help="Also record this as pass N in the summary_passes ledger "
+                   "(use for a manually-written continuation entry).")
 @click.pass_context
-def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str, path: str) -> None:
+def mark_summarized_cmd(ctx: click.Context, session_id: str, application: str,
+                        path: str, pass_no: int | None) -> None:
     """Stamp a session summarized at its current message-count watermark.
 
     Call after a VERIFIED kmcp write (the entry row exists). kmcp session
     entries store neither message_count nor leaf uuid, so csd stamps the
-    re-eval watermark itself at summarize time.
+    re-eval watermark itself at summarize time. --pass N additionally records
+    the pass in the summary_passes ledger, so a hand-written continuation counts
+    against the pass ceiling and shows up beside the automatic ones.
     """
     with SessionArchive(ctx.obj["dsn"]) as a:
         a.initialize()
-        row = mark_summarized(a.connect(), session_id, application, path)
+        conn = a.connect()
+        row = mark_summarized(conn, session_id, application, path)
+        if pass_no is not None:
+            ph4.ensure_passes_table(conn)
+            ph4.record_pass(conn, session_id, pass_no, application, path,
+                            row["message_count_at_summary"],
+                            row["leaf_uuid_at_summary"], status="written",
+                            detail="manual mark-summarized")
     click.echo(f"summarized  {row['session_id']}  watermark={row['message_count_at_summary']}msg  "
-               f"-> {row['kmcp_application']}:{row['kmcp_path']}")
+               + (f"pass={pass_no}  " if pass_no is not None else "")
+               + f"-> {row['kmcp_application']}:{row['kmcp_path']}")
 
 
 def _fmt_idle(s: int | None) -> str:

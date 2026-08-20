@@ -31,6 +31,7 @@ the reconcile gate treats it identically to an in-session /session-summary.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,15 +42,19 @@ import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 import psycopg
 from psycopg.rows import dict_row
 
+from .postgres import SUMMARY_PASSES_DDL
 from .reconcile import mark_summarized, resolve_kmcp_dsn
+from .session_digest import load as load_jsonl
 from .session_digest import render as render_digest
+from .session_mgmt import (WATERMARK_SLACK_S, DeltaReport, _parse_ts,
+                           _watermark_for, classify_delta, resolve_transcript)
 
 # --- Tunables (env-overridable; flags override env) --------------------------
 
@@ -77,7 +82,20 @@ MAX_ATTEMPTS = int(os.environ.get("CSD_SUMMARIZE_MAX_ATTEMPTS", "3"))
 # Fallback kmcp application when the session cwd maps to nothing.
 DEFAULT_APP = os.environ.get("CSD_SUMMARIZE_DEFAULT_APP", "claudecode")
 
+# --- Repeatable (delta) capture ------------------------------------------------
+# A session that grows past its watermark flips back to pending/grown. The second
+# pass summarizes ONLY the tail — never the whole transcript again. Two bounds:
+#   MIN_DELTA_RECORDS — a floor on the tail's size, counted from the TRANSCRIPT
+#     (classify_delta), NEVER from sessions.message_count: on a main session that
+#     column is a ROLL-UP that includes subagent children, so a busy sidechain
+#     alone would clear any count-based floor with zero new main-chain work.
+#   MAX_PASSES — a session cannot spawn unbounded entries; past this it stays
+#     pending and visible rather than fanning out further.
+MIN_DELTA_RECORDS = int(os.environ.get("CSD_SUMMARIZE_MIN_DELTA_RECORDS", "20"))
+MAX_PASSES = int(os.environ.get("CSD_SUMMARIZE_MAX_PASSES", "6"))
+
 AUTO_TAG = "auto-summary"
+DELTA_TAG = "delta-capture"
 
 # cwd-basename → kmcp application, for names that don't match an app even
 # after dash→underscore normalization. Deterministic on purpose: the model
@@ -129,16 +147,118 @@ def _clear_attempts(conn: psycopg.Connection, session_id: str) -> None:
     conn.commit()
 
 
+# --- Pass ledger + single-dispatch claim ---------------------------------------
+
+def ensure_passes_table(conn: psycopg.Connection) -> None:
+    """Self-heal summary_passes without paying initialize()'s full-schema DDL
+    (same reasoning as ensure_attempts_table / ensure_gate_objects)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT to_regclass('public.summary_passes')")
+        if cur.fetchone()[0] is None:
+            cur.execute(SUMMARY_PASSES_DDL)
+    conn.commit()
+
+
+def _lock_key(session_id: str) -> int:
+    """Stable 63-bit advisory-lock key for a session id (hashed, not sliced —
+    two sessions sharing a short-id prefix must not share a lock)."""
+    digest = hashlib.blake2b(session_id.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big") >> 1
+
+
+def claim_session(conn: psycopg.Connection, session_id: str) -> bool:
+    """Session-scoped advisory lock: True iff THIS connection may summarize it.
+
+    The console can dispatch a summary for the same session the launchd timer is
+    mid-way through; both would digest the same tail and write two entries. The
+    lock is held for the whole pass (not per-transaction — the pipeline commits
+    between phases) and released in run_summarize's finally.
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_lock_key(session_id),))
+        got = bool(cur.fetchone()[0])
+    conn.commit()
+    return got
+
+
+def release_session(conn: psycopg.Connection, session_id: str) -> None:
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_advisory_unlock(%s)", (_lock_key(session_id),))
+        conn.commit()
+    except psycopg.Error:
+        pass  # the lock dies with the connection anyway
+
+
+def open_pass(conn: psycopg.Connection, session_id: str, pass_no: int) -> None:
+    """Mark a pass in flight BEFORE the LLM runs (visible, restartable)."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO summary_passes (session_id, pass, status)
+            VALUES (%s, %s, 'in_flight')
+            ON CONFLICT (session_id, pass) DO UPDATE SET
+                status = 'in_flight', updated_at = now()
+            """,
+            (session_id, pass_no),
+        )
+    conn.commit()
+
+
+def record_pass(conn: psycopg.Connection, session_id: str, pass_no: int,
+                application: Optional[str] = None, path: Optional[str] = None,
+                message_count_at_summary: Optional[int] = None,
+                leaf_uuid_at_summary: Optional[str] = None,
+                status: str = "written", detail: Optional[str] = None) -> None:
+    """Settle a pass in the ledger (idempotent by (session_id, pass))."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO summary_passes
+                (session_id, pass, application, path, message_count_at_summary,
+                 leaf_uuid_at_summary, status, detail, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, now())
+            ON CONFLICT (session_id, pass) DO UPDATE SET
+                application = EXCLUDED.application,
+                path = EXCLUDED.path,
+                message_count_at_summary = EXCLUDED.message_count_at_summary,
+                leaf_uuid_at_summary = EXCLUDED.leaf_uuid_at_summary,
+                status = EXCLUDED.status,
+                detail = EXCLUDED.detail,
+                updated_at = now()
+            """,
+            (session_id, pass_no, application, path, message_count_at_summary,
+             leaf_uuid_at_summary, status, (detail or "")[:2000] or None),
+        )
+    conn.commit()
+
+
 # --- Work queue ---------------------------------------------------------------
 
+# The prior-capture columns are joined HERE rather than widened into
+# v_unsummarized: the view is the queue's public contract (console + `csd
+# unsummarized` read it), and a pending session's watermark is a detail of how
+# THIS pipeline renders its digest, not of what is pending.
 _PICK_SQL = """
     SELECT u.session_id, u.project_name, u.project_path, u.title, u.first_prompt,
            u.created_at, u.modified_at, u.message_count, u.tool_use_count,
            u.user_prompt_count, u.error_count, u.total_output_tokens, u.reason,
-           s.file_path, s.cwd, s.git_branch, s.duration_seconds, s.total_input_tokens
+           s.file_path, s.cwd, s.git_branch, s.duration_seconds, s.total_input_tokens,
+           -- prior capture (carried by reconcile even when the kmcp entry no
+           -- longer resolves): where the last pass stopped, and where it landed.
+           ss.message_count_at_summary AS prev_wm,
+           ss.leaf_uuid_at_summary     AS prev_leaf,
+           ss.kmcp_application         AS prev_app,
+           ss.kmcp_path                AS prev_path,
+           coalesce(sp.max_pass, 0)    AS prev_pass
     FROM v_unsummarized u
     JOIN sessions s USING (session_id)
+    LEFT JOIN summary_state ss USING (session_id)
     LEFT JOIN summarize_attempts a USING (session_id)
+    LEFT JOIN LATERAL (
+        SELECT max(pass) AS max_pass FROM summary_passes sp2
+        WHERE sp2.session_id = u.session_id AND sp2.status = 'written'
+    ) sp ON true
     WHERE u.modified_at < now() - make_interval(secs => %(min_idle)s)
       AND (a.session_id IS NULL
            OR (a.attempts < %(max_attempts)s
@@ -151,7 +271,12 @@ _PICK_SQL = """
 
 def pick_pending(conn: psycopg.Connection, limit: int, min_idle_s: int,
                  only_session: Optional[str] = None) -> list[dict[str, Any]]:
-    """Newest-first PENDING sessions that are quiesced and not in failure backoff."""
+    """Newest-first PENDING sessions that are quiesced and not in failure backoff.
+
+    Each row carries its PRIOR capture (prev_wm / prev_leaf / prev_app /
+    prev_path / prev_pass) so the delta gate can decide window vs full scope
+    without a second round-trip.
+    """
     with conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_PICK_SQL, {
             "min_idle": min_idle_s,
@@ -163,6 +288,105 @@ def pick_pending(conn: psycopg.Connection, limit: int, min_idle_s: int,
         rows = cur.fetchall()
     conn.commit()  # release the read txn — never idle-in-transaction
     return rows
+
+
+# --- Delta gate ------------------------------------------------------------------
+
+
+@dataclass
+class DeltaGate:
+    """Verdict on HOW (and whether) to summarize one pending session."""
+    mode: str = "full"                       # full | delta
+    pass_no: int = 1
+    watermark: Optional[datetime] = None
+    source: str = "none"                     # leaf | count | kmcp | none
+    report: Optional[DeltaReport] = None
+    end_ts: Optional[datetime] = None        # last record IN the delta window
+    prev_ref: Optional[str] = None           # "app:path" of the prior pass
+    skip: Optional[str] = None               # set => do not summarize this run
+
+    @property
+    def is_delta(self) -> bool:
+        return self.mode == "delta" and self.watermark is not None
+
+
+def _last_ts_after(recs: list[dict], watermark: datetime) -> Optional[datetime]:
+    """Timestamp of the last main-chain record inside the delta window."""
+    cutoff = watermark + timedelta(seconds=WATERMARK_SLACK_S)
+    out: Optional[datetime] = None
+    for rec in recs:
+        if rec.get("isSidechain"):
+            continue
+        ts = _parse_ts(rec.get("timestamp"))
+        if ts is not None and ts > cutoff:
+            out = ts
+    return out
+
+
+def _delta_gate(row: dict[str, Any], dsn: str, kmcp_dsn: Optional[str],
+                min_delta_records: int = MIN_DELTA_RECORDS,
+                enabled: bool = True) -> DeltaGate:
+    """Decide the scope of this session's next pass.
+
+    NEVER claims delta without a resolvable watermark: with no watermark the
+    only honest scope is the FULL transcript, written as a standalone summary
+    rather than a continuation. That is the failure mode this gate exists to
+    prevent — rendering everything while telling the model (and the entry) it
+    is reading only new work.
+
+    For rows the reconcile gate flipped back as `grown`, delta is additionally
+    gated on the tail being substantive: classify_delta must call it `real`, and
+    it must carry at least `min_delta_records` main-chain records. Both come
+    from the TRANSCRIPT, never from sessions.message_count (a subagent roll-up).
+    """
+    prev_pass = int(row.get("prev_pass") or 0)
+    prev_app, prev_path = row.get("prev_app"), row.get("prev_path")
+    prev_ref = f"{prev_app}:{prev_path}" if prev_app and prev_path else None
+    captured_before = bool(prev_pass or prev_ref or row.get("prev_wm") is not None
+                           or row.get("reason") == "grown")
+
+    if not enabled or not captured_before:
+        return DeltaGate(mode="full", pass_no=prev_pass + 1, prev_ref=prev_ref)
+
+    if prev_pass >= MAX_PASSES:
+        return DeltaGate(mode="delta", pass_no=prev_pass + 1, prev_ref=prev_ref,
+                         skip=f"pass ceiling reached ({prev_pass}/{MAX_PASSES})")
+
+    watermark, source = (None, "none")
+    try:
+        watermark, source = _watermark_for(row["session_id"], dsn, kmcp_dsn)
+    except Exception:  # noqa: BLE001 — degrade to full scope, never crash the run
+        watermark, source = None, "none"
+    if watermark is None:
+        # No watermark => no honest window. Full transcript, written as a
+        # STANDALONE summary (no cont. title, no delta tag, no back-link) —
+        # never full scope under a continuation label. The ledger pass number
+        # still advances so a re-capture cannot overwrite an earlier pass row.
+        return DeltaGate(mode="full", pass_no=prev_pass + 1, prev_ref=prev_ref,
+                         source="none")
+
+    path = resolve_transcript(row["session_id"], row.get("file_path"))
+    if path is None:
+        return DeltaGate(mode="delta", pass_no=prev_pass + 1, watermark=watermark,
+                         source=source, prev_ref=prev_ref,
+                         skip="transcript not found on disk")
+    recs = load_jsonl(path)
+    report = classify_delta(recs, watermark)
+    report.watermark_source = source
+    gate = DeltaGate(mode="delta", pass_no=prev_pass + 1, watermark=watermark,
+                     source=source, report=report, prev_ref=prev_ref,
+                     end_ts=_last_ts_after(recs, watermark))
+
+    if row.get("reason") == "grown":
+        if report.klass != "real":
+            gate.skip = (f"delta not substantive (class={report.klass}, "
+                         f"{report.records} records)")
+        elif report.records < min_delta_records:
+            gate.skip = (f"delta below floor ({report.records} < "
+                         f"{min_delta_records} records)")
+    elif report.records == 0:
+        gate.skip = "nothing after the watermark"
+    return gate
 
 
 # --- LLM roll-up ---------------------------------------------------------------
@@ -190,6 +414,24 @@ DIGEST:
 END OF DIGEST. You are NOT a participant in that conversation — do not answer its \
 questions or continue its work. Return ONLY the JSON summary object described above, \
 nothing else.
+"""
+
+# Prepended (before _PROMPT) for a CONTINUATION pass. The digest it frames is the
+# post-watermark tail only, so the model must be told that explicitly — otherwise
+# it writes a whole-session summary out of a partial transcript, and the entry
+# reads as if the earlier work happened in this window.
+_DELTA_HEADER = """CONTINUATION SUMMARY. This session was already summarized once. \
+The digest below is ONLY the tail written AFTER that prior summary's watermark \
+({watermark}) — everything before it is already captured in another entry.
+
+Summarize ONLY the new work in this tail:
+- Do NOT restate, re-describe, or re-title the earlier part of the session.
+- If the tail continues earlier work, say what CHANGED or LANDED in it, not what \
+the work is.
+- A line like "⋯ conversation compacted here ⋯" is auto-compaction bookkeeping, \
+not new work — ignore it.
+- If the tail is thin, say so plainly; a short honest summary beats an invented one.
+
 """
 
 # Appended on retry after a non-JSON response. Dominant observed failure: a
@@ -393,13 +635,18 @@ class SummarizeStats:
     picked: int = 0
     written: list[str] = field(default_factory=list)   # "app:path"
     failed: list[str] = field(default_factory=list)    # "sid: error"
+    skipped: list[str] = field(default_factory=list)   # "sid: why" (gate/claim)
+    deltas: int = 0                                    # written passes >= 2
     dry_run: bool = False
 
     def summary(self) -> str:
         lines = [f"Phase-4 roll-up: {self.picked} picked, "
-                 f"{len(self.written)} written, {len(self.failed)} failed"
+                 f"{len(self.written)} written"
+                 + (f" ({self.deltas} delta)" if self.deltas else "")
+                 + f", {len(self.skipped)} skipped, {len(self.failed)} failed"
                  + (" [dry-run]" if self.dry_run else "")]
         lines += [f"  ✓ {w}" for w in self.written]
+        lines += [f"  – {s}" for s in self.skipped]
         lines += [f"  ✗ {f}" for f in self.failed]
         return "\n".join(lines)
 
@@ -414,19 +661,39 @@ def _iso(dt: Optional[datetime]) -> Optional[str]:
 
 def summarize_one(row: dict[str, Any], kmcp_dsn: str, model: str, ollama_url: str,
                   num_ctx: int, app_cache: dict[str, bool],
-                  log: Callable[[str], None]) -> tuple[str, str]:
+                  log: Callable[[str], None],
+                  gate: Optional[DeltaGate] = None) -> tuple[str, str]:
     """Digest → LLM → verified kmcp write for one session. Returns (app, path).
-    Raises on any failure; the caller records the attempt."""
+    Raises on any failure; the caller records the attempt.
+
+    With a delta `gate` the digest is windowed to the post-watermark tail and
+    the entry is written as a CONTINUATION: dated to the window's end, spanning
+    the window (not the session), linked back to the pass it continues, and
+    tagged `delta-capture`. Without one — or with a gate that could not resolve
+    a watermark — the scope is the full transcript and the entry is a plain
+    standalone summary.
+    """
     sid = row["session_id"]
     jsonl = Path(row["file_path"] or "")
     if not jsonl.is_file():
         raise FileNotFoundError(f"transcript missing: {jsonl}")
 
-    digest = render_digest(jsonl, result_head=250, full_inputs=True)
+    delta = bool(gate and gate.is_delta)
+    if delta:
+        note = (f"DELTA after summary watermark {_iso(gate.watermark)} "
+                f"(source: {gate.source}, pass {gate.pass_no})")
+        digest = render_digest(jsonl, result_head=250, full_inputs=True,
+                               since=gate.watermark, note=note)
+    else:
+        digest = render_digest(jsonl, result_head=250, full_inputs=True)
     digest = _elide_middle(digest, DIGEST_MAX_CHARS)
-    log(f"  digest: {jsonl.stat().st_size // 1024}KB jsonl -> {len(digest) // 1024}KB")
+    log(f"  digest: {jsonl.stat().st_size // 1024}KB jsonl -> {len(digest) // 1024}KB"
+        + (f"  [delta pass {gate.pass_no}, {gate.report.records if gate.report else '?'}"
+           f" records after watermark]" if delta else ""))
 
     prompt = _PROMPT.replace("{digest}", digest)
+    if delta:
+        prompt = _DELTA_HEADER.format(watermark=_iso(gate.watermark)) + prompt
     try:
         raw = call_ollama(prompt, model, ollama_url, num_ctx)
     except ValueError:
@@ -439,7 +706,12 @@ def summarize_one(row: dict[str, Any], kmcp_dsn: str, model: str, ollama_url: st
 
     application = infer_application(row.get("cwd") or row.get("project_path"),
                                     kmcp_dsn, app_cache)
-    date = (_iso(row["created_at"]) or "")[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # A continuation is dated to the END of the window it covers, not to the
+    # session's birth: a thread resumed weeks later would otherwise file its new
+    # work under the old date, beside (and indistinguishable from) pass 1.
+    anchor = ((gate.end_ts or row.get("modified_at")) if delta
+              else row.get("created_at"))
+    date = (_iso(anchor) or "")[:10] or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     base_slug = _slugify(out["topic_slug"] or out["title"])
     path = f"session/{date}/{base_slug}"
     for n in range(2, 10):
@@ -462,23 +734,32 @@ def summarize_one(row: dict[str, Any], kmcp_dsn: str, model: str, ollama_url: st
         # Invariant: verbatim ARCHIVE session id — never the summarizer's own.
         "session_id": sid,
         "project_path": row.get("cwd") or row.get("project_path"),
-        "started_at": _iso(row["created_at"]),
-        "ended_at": _iso(row["modified_at"]),
+        # The span is the SCOPE of this entry: for a continuation that is the
+        # delta window (watermark -> last record), never the session's own span.
+        "started_at": _iso(gate.watermark) if delta else _iso(row["created_at"]),
+        "ended_at": _iso(gate.end_ts or row["modified_at"]) if delta
+                    else _iso(row["modified_at"]),
         "tools_used": out["tools_used"],
         "errors_encountered": out["errors_encountered"],
         "follow_up": out["follow_up"],
     }
     if metrics:
         content["metrics"] = metrics
+    tags = [AUTO_TAG]
+    if delta:
+        tags.append(DELTA_TAG)
+        if gate.prev_ref:
+            content["linked_entries"] = [gate.prev_ref]
 
     created = kmcp_call("create_entry", {
         "application": application,
         "path": path,
         "entity_type": "session",
-        "title": f"Session: {out['title']}",
+        "title": (f"Session (cont. {gate.pass_no}): {out['title']}" if delta
+                  else f"Session: {out['title']}"),
         "description": out["description"][:300],
         "content": content,
-        "tags": [AUTO_TAG],
+        "tags": tags,
     }, kmcp_dsn)
     if "error" in created:
         raise KmcpError(f"create_entry failed: {json.dumps(created)[:300]}")
@@ -490,6 +771,24 @@ def summarize_one(row: dict[str, Any], kmcp_dsn: str, model: str, ollama_url: st
     if got_sid != sid:
         raise KmcpError(f"read-back verify failed: session_id={got_sid!r} != {sid!r}")
 
+    # Graph link back to the pass this continues. Best-effort BY DESIGN: the
+    # entry is the payload and it is already verified — a failed relationship
+    # must not turn a written summary into a failed pass (it would be re-run and
+    # write a duplicate). linked_entries above already carries the reference.
+    if delta and gate.prev_ref:
+        prev_app, _, prev_path = gate.prev_ref.partition(":")
+        try:
+            rel = kmcp_call("create_relationship", {
+                "source_application": application, "source_path": path,
+                "target_application": prev_app, "target_path": prev_path,
+                "relationship_type": "see_also",
+                "description": f"delta capture: pass {gate.pass_no} continues this summary",
+            }, kmcp_dsn)
+            if "error" in rel:
+                log(f"  ! see_also link skipped: {json.dumps(rel)[:200]}")
+        except KmcpError as exc:
+            log(f"  ! see_also link skipped: {exc}")
+
     return application, path
 
 
@@ -498,10 +797,12 @@ def run_summarize(archive_conn: psycopg.Connection, csd_dsn: str,
                   model: str = DEFAULT_MODEL, ollama_url: str = DEFAULT_OLLAMA_URL,
                   num_ctx: int = DEFAULT_NUM_CTX, only_session: Optional[str] = None,
                   dry_run: bool = False, kmcp_dsn: Optional[str] = None,
+                  delta: bool = True, min_delta_records: int = MIN_DELTA_RECORDS,
                   log: Optional[Callable[[str], None]] = None) -> SummarizeStats:
     emit = log if callable(log) else (lambda _m: None)
     kmcp_dsn = resolve_kmcp_dsn(csd_dsn, kmcp_dsn)
     ensure_attempts_table(archive_conn)
+    ensure_passes_table(archive_conn)
 
     rows = pick_pending(archive_conn, limit, min_idle_s, only_session)
     stats = SummarizeStats(picked=len(rows), dry_run=dry_run)
@@ -514,20 +815,56 @@ def run_summarize(archive_conn: psycopg.Connection, csd_dsn: str,
         sid = row["session_id"]
         emit(f"{sid}  {row.get('project_name') or ''}  "
              f"{row.get('message_count')}msg  [{row.get('reason') or 'pending'}]")
+
+        gate = _delta_gate(row, csd_dsn, kmcp_dsn, min_delta_records, enabled=delta)
+        if gate.is_delta:
+            emit(f"  scope: DELTA pass {gate.pass_no} after {_iso(gate.watermark)} "
+                 f"(watermark: {gate.source}"
+                 + (f", tail: {gate.report.klass}/{gate.report.records} records"
+                    if gate.report else "") + ")")
+        else:
+            emit(f"  scope: FULL transcript (pass {gate.pass_no})")
+        if gate.skip:
+            stats.skipped.append(f"{sid}: {gate.skip}")
+            emit(f"  – skipped: {gate.skip}")
+            continue
         if dry_run:
+            continue
+
+        # One dispatcher per session: the console and the launchd timer both
+        # reach this path, and a double dispatch writes two entries for one tail.
+        if not claim_session(archive_conn, sid):
+            stats.skipped.append(f"{sid}: already being summarized elsewhere")
+            emit("  – skipped: another summarize holds this session")
             continue
         started = time.monotonic()
         try:
+            open_pass(archive_conn, sid, gate.pass_no)
             app, path = summarize_one(row, kmcp_dsn, model, ollama_url,
-                                      num_ctx, app_cache, emit)
-            mark_summarized(archive_conn, sid, app, path)
+                                      num_ctx, app_cache, emit, gate)
+            stamped = mark_summarized(archive_conn, sid, app, path)
+            record_pass(archive_conn, sid, gate.pass_no, app, path,
+                        stamped.get("message_count_at_summary"),
+                        stamped.get("leaf_uuid_at_summary"), status="written",
+                        detail=(f"delta from {_iso(gate.watermark)} "
+                                f"({gate.source})" if gate.is_delta else "full"))
             _clear_attempts(archive_conn, sid)
-            stats.written.append(f"{app}:{path}")
+            stats.written.append(f"{app}:{path}"
+                                 + (f"  (pass {gate.pass_no})" if gate.pass_no > 1 else ""))
+            if gate.pass_no > 1:
+                stats.deltas += 1
             emit(f"  ✓ {app}:{path}  ({time.monotonic() - started:.0f}s)")
         except Exception as exc:  # noqa: BLE001 — per-session isolation
             archive_conn.rollback()
             err = f"{type(exc).__name__}: {exc}"
             _record_failure(archive_conn, sid, err)
+            try:
+                record_pass(archive_conn, sid, gate.pass_no, status="failed",
+                            detail=err)
+            except psycopg.Error:
+                archive_conn.rollback()
             stats.failed.append(f"{sid}: {err}")
             emit(f"  ✗ {err}")
+        finally:
+            release_session(archive_conn, sid)
     return stats

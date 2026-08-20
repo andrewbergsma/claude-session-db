@@ -43,6 +43,7 @@ from typing import Any, Optional
 import psycopg
 from psycopg.rows import dict_row
 
+from .session_digest import WATERMARK_SLACK_S  # noqa: F401 — re-exported below
 from .session_digest import load as load_jsonl
 from .session_digest import render as render_digest
 
@@ -64,7 +65,10 @@ REAL_ASSISTANT_CHARS = 2000
 # This many post-summary tool calls is REAL work even if every call is read-only.
 REAL_TOOL_CALLS = 8
 # Slack when comparing last activity to the watermark: within this, no delta.
-WATERMARK_SLACK_S = 1
+# Imported from session_digest (which OWNS the semantic) and re-exported here for
+# the callers that already read it off this module — the classifier below and
+# render(since=) must window on the same boundary or a tail can be called "real"
+# and then render empty.
 
 _CONFIRM_RE = re.compile(
     r"^(y(es|ep|eah)?|no|ok(ay)?|k|sure|confirm(ed)?|correct|right|good|great|"

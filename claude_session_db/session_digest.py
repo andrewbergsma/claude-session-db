@@ -17,7 +17,18 @@ Usage:
     python3 scripts/session_digest.py <session.jsonl> [--result-head 200] > digest.txt
 """
 import argparse, json, sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+# Slack when comparing a record timestamp to a summary watermark: a record is
+# "after the watermark" only if its ts is more than this many seconds past it.
+#
+# THIS MODULE OWNS THE SLACK. session_mgmt.classify_delta imports the constant
+# from here so the delta CLASSIFIER and the delta RENDERER can never disagree
+# about which records are in the window — a disagreement would let a tail be
+# classified "real new work" and then rendered as an empty digest (or the
+# reverse: a summary written over records the classifier called captured).
+WATERMARK_SLACK_S = 1
 
 
 def load(p):
@@ -57,10 +68,36 @@ def _parse_iso(s):
     if not s:
         return None
     try:
-        from datetime import datetime
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+def is_compaction(rec) -> bool:
+    """Auto-compaction bookkeeping: the injected "This session is being
+    continued…" carrier, transcript-only records, and the system boundary
+    record. Verbatim they are thousands of tokens of RESTATED history — in a
+    delta digest they would read as new work and get summarized twice."""
+    return bool(rec.get("isCompactSummary")
+                or rec.get("isVisibleInTranscriptOnly")
+                or rec.get("subtype") == "compact_boundary")
+
+
+def _ktok(n):
+    try:
+        return f"{round(int(n) / 1000)}K"
+    except (TypeError, ValueError):
+        return "?"
+
+
+def compaction_marker(rec) -> str:
+    """One line in place of a whole compaction payload."""
+    meta = rec.get("compactMetadata") or {}
+    trigger = meta.get("trigger") or ("auto" if rec.get("isCompactSummary") else "?")
+    pre, post = meta.get("preTokens"), meta.get("postTokens")
+    size = (f"{_ktok(pre)}→{_ktok(post)} tokens" if (pre or post)
+            else "size not recorded")
+    return f"\n⋯ conversation compacted here ({trigger}, {size}) ⋯"
 
 
 _ELIDED = object()  # sentinel injected between head and tail windows
@@ -96,9 +133,17 @@ def render(session_path, result_head: int = 200, full_inputs: bool = False,
     last_ts = next((o.get("timestamp") for o in reversed(recs) if o.get("timestamp")), "?")
 
     if since is not None:
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+        cutoff = since + timedelta(seconds=WATERMARK_SLACK_S)
         recs = [o for o in recs
-                if (ts := _parse_iso(o.get("timestamp"))) is not None and ts > since]
+                if (ts := _parse_iso(o.get("timestamp"))) is not None and ts > cutoff]
     selected = len(recs)
+    # The delta window's OWN span — quoting the whole file's first->last here
+    # (as the header used to) frames the digest as covering work it does not
+    # contain, which is exactly the claim a delta summary must not make.
+    win_first = next((o.get("timestamp") for o in recs if o.get("timestamp")), "?")
+    win_last = next((o.get("timestamp") for o in reversed(recs) if o.get("timestamp")), "?")
     if (head is not None or tail is not None) and selected > (head or 0) + (tail or 0):
         elided = selected - (head or 0) - (tail or 0)
         recs = (recs[:head or 0] + [(_ELIDED, elided)]
@@ -106,12 +151,15 @@ def render(session_path, result_head: int = 200, full_inputs: bool = False,
 
     out = []
     out.append(f"SESSION DIGEST  ·  {p.name}")
-    out.append(f"span: {first_ts} -> {last_ts}   ({total} records)")
+    if since is None:
+        out.append(f"span: {first_ts} -> {last_ts}   ({total} records)")
+    else:
+        out.append(f"delta span: {win_first} -> {win_last}   "
+                   f"({selected} of {total} records)")
+        out.append(f"window: everything after the summary watermark "
+                   f"{since.isoformat()}  (session began {first_ts})")
     if note:
         out.append(note)
-    if since is not None:
-        out.append(f"window: {selected} of {total} records after "
-                   f"{since.isoformat()}")
     out.append("=" * 72)
     if since is not None and selected == 0:
         out.append("(no records after the watermark)")
@@ -121,6 +169,9 @@ def render(session_path, result_head: int = 200, full_inputs: bool = False,
             out.append(f"\n⋯ ⋯ ⋯  (+{o[1]} records elided — head/tail window)  ⋯ ⋯ ⋯")
             continue
         if o.get("isSidechain"):
+            continue
+        if is_compaction(o):
+            out.append(compaction_marker(o))
             continue
         typ = o.get("type")
         msg = o.get("message", {})
@@ -135,10 +186,12 @@ def render(session_path, result_head: int = 200, full_inputs: bool = False,
                         body = b.get("content", "")
                         body = body if isinstance(body, str) else json.dumps(body, ensure_ascii=False)
                         body = body.replace("\n", " ").strip()
-                        head = body[:result_head]
+                        # NB: not `head` — that is the window parameter, which
+                        # this loop used to shadow.
+                        snippet = body[:result_head]
                         more = f" …(+{len(body) - result_head}c)" if len(body) > result_head else ""
                         err = " [ERROR]" if b.get("is_error") else ""
-                        out.append(f"    ⮑ result[{name}{(' ' + hint) if hint else ''}]{err}: {head}{more}")
+                        out.append(f"    ⮑ result[{name}{(' ' + hint) if hint else ''}]{err}: {snippet}{more}")
             else:
                 t = text_of(content).strip()
                 if t:

@@ -29,7 +29,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 7  # + subagent visibility: own_* aggregates, v_agent_children
+SCHEMA_VERSION = 8  # + summary_passes: repeatable (delta) session summarization
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -505,6 +505,45 @@ BEGIN
     END IF;
 END $$;
 """
+
+
+# --- summary_passes — the per-pass ledger for repeatable (delta) summaries ----
+#
+# summary_state holds ONE watermark per session (where the last capture stopped).
+# That is enough to open the next delta window, but it forgets the passes
+# themselves — which entry captured which slice, and how many passes a session
+# has already spent. This table is that ledger: append-only, one row per pass,
+# PK (session_id, pass).
+#
+# It is also the in-flight claim: a pass is inserted 'in_flight' before the LLM
+# runs and settled to 'written'/'failed' after, so a console-dispatched summary
+# and the launchd timer cannot double-dispatch the same session (belt-and-braces
+# with the pg_try_advisory_lock in summarize.run_summarize).
+#
+# Kept as its own constant so summarize.py can self-heal the table without
+# paying initialize()'s full-schema DDL (same pattern as summarize_attempts).
+SUMMARY_PASSES_DDL = """
+CREATE TABLE IF NOT EXISTS summary_passes (
+    session_id  TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    pass        INTEGER NOT NULL CHECK (pass >= 1),
+    application TEXT,
+    path        TEXT,
+    -- Watermark this pass CLOSED at (the next pass's delta window opens here).
+    message_count_at_summary INTEGER,
+    leaf_uuid_at_summary     TEXT,
+    status      TEXT NOT NULL DEFAULT 'in_flight'
+                CHECK (status IN ('in_flight', 'written', 'failed')),
+    detail      TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (session_id, pass)
+);
+CREATE INDEX IF NOT EXISTS idx_summary_passes_status ON summary_passes(status);
+"""
+
+# Additive: appended rather than inlined so the DDL has one home (above) that
+# summarize.py can execute on its own.
+SCHEMA_SQL += SUMMARY_PASSES_DDL
 
 
 VIEWS_SQL = """

@@ -997,6 +997,33 @@ def summarize_nav(path: Path):
     }
 
 
+def _nav_row(p: Path, idx: dict, meta: dict):
+    """One enriched nav row for a transcript path (or None if unreadable)."""
+    try:
+        s = summarize_nav(p)
+    except OSError:
+        return None
+    if not s:
+        return None
+    m = _meta_of(meta, p.stem)
+    s["archived"] = p.stem in idx
+    # stoppable + agents already computed in summarize_nav (state override)
+    s["priority"] = m.get("priority")
+    s["user_title"] = m.get("title")
+    s["topic"] = m.get("topic")
+    s["subtopic"] = m.get("subtopic")
+    # Cached-or-nothing; stale rows queue an async regeneration.
+    s["tldr"] = tldr.payload(p.stem, p)
+    # Per-row digest presence for the sidebar glance: does a
+    # timeline exist, and is it current? Signature-memoized in
+    # session_timeline — the poll never re-reads unchanged stores.
+    s["timeline"] = session_timeline.presence(p.stem, p)
+    # Pending title suggestion (None once accepted/dismissed).
+    s["title_proposal"] = _pending_proposal(
+        s["tldr"], m.get("title"), m.get("tp_dismissed"))
+    return s
+
+
 def discover_sessions(archived=False):
     """Nav list. archived=False hides archived sessions; True shows only them.
 
@@ -1022,27 +1049,41 @@ def discover_sessions(archived=False):
     meta = _read_meta_overlay()
     out = []
     for _, p in cands[:MAX_NAV_SESSIONS]:
+        s = _nav_row(p, idx, meta)
+        if s:
+            out.append(s)
+    return out
+
+
+# An id-shaped sidebar query (a full uuid, or a prefix — the 8-hex short id the
+# UI itself displays) must reach PAST the loaded nav rows: the nav list is
+# capped (MAX_NAV_SESSIONS) and cut off at MAX_AGE_H, and archived sessions are
+# filtered out of the recent tab. "Retrievable by id" is the archive's promise,
+# so the lookup goes straight to disk — the same glob find_session uses.
+ID_QUERY_RE = re.compile(r"^[0-9a-f][0-9a-f-]*$")
+MAX_ID_HITS = 5
+
+
+def lookup_sessions_by_id(q: str):
+    """Nav rows for main sessions whose uuid contains `q` (id-shaped queries
+    only). Read-only, bounded, and never raises — a miss is an empty list."""
+    q = (q or "").strip().lower()
+    if len(q.replace("-", "")) < 8 or not ID_QUERY_RE.match(q):
+        return []
+    hits = []
+    for p in PROJECTS.glob(f"*/*{q}*.jsonl"):
+        if "subagents" in p.parts:
+            continue
         try:
-            s = summarize_nav(p)
+            hits.append((p.stat().st_mtime, p))
         except OSError:
             continue
+    hits.sort(reverse=True)
+    idx, meta = _read_archive(), _read_meta_overlay()
+    out = []
+    for _, p in hits[:MAX_ID_HITS]:
+        s = _nav_row(p, idx, meta)
         if s:
-            m = _meta_of(meta, p.stem)
-            s["archived"] = p.stem in idx
-            # stoppable + agents already computed in summarize_nav (state override)
-            s["priority"] = m.get("priority")
-            s["user_title"] = m.get("title")
-            s["topic"] = m.get("topic")
-            s["subtopic"] = m.get("subtopic")
-            # Cached-or-nothing; stale rows queue an async regeneration.
-            s["tldr"] = tldr.payload(p.stem, p)
-            # Per-row digest presence for the sidebar glance: does a
-            # timeline exist, and is it current? Signature-memoized in
-            # session_timeline — the poll never re-reads unchanged stores.
-            s["timeline"] = session_timeline.presence(p.stem, p)
-            # Pending title suggestion (None once accepted/dismissed).
-            s["title_proposal"] = _pending_proposal(
-                s["tldr"], m.get("title"), m.get("tp_dismissed"))
             out.append(s)
     return out
 
@@ -3863,13 +3904,22 @@ class Handler(SimpleHTTPRequestHandler):
             q = (body.get("q") or "").strip()
             ids = body.get("ids") or []
             ids = ids[:500] if isinstance(ids, list) else []
+            # An id-shaped query resolves off disk (archived / past the nav
+            # cutoff / past the row cap are all still findable by id). It is
+            # DB-free, so it answers even when the archive is unreachable.
+            try:
+                id_hits = [r for r in lookup_sessions_by_id(q)
+                           if r["session_id"] not in ids]
+            except Exception:                   # never let a glob break search
+                id_hits = []
             if len(q) < 2 or not ids or not CSD_DSN:
-                return self._json({"matches": {}})
+                return self._json({"matches": {}, "id_hits": id_hits})
             from .. import session_mgmt as mgmt
             try:
-                return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q)})
+                return self._json({"matches": mgmt.search_sessions(CSD_DSN, ids, q),
+                                   "id_hits": id_hits})
             except Exception as e:              # DB unreachable → degrade, never 500
-                return self._json({"matches": {}, "error": str(e)})
+                return self._json({"matches": {}, "id_hits": id_hits, "error": str(e)})
 
         # CR search/compile are session-independent (the cart is client-side
         # state): route them before the session_id requirement below.

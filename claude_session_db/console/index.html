@@ -381,12 +381,22 @@
 
   /* ---- right: read detail rail ---- */
   #rail { background:var(--surface); border-left:1px solid var(--border);
-          overflow-y:auto; padding:14px 16px;
+          overflow-y:auto; overflow-x:hidden; overflow-wrap:break-word;
+          padding:14px 16px;
           -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  /* nothing in the rail may widen it: long paths/URLs wrap, wide blocks
+     scroll inside their own box — the page never scrolls sideways. */
+  #rail pre, #rail code { max-width:100%; overflow-wrap:anywhere; }
   .act.danger:not(:disabled):not(.is-disabled) { color:var(--bad); border-color:var(--bad); }
   .act.is-disabled { opacity:.38; cursor:not-allowed; }
+  /* one header treatment for every rail pane: small-caps label on the left,
+     optional meta/action on the right (.hx) pushed by margin, never a float. */
   #rail h3 { font-size:10.5px; text-transform:uppercase; letter-spacing:.8px;
-             color:var(--ink2); margin-bottom:12px; }
+             color:var(--ink2); margin:0 0 10px; display:flex; gap:8px;
+             align-items:baseline; min-width:0; }
+  #rail h3 .hx { margin-left:auto; flex:0 0 auto; font:9.5px var(--mono);
+                 font-weight:400; text-transform:none; letter-spacing:0;
+                 color:var(--muted); }
   .rl-empty { color:var(--muted); font-size:12.5px; line-height:1.6; }
   .acts { display:flex; gap:6px; align-items:center; margin-top:9px; flex-wrap:wrap; }
   .act { font:11px var(--mono); padding:4px 9px; border-radius:5px; cursor:pointer;
@@ -426,16 +436,21 @@
   .cur-warn{ font-size:11.5px; line-height:1.5; color:var(--warn); margin:6px 0;
              border-left:2px solid var(--warn); padding-left:7px; }
   /* rail tabs: Angles / Context / Writes */
-  #railtabs { display:flex; gap:2px; margin:18px 0 12px; border-bottom:1px solid var(--border); }
+  /* six tabs don't fit a 320px rail on one line — they WRAP rather than
+     overflow (a clipped tab is an unreachable tab). */
+  #railtabs { display:flex; flex-wrap:wrap; gap:2px; margin:18px 0 12px;
+              border-bottom:1px solid var(--border); }
   .rtab { font:10.5px var(--mono); font-weight:700; text-transform:uppercase;
-          letter-spacing:.6px; color:var(--muted); padding:4px 9px 6px; cursor:pointer;
-          border-bottom:2px solid transparent; margin-bottom:-1px; user-select:none; }
+          letter-spacing:.5px; color:var(--muted); padding:4px 7px 6px; cursor:pointer;
+          border-bottom:2px solid transparent; margin-bottom:-1px; user-select:none;
+          flex:0 0 auto; }
   .rtab:hover { color:var(--ink); }
   .rtab.on { color:var(--ink); border-bottom-color:var(--accent); }
   .rtabpane { display:none; }
   .rtabpane.on { display:block; }
-  .wr-h { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
-          color:var(--muted); margin:14px 0 6px; }
+  .wr-h { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+          letter-spacing:.6px; color:var(--muted); margin:14px 0 5px; }
+  .wr-h:first-child { margin-top:0; }
   .wr { font:11px var(--mono); color:var(--ink2); margin:3px 0; display:flex;
         gap:7px; align-items:baseline; }
   .wr .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
@@ -447,11 +462,31 @@
   .wr .lb { min-width:0; word-break:break-all; }
   .wr .sz { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
   #angles { margin-top:2px; }
-  .ang-g { margin-bottom:10px; }
-  .ang-h { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
-           letter-spacing:.6px; color:var(--muted); margin-bottom:3px; }
+  .ang-g { margin-bottom:14px; }
+  .ang-g:last-child { margin-bottom:0; }
+  /* .ang-h and .wr-h are the same small-caps group label — keep them identical */
+  .ang-h { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.6px; color:var(--muted); margin:0 0 5px; }
   .ang-i { font-size:12.5px; line-height:1.45; padding:3px 0; cursor:pointer;
-           display:flex; gap:7px; align-items:baseline; }
+           display:flex; gap:7px; align-items:baseline; min-width:0;
+           word-break:break-word; }
+  /* ---- angle subtabs: one chip per angle, built from /api/angles/catalog so a
+     new angle in ANGLE_SPECS shows up by itself. ALL is the stacked default;
+     an empty angle greys out but stays selectable (and offers to mine it). */
+  .ang-subs { display:flex; flex-wrap:wrap; align-items:center; gap:4px;
+              margin:0 0 12px; }
+  .asub { display:inline-flex; align-items:baseline; gap:4px; cursor:pointer;
+          font:10px var(--mono); font-weight:700; letter-spacing:.4px;
+          color:var(--ink2); background:var(--surface2);
+          border:1px solid var(--border); border-radius:5px; padding:2px 6px;
+          user-select:none; }
+  .asub i { font-style:normal; color:var(--muted); }
+  .asub .n { font:9px var(--mono); font-weight:400; color:var(--muted); }
+  .asub:hover { color:var(--ink); border-color:var(--muted); }
+  .asub.zero { opacity:.45; }   /* NOT .empty — that's a global rule (line ~590) */
+  .asub.on { color:var(--ink); border-color:var(--accent);
+             background:var(--surface3); }
+  .asub.on i, .asub.on .n { color:var(--accent); }
   .ang-i:hover { color:var(--purple); }
   .ang-id { font:10px var(--mono); font-weight:700; color:var(--muted);
             flex:0 0 auto; }
@@ -495,7 +530,8 @@
   #summary { margin-top:18px; padding-top:14px; border-top:1px solid var(--border); }
 
   /* Git tab */
-  .gh3 { display:flex; align-items:baseline; gap:8px; }
+  .gh3 { display:flex; align-items:baseline; gap:8px; margin-bottom:10px; }
+  .gh3 h3 { margin-bottom:0; }
   .gh3 .act { margin-left:auto; }
   .gfile { display:flex; gap:7px; align-items:baseline; font:11px var(--mono);
            color:var(--ink2); margin:2px 0; min-width:0; }
@@ -732,7 +768,7 @@
            padding-top:8px; border-top:1px solid var(--border); }
   #pane-timeline .tlgen { margin-top:12px; }
   #pane-timeline h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
-           float:right; }
+           margin-left:auto; flex:0 0 auto; }
   #pane-timeline h3 .re:hover { color:var(--accent); }
 
   /* ---- digest presence chips (sidebar rows): tldr T / timeline ⧗ ----
@@ -989,6 +1025,7 @@
     .cr-hit .add, .cr-ref .rm{ min-height:28px; min-width:36px;
       display:inline-flex; align-items:center; justify-content:center; }
     .rd-tabs .rtb{ min-height:32px; display:inline-flex; align-items:center; }
+    .asub{ min-height:30px; align-items:center; }
     .tline.cmd{ padding:5px 4px; }
     .read{ padding:8px 10px; }
     .tline.cmd:active, .read:active, .ang-i:active, .sess:active{ background:var(--surface2); }
@@ -1010,7 +1047,7 @@
         </span>
       </div>
       <div class="sub" id="navsub">loading…</div>
-      <input class="search" id="navq" placeholder="search — titles & content…" autocomplete="off">
+      <input class="search" id="navq" placeholder="search — titles, content & id…" autocomplete="off">
       <div class="scoperow" id="navscope"></div>
       <div class="sortbar" id="navsortbar"></div>
     </div>
@@ -1475,6 +1512,11 @@ let navFlat  = localStorage.getItem("csd.navFlat") === "1";         // projects 
 let navScope = localStorage.getItem("csd.navScope") || "both";      // title | content | both
 let navQuery = "";
 let navSearchMatches = null;   // {session_id: snippet} from /api/search, or null while pending
+/* id hits from /api/search: nav rows resolved straight off disk for an
+   id-shaped query, so a session that is archived, past the 72h cutoff, or
+   past the row cap is still reachable by uuid. Held outside navData so a
+   nav poll can't drop them; cleared with every keystroke. */
+let navIdHits = [];
 let navEditing = null;         // session_id being renamed inline
 
 function lastMs(s){ return s.last_ts ? new Date(s.last_ts).getTime()
@@ -1548,12 +1590,19 @@ function ctxGauge(tok){
 }
 function initialsOf(label){ return (label||"?").split(/[-_ ]/).filter(Boolean).slice(0,2).map(w=>w[0]).join("").toUpperCase(); }
 
+/* an id-shaped query (>=4 hex chars, dashes allowed) also matches the session
+   uuid itself — full uuid or any fragment, so the 8-hex short ids the UI
+   displays work too. Scope-independent: an id search is an id search. */
+const ID_Q_RE = /^[0-9a-f][0-9a-f-]{3,}$/;
+const isIdQuery = q => ID_Q_RE.test(q);
+
 function navMatch(s){
   const q = navQuery.trim().toLowerCase();
   if(!q) return {hit:true, snip:""};
   const inT = navScope!=="content" && dispTitle(s).includes(q);
+  const inI = isIdQuery(q) && (s.session_id||"").toLowerCase().includes(q);
   const inC = navScope!=="title" && navSearchMatches && Object.prototype.hasOwnProperty.call(navSearchMatches, s.session_id);
-  return {hit: inT||inC, inC, snip: inC ? navSearchMatches[s.session_id] : ""};
+  return {hit: inT||inI||inC, inC, snip: inC ? navSearchMatches[s.session_id] : ""};
 }
 
 /* priority flag cycle: normal(none) → low → med → high → critical → normal */
@@ -1868,6 +1917,14 @@ async function loadNav(){
   renderNav();
 }
 
+/* id hits are appended to the rendered row set (never to navData) — they are
+   search results, not nav state, and every renderer filters them through the
+   same navMatch, so only the searched-for uuid survives. */
+function withIdHits(rows){
+  const have = new Set(rows.map(s => s.session_id));
+  return rows.concat(navIdHits.filter(s => !have.has(s.session_id)));
+}
+
 function renderNav(){
   if(!navData) return;
   const d = navData;
@@ -1885,30 +1942,37 @@ function renderNav(){
   }
   renderNavSort();
   const list = document.getElementById("navlist");
-  list.innerHTML = navTab==="archive" ? renderArchiveList(d)
-                 : navFlat            ? renderFlatList(d)
-                 : renderProjects(d);
+  const dv = navIdHits.length ? {...d, sessions: withIdHits(d.sessions||[])} : d;
+  list.innerHTML = navTab==="archive" ? renderArchiveList(dv)
+                 : navFlat            ? renderFlatList(dv)
+                 : renderProjects(dv);
   const q = document.getElementById("navq");
-  if(q) q.placeholder = navTab==="archive" ? "search archived — titles & content…" : "search — titles & content…";
+  if(q) q.placeholder = navTab==="archive" ? "search archived — titles, content & id…" : "search — titles, content & id…";
   if(navEditing){ const el = document.querySelector("#navlist .tedit"); if(el){ el.focus(); el.select(); } }
 }
 
 function setNavTab(t){
   if(navTab===t) return;
-  navTab = t; navQuery = ""; navSearchMatches = null; navEditing = null;
+  navTab = t; navQuery = ""; navSearchMatches = null; navIdHits = []; navEditing = null;
   const q = document.getElementById("navq"); if(q) q.value = "";
   showArchived = (t==="archive");
   loadNav();                       // re-fetch with the right archived flag; renderNav paints
 }
 function setNavScope(v){
   navScope = v; localStorage.setItem("csd.navScope", v); navSearchMatches = null; renderNav();
-  if(navScope!=="title" && navQuery.trim().length>=2) scheduleContentSearch();
+  maybeSearch();
 }
 
 let navSearchTimer=null, navSearchSeq=0;
 function onNavSearch(v){
-  navQuery = v; navSearchMatches = null; renderNav();
-  if(navScope!=="title" && v.trim().length>=2) scheduleContentSearch();
+  navQuery = v; navSearchMatches = null; navIdHits = []; renderNav();
+  maybeSearch();
+}
+/* the round trip serves two purposes now — content matches (scope-gated) and
+   the disk id lookup — so an id query fires it even under the title scope. */
+function maybeSearch(){
+  const q = navQuery.trim().toLowerCase();
+  if(q.length>=2 && (navScope!=="title" || isIdQuery(q))) scheduleContentSearch();
 }
 function scheduleContentSearch(){ clearTimeout(navSearchTimer); navSearchTimer = setTimeout(runContentSearch, 260); }
 async function runContentSearch(){
@@ -1920,6 +1984,7 @@ async function runContentSearch(){
   catch(e){ return; }
   if(seq!==navSearchSeq) return;   // superseded by a newer keystroke
   navSearchMatches = (d && d.matches) ? d.matches : {};
+  navIdHits = (d && d.id_hits) ? d.id_hits : [];
   renderNav();
 }
 
@@ -2831,22 +2896,108 @@ function showTldr(){
     <pre class="ang-detail">${esc(t.detail||"(no detail)")}</pre>`;
 }
 
+/* ---------- angle subtabs -----------------------------------------------
+   The Angles tab is one chip strip + one body. ALL keeps the classic stacked
+   view (and stays the default); every other chip narrows the body to a single
+   angle. The strip is built from /api/angles/catalog — the same ANGLE_SPECS
+   registry the mine menu reads — so a NEW ANGLE APPEARS BY ITSELF, never from
+   a list hard-coded here. Catalog unreachable degrades to the groups actually
+   present (prefix read off the item ids), never to an empty strip.
+   Selection is remembered per session view, in memory only. */
+const ANG_ALL = "__all", ANG_TLDR = "__tldr";
+let angleCatalog = null, angleCatalogTried = false;
+const angleSubBySid = new Map();
+
+async function ensureAngleCatalog(){
+  if(angleCatalog || angleCatalogTried) return;
+  angleCatalogTried = true;            // one attempt per page load; ids are static
+  let d = null;
+  try { d = await (await fetch("/api/angles/catalog?id=" +
+                               encodeURIComponent(curId || ""))).json(); }
+  catch(e){ /* degrade: the strip falls back to the groups present */ }
+  if(!d || !d.angles) return;
+  angleCatalog = d.angles;
+  if(curSession) renderAngles(curSession);   // repaint once the ids land
+}
+function angleSub(){ return (curId && angleSubBySid.get(curId)) || ANG_ALL; }
+function setAngleSub(a){
+  if(curId) angleSubBySid.set(curId, a);
+  if(curSession) renderAngles(curSession);
+}
+
+/* Catalog order first (registry order = display order), then any group the
+   catalog didn't name. Writes-shaped angles stay on the Writes tab. */
+function angleSubList(groups){
+  const counts = {};
+  groups.forEach(g => { counts[g.angle] = (g.items || []).length; });
+  const out = [], seen = new Set();
+  (angleCatalog || []).forEach(a => {
+    if(WRITE_ANGLES.has(a.id)) return;
+    seen.add(a.id);
+    out.push({id:a.id, prefix:a.prefix || (ANGLE_GLYPH[a.id] || "·"),
+              label:a.label || a.id, n:counts[a.id] || 0});
+  });
+  groups.forEach(g => {
+    if(seen.has(g.angle)) return;
+    const first = (g.items || [])[0];
+    out.push({id:g.angle, prefix:(first && first.id ? first.id[0]
+                                  : (ANGLE_GLYPH[g.angle] || "·")),
+              label:g.angle, n:counts[g.angle] || 0});
+  });
+  return out;
+}
+
+function angleSubs(subs, s, total){
+  const sel = angleSub();
+  const chip = (id, glyph, prefix, label, n) => {
+    const t = `${label}${n ? ` · ${n} item${n === 1 ? "" : "s"}` : " · nothing mined"}`;
+    return `<span class="asub${sel === id ? " on" : ""}${n ? "" : " zero"}"
+      title="${esc(t)}" onclick="setAngleSub('${esc(id)}')"
+      >${glyph && glyph !== prefix ? `<i>${esc(glyph)}</i>` : ""}<b>${esc(prefix)}</b>${
+        n ? `<span class="n">${n}</span>` : ""}</span>`;
+  };
+  return `<div class="ang-subs">` +
+    chip(ANG_ALL, "", "ALL", "Every angle, stacked", total) +
+    chip(ANG_TLDR, "≡", "T", "tl;dr — last 3 turns",
+         s.tldr && s.tldr.headline ? 1 : 0) +
+    subs.map(a => chip(a.id, ANGLE_GLYPH[a.id] || "", a.prefix, a.label, a.n)).join("") +
+    `</div>`;
+}
+
+function angleBody(s, groups, sel, mined){
+  if(sel === ANG_TLDR)
+    return tldrGroup(s) || `<div class="rl-empty">No tl;dr yet.
+      <div class="acts"><button class="act sm" onclick="refreshTldr()"
+        title="generate a last-3-turns catch-up">⟳ generate</button></div></div>`;
+  if(sel === ANG_ALL)
+    return tldrGroup(s) + (groups.length ? angGroups(groups)
+      : (mined ? `<div class="rl-empty">nothing beyond writes this turn —
+                  see the Writes tab.</div>`
+               : `<div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
+                  to keep the latest turn's angles warm.</div>`));
+  const g = groups.find(x => x.angle === sel);
+  if(g) return angGroups([g]);
+  return `<div class="rl-empty">Nothing mined for <code>${esc(sel)}</code> this turn.
+    <div class="acts"><button class="act sm" onclick="mine(['${esc(sel)}'])"
+      title="Mine just this angle — the rest of the store is kept">⟳ mine ${esc(sel)}</button></div></div>`;
+}
+
 function renderAngles(s){
   const el = document.getElementById("angles");
+  if(!el) return;
+  ensureAngleCatalog();
   const r = s.rail;
-  if(!r || !r.angles.length){
-    el.innerHTML = `<h3>Turn angles</h3>` + tldrGroup(s) +
-      `<div class="rl-empty">Not mined yet — run <code>csd angles-watch</code>
-      to keep the latest turn's angles warm.</div>`;
-    return;
-  }
-  const age = r.mined_age_s==null ? "" :
-    `<span class="k" style="float:right">mined ${rel(Date.now()-r.mined_age_s*1000)}</span>`;
-  const gs = r.angles.filter(g => !WRITE_ANGLES.has(g.angle));
-  el.innerHTML = `<h3>Turn angles ${age}</h3>` + tldrGroup(s) +
-    (gs.length ? angGroups(gs)
-               : `<div class="rl-empty">nothing beyond writes this turn —
-                  see the Writes tab.</div>`);
+  const mined = !!(r && (r.angles || []).length);
+  const groups = ((r && r.angles) || []).filter(g => !WRITE_ANGLES.has(g.angle));
+  const total = groups.reduce((n, g) => n + (g.items || []).length, 0);
+  const age = (r && r.mined_age_s != null)
+    ? `<span class="hx">mined ${rel(Date.now() - r.mined_age_s * 1000)}</span>` : "";
+  const subs = angleSubList(groups);
+  let sel = angleSub();
+  // a remembered subtab for an angle this session has never had falls back to ALL
+  if(sel !== ANG_ALL && sel !== ANG_TLDR && !subs.some(a => a.id === sel)) sel = ANG_ALL;
+  el.innerHTML = `<h3>Turn angles${age}</h3>` +
+    angleSubs(subs, s, total) + angleBody(s, groups, sel, mined);
 }
 
 /* Context tab: the token/size story for this session. */

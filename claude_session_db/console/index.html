@@ -439,6 +439,11 @@
   .wr { font:11px var(--mono); color:var(--ink2); margin:3px 0; display:flex;
         gap:7px; align-items:baseline; }
   .wr .tg { color:var(--muted); flex:0 0 auto; width:11px; text-align:center; }
+  /* the glyph column doubles as a copy-path button on file-write rows */
+  .wr .tg.cp { cursor:pointer; border-radius:3px; user-select:none;
+               transition:color .12s, background .12s; }
+  .wr .tg.cp:hover { color:var(--ink); background:var(--surface3); }
+  .wr .tg.cp.ok { color:var(--good); }
   .wr .lb { min-width:0; word-break:break-all; }
   .wr .sz { color:var(--muted); font-size:10px; margin-left:auto; flex:0 0 auto; }
   #angles { margin-top:2px; }
@@ -1339,6 +1344,36 @@ function toast(msg, bad){
   t.className = bad ? "bad show" : "show";
   clearTimeout(t._h);
   t._h = setTimeout(() => t.classList.remove("show"), 4000);
+}
+
+/* ---------- clipboard: async API where we have it, textarea where we don't --
+   navigator.clipboard is secure-context only. The loopback bind (:4462) counts
+   as secure, but the LAN bind (:8791) is plain http over an IP — there the API
+   is simply undefined, so every copy affordance degrades to a hidden-textarea
+   + execCommand('copy'). Resolves true/false; never throws, never rejects. */
+function copyFallback(text){
+  const prev = document.activeElement;
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.cssText = "position:fixed;top:-1000px;left:-1000px;opacity:0;";
+  document.body.appendChild(ta);
+  let ok = false;
+  try {
+    ta.select();
+    ta.setSelectionRange(0, ta.value.length);   // iOS Safari needs the range
+    ok = document.execCommand("copy");
+  } catch(e){ ok = false; }
+  ta.remove();
+  if(prev && prev.focus) try { prev.focus(); } catch(e){}
+  return ok;
+}
+function copyText(text){
+  if(!text) return Promise.resolve(false);
+  if(navigator.clipboard?.writeText)
+    return navigator.clipboard.writeText(text)
+      .then(() => true, () => copyFallback(text));
+  return Promise.resolve(copyFallback(text));
 }
 
 /* ---------- composer: auto-grow textarea + key handling ---------- */
@@ -2889,6 +2924,38 @@ const KMCP_WRITE_BASES = new Set(["create_entry", "update_entry", "patch_content
   "delete_relationship", "move_entry", "rename_entry", "delete_entry",
   "upload_file", "stage_template", "update_application", "create_application"]);
 
+/* The absolute path behind a file-write row. The server's _tool_summary()
+   renders these labels as "<Tool> <file_path>" (Write/Edit/NotebookEdit), so
+   the path is the label minus its verb — no extra field, no server round-trip.
+   Anything that doesn't match that shape yields "" and gets no copy button. */
+function wrPath(t){
+  if(!t || !FILE_WRITE_TOOLS.has(t.name)) return "";
+  const lb = t.label || "";
+  return lb.startsWith(t.name + " ") ? lb.slice(t.name.length + 1).trim() : "";
+}
+
+/* Copy a write row's path. stopPropagation because the row sits inside the
+   rail's click surfaces; feedback is the toast (the console's idiom, cf.
+   fvCopy) plus a ~1s ✓ on the glyph itself so the source of the copy is
+   unambiguous when several rows share a path prefix. */
+function copyRowPath(ev, el){
+  ev.stopPropagation();
+  ev.preventDefault();
+  const p = el.dataset.p || "";
+  if(!p) return;
+  copyText(p).then(ok => {
+    if(!ok){ toast("copy failed — " + p, true); return; }
+    toast("copied " + p);
+    if(el._g == null) el._g = el.textContent;
+    el.textContent = "✓";
+    el.classList.add("ok");
+    clearTimeout(el._h);
+    el._h = setTimeout(() => {
+      el.textContent = el._g; el._g = null; el.classList.remove("ok");
+    }, 1000);
+  });
+}
+
 function renderWrites(s){
   const el = document.getElementById("writes");
   const gs = (s.rail?.angles || []).filter(g => WRITE_ANGLES.has(g.angle));
@@ -2901,10 +2968,20 @@ function renderWrites(s){
               KMCP_WRITE_BASES.has(t.name.replace(/^mcp__.+__/,""))) kmcpWr.push(t);
     }
   }
-  const wrRows = ws => ws.map(t=>`<div class="wr">
-    <span class="tg">${t.is_error?"✗":"✎"}</span>
-    <span class="lb" title="${esc(t.detail||"")}">${esc(t.label||t.name)}</span>
-    ${t.chars!=null?`<span class="sz">${kb(t.chars)}</span>`:""}</div>`).join("");
+  const wrRows = ws => ws.map(t=>{
+    const p = wrPath(t), g = t.is_error ? "✗" : "✎";
+    // On a file write the glyph column doubles as a copy-path button; kmcp
+    // write rows (no path) keep the plain glyph.
+    const glyph = p
+      ? `<span class="tg cp" role="button" tabindex="0" data-p="${esc(p)}"
+               title="Copy path — ${esc(p)}" onclick="copyRowPath(event, this)"
+               onkeydown="if(event.key==='Enter'||event.key===' ')copyRowPath(event,this)"
+               >${g}</span>`
+      : `<span class="tg">${g}</span>`;
+    return `<div class="wr">${glyph}
+      <span class="lb" title="${esc(t.detail||"")}">${esc(t.label||t.name)}</span>
+      ${t.chars!=null?`<span class="sz">${kb(t.chars)}</span>`:""}</div>`;
+  }).join("");
   const parts = [];
   if(gs.length) parts.push(angGroups(gs));
   if(fileWr.length) parts.push(`<div class="wr-h">file writes · ${fileWr.length}</div>${wrRows(fileWr)}`);
@@ -3299,10 +3376,7 @@ function closeFileView(fromPop){
 function fvCopy(abs){
   if(!fvPath) return;
   const p = abs && filesRoot ? filesRoot + "/" + fvPath : fvPath;
-  if(navigator.clipboard?.writeText)
-    navigator.clipboard.writeText(p).then(() => toast("copied " + p))
-      .catch(() => toast("copy failed", true));
-  else toast("clipboard unavailable", true);
+  copyText(p).then(ok => toast(ok ? "copied " + p : "copy failed", !ok));
 }
 
 /* mirrors the context-insert pattern (ctx()): append the root-relative path

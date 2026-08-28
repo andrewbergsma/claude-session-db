@@ -1619,6 +1619,11 @@ def build_session(sid: str):
         # transition is visible on the session the operator is watching. Child
         # sids never summarize, so this is None for them.
         "summarizing": SUMMARIZING.get(sid),
+        # prior-capture facts (watermark date, next pass, prior entry ref) so
+        # the Summarize buttons can say NEW work since <date>. DB-only and
+        # TTL-cached — cheap enough to ride this poll; None when nothing was
+        # ever captured or the archive is unreachable.
+        "summary_scope": None if is_child else summary_scope(sid),
         "priority": _m.get("priority"),
         "user_title": _m.get("title"),
         "topic": _m.get("topic"),
@@ -1728,6 +1733,16 @@ def _envelope(ref: str) -> dict:
     return env
 
 
+def _digest_script() -> str:
+    """Absolute path to session_digest.py — handed to the child so a delta pass
+    never has to locate (or guess) the script the skill shells out to."""
+    try:
+        from .. import session_digest
+        return str(Path(session_digest.__file__).resolve())
+    except Exception:  # noqa: BLE001 — the prompt must never raise
+        return str(Path(__file__).resolve().parent.parent / "session_digest.py")
+
+
 def _envelope_prompt(env: dict, ctx: dict):
     """The --append-system-prompt body: what the child must not have to discover."""
     out = []
@@ -1740,6 +1755,32 @@ def _envelope_prompt(env: dict, ctx: dict):
             "Use this path directly. Do not search the filesystem for it, and do "
             "not run a piped, chained or command-substituted shell command to "
             "locate it — this is a headless run with no human to approve one.")
+    # Repeatable-pass framing. A session captured once is summarized AGAIN only
+    # over the tail its prior pass never saw — and the child cannot work that
+    # window out for itself: the watermark lives in the archive, which it has no
+    # scope for. So the window, the exact digest command and the entry it
+    # continues travel down here, the same way the transcript path does.
+    since = ctx.get("since")
+    if since:
+        cmd = (f'python3 {_digest_script()} "{tpath}" --since "{since}"'
+               if tpath else f'session_digest.py <transcript> --since "{since}"')
+        out.append(
+            f"CONTINUATION PASS {ctx.get('pass') or 2}. This session has ALREADY "
+            f"been summarized up to {since} — that earlier capture is not yours "
+            "to repeat. Digest ONLY the tail after that watermark:\n"
+            f"  {cmd}\n"
+            "Pass --since exactly as given (the digest prints the delta span it "
+            "actually covers, and says so if the window is empty). Everything "
+            "you write — events, lessons, tasks and the session entry — must "
+            "come from that tail alone. Do not re-create entries for work "
+            "before the watermark.")
+        prior = ctx.get("prior")
+        out.append(
+            f"The pass you are continuing is {prior}. The new session entry must "
+            "carry it in linked_entries and file a see_also edge to it, so the "
+            "passes read as one thread." if prior else
+            "The prior pass's entry could not be resolved — write the "
+            "continuation standalone and say so in its summary.")
     guardrails = [g for g in (env.get("guardrails") or []) if isinstance(g, str)]
     if guardrails:
         out.append(f"Hard rules for this run (from {env.get('agent_ref')}):")
@@ -2535,35 +2576,289 @@ def cr_apply(sid: str, stub, refs, confirm: bool):
 # the moment the summary is dispatched; the summary's outcome is tracked in
 # SUMMARIZING for visibility but no longer gates the archive.
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# repeatable passes — prior-capture resolution (Stage 2 of the delta design)
+#
+# A session summarized once can be summarized AGAIN, and the second pass must
+# cover only what the first never saw. The scope decision is NOT re-implemented
+# here: summarize._delta_gate is the authority (the very gate the launchd timer
+# grades its queue with). The console only supplies the row it grades, and
+# translates the verdict into the child's framing + the pass ledger.
+#
+# DOCTRINE, identical to resolve_envelope(): this can never block the console.
+# No DSN, unreachable archive, missing summary_passes, a raising gate — every
+# failure degrades to FULL scope (the historic behaviour, byte for byte), with
+# the reason surfaced in the response instead of swallowed. The one thing that
+# DOES refuse is a lost claim: two passes digesting the same tail into two
+# entries is worse than not summarizing now.
+# ----------------------------------------------------------------------------
+DELTA_MODES = ("auto", "force", "off")
+SUMMARIZE_IDLE_WARN_S = int(os.environ.get("CSD_SUMMARIZE_MIN_IDLE_S", "900"))
+SCOPE_TTL_S = 120                    # the UI label rides the 3s session poll
+_SCOPE_CACHE: dict = {}              # sid -> (fetched_at, scope|None)
+_SCOPE_LOCK = threading.Lock()
+
+_PRIOR_SQL = """
+    SELECT s.file_path, ss.state, ss.reason,
+           ss.message_count_at_summary AS prev_wm,
+           ss.leaf_uuid_at_summary     AS prev_leaf,
+           ss.kmcp_application         AS prev_app,
+           ss.kmcp_path                AS prev_path
+    FROM sessions s
+    LEFT JOIN summary_state ss USING (session_id)
+    WHERE s.session_id = %s
+"""
+
+
+def _prior_capture(sid: str) -> dict:
+    """The row summarize._delta_gate grades, for ONE session. Raises."""
+    import psycopg
+    from psycopg.rows import dict_row
+    if not CSD_DSN:
+        raise RuntimeError("no archive DSN configured")
+    with psycopg.connect(CSD_DSN, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        row = dict(conn.execute(_PRIOR_SQL, (sid,)).fetchone() or {})
+        ledger = 0
+        if conn.execute("SELECT to_regclass('public.summary_passes') AS t"
+                        ).fetchone()["t"]:
+            hit = conn.execute("SELECT max(pass) AS p FROM summary_passes "
+                               "WHERE session_id = %s AND status = 'written'",
+                               (sid,)).fetchone()
+            ledger = int((hit or {}).get("p") or 0)
+    row["session_id"] = sid
+    # A session captured BEFORE the ledger existed has no row for its pass 1 —
+    # only a watermark. Count that capture, so its continuation is numbered
+    # (and titled) pass 2 instead of re-using pass 1's number.
+    captured = bool(row.get("prev_wm") or row.get("prev_leaf")
+                    or row.get("prev_app") or row.get("state") == "summarized")
+    row["prev_pass"] = max(ledger, 1 if captured else 0)
+    return row
+
+
+def summary_scope(sid: str):
+    """Cheap prior-capture facts for the UI label — DB only, NO transcript
+    classification (this rides the /api/session poll). None when the session was
+    never captured, or the archive is unreachable. Never raises."""
+    now = time.time()
+    with _SCOPE_LOCK:
+        hit = _SCOPE_CACHE.get(sid)
+        if hit and now - hit[0] < SCOPE_TTL_S:
+            return hit[1]
+    out = None
+    try:
+        row = _prior_capture(sid)
+        if row.get("prev_pass"):
+            from .. import session_mgmt as mgmt
+            from .. import summarize as ph4
+            wm, src = mgmt._watermark_for(sid, CSD_DSN, KMCP_DSN)
+            app, path = row.get("prev_app"), row.get("prev_path")
+            out = {"since": ph4._iso(wm), "source": src,
+                   "pass": row["prev_pass"] + 1,
+                   "prior": f"{app}:{path}" if app and path else None}
+    except Exception:  # noqa: BLE001 — no label is fine; a 500 is not
+        out = None
+    with _SCOPE_LOCK:
+        _SCOPE_CACHE[sid] = (now, out)
+    return out
+
+
+def resolve_summary_scope(sid: str, mode: str = "auto") -> dict:
+    """How the next pass should be scoped. NEVER raises.
+
+    auto  — delta when a watermark resolves AND the gate calls the tail real.
+    force — delta from the watermark whatever the gate thinks of the tail.
+    off   — full scope, the historic behaviour.
+    """
+    out = {"delta": False, "pass": 1, "since": None, "source": "none",
+           "prior": None, "mode": mode, "records": None,
+           "note": None, "warning": None}
+    try:
+        from .. import summarize as ph4
+        row = _prior_capture(sid)
+        gate = ph4._delta_gate(row, CSD_DSN, KMCP_DSN, enabled=(mode != "off"))
+    except Exception as exc:  # noqa: BLE001 — degrade to full, never block
+        out["note"] = (f"prior capture unresolved ({type(exc).__name__}: "
+                       f"{exc}) — full scope")
+        return out
+
+    out["pass"] = gate.pass_no
+    out["prior"] = gate.prev_ref
+    out["source"] = gate.source
+    out["records"] = gate.report.records if gate.report else None
+
+    if mode == "off":
+        out["note"] = "delta disabled for this dispatch — full scope"
+        return out
+    if gate.watermark is None:
+        # No window => no honest continuation. Full transcript, standalone —
+        # never full scope wearing a continuation label (summarize._delta_gate's
+        # invariant, and the reason this branch does not "force" anything).
+        out["note"] = ("no summary watermark resolvable — full scope"
+                       if row.get("prev_pass") else None)
+        return out
+
+    skip = gate.skip or ""
+    ceiling = skip.startswith("pass ceiling")
+    if not skip or ceiling or mode == "force":
+        out["delta"] = True
+        out["since"] = ph4._iso(gate.watermark)
+        if skip:
+            out["warning"] = f"{skip} — windowed and dispatched anyway"
+    else:
+        # Deliberate: the gate found nothing substantive since the last pass, so
+        # a delta entry would say nothing. Falling back to full scope RESTATES
+        # pass 1, which is the surprising half — so it is surfaced, not hidden.
+        out["warning"] = (f"{skip} — summarizing the FULL session again "
+                          "(delta:\"force\" windows it to the tail regardless)")
+    return out
+
+
+def _idle_warning(sid: str):
+    """Phase-4 quiesces a session for 900s before digesting it; the console
+    button does not — a manual close-out is deliberate, and hard-blocking it
+    would make the operator wait on a session they just finished with. But a
+    transcript still being written is digested SHORT, silently, so the
+    condition is surfaced instead of enforced."""
+    blocked = answer_blocked(sid)
+    if blocked and "in flight" in blocked:
+        return ("a console-spawned run is still in flight — whatever it writes "
+                "lands after this digest and will NOT be summarized")
+    src = find_session(sid)
+    try:
+        idle = (time.time() - src.stat().st_mtime) if src else None
+    except OSError:
+        idle = None
+    if idle is not None and idle < SUMMARIZE_IDLE_WARN_S:
+        return (f"session wrote {int(idle)}s ago (phase-4 waits "
+                f"{SUMMARIZE_IDLE_WARN_S}s before digesting) — anything written "
+                "from now on is NOT in this summary")
+    return None
+
+
+# --- pass ledger claim (console ⟷ launchd single dispatch) --------------------
+
+def _claim_pass(sid: str, pass_no: int) -> dict:
+    """Take the session-scoped advisory lock and open this pass's ledger row.
+
+    The lock lives on the RETURNED connection and is held until the child exits
+    (_settle_pass releases it) — that is what stops the console and the launchd
+    timer from digesting the same tail into two entries. An unreachable archive
+    is not a refusal: the pass runs unrecorded and says so."""
+    if not CSD_DSN:
+        return {"conn": None, "refused": None,
+                "note": "pass not recorded (no archive DSN)"}
+    conn = None
+    try:
+        import psycopg
+        from .. import summarize as ph4
+        conn = psycopg.connect(CSD_DSN, connect_timeout=5)
+        ph4.ensure_passes_table(conn)
+        if not ph4.claim_session(conn, sid):
+            conn.close()
+            return {"conn": None, "note": None,
+                    "refused": "another summarize pass is already in flight for "
+                               "this session (the console or the launchd timer "
+                               "holds it) — try again when it settles"}
+        ph4.open_pass(conn, sid, pass_no)
+        return {"conn": conn, "refused": None, "note": None}
+    except Exception as exc:  # noqa: BLE001 — the ledger must not block a pass
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        return {"conn": None, "refused": None,
+                "note": f"pass not recorded ({type(exc).__name__}: {exc})"}
+
+
+def _settle_pass(sid: str, claim, pass_no: int, status: str, detail=None) -> None:
+    """Close the ledger row and release the claim. The WATERMARK is not stamped
+    here — the child writes the kmcp entry, and `csd reconcile-summaries` is the
+    one thing allowed to move summary_state (truth from the ledger, not from the
+    narrator)."""
+    conn = (claim or {}).get("conn")
+    if conn is None:
+        return
+    try:
+        from .. import summarize as ph4
+        ph4.record_pass(conn, sid, pass_no, status=status, detail=detail)
+        ph4.release_session(conn, sid)
+    except Exception:  # noqa: BLE001
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    with _SCOPE_LOCK:
+        _SCOPE_CACHE.pop(sid, None)
+
+
 SUMMARIZE_PROMPT = "/session-summary"
 SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
 SUMMARY_MIN_OUTPUT_BYTES = 40        # child output past the header ⇒ it ran
 _SUMMARY_LOG_DIR = CONSOLE_STATE / "summaries"
 
 
-def _await_summary(sid: str, proc, log_path: Path, base_size: int):
+def _await_summary(sid: str, proc, log_path: Path, base_size: int,
+                   claim=None, pass_no: int = 1):
     """Resolve a dispatched summary. rc!=0 → failed. rc==0 does NOT prove a kmcp
     write happened — but a child that produced NO output past the spawn header
-    is the observed silent no-op, so it is downgraded rather than called done."""
+    is the observed silent no-op, so it is downgraded rather than called done.
+    The same verdict settles the pass ledger row and releases its claim."""
     rc = proc.wait()
     if rc != 0:
         SUMMARIZING[sid] = f"summary failed (rc={rc})"
+        _settle_pass(sid, claim, pass_no, "failed", f"child rc={rc}")
         return
     try:
         produced = log_path.stat().st_size - base_size
     except OSError:
         produced = SUMMARY_MIN_OUTPUT_BYTES + 1     # can't measure → don't accuse
-    SUMMARIZING[sid] = ("done" if produced > SUMMARY_MIN_OUTPUT_BYTES
-                        else "summary produced no output")
+    ok = produced > SUMMARY_MIN_OUTPUT_BYTES
+    SUMMARIZING[sid] = "done" if ok else "summary produced no output"
+    _settle_pass(sid, claim, pass_no, "written" if ok else "failed",
+                 None if ok else "child produced no output")
 
 
-def summarize_session(sid: str, cwd: str, archive: bool = True) -> dict:
+def summarize_session(sid: str, cwd: str, archive: bool = True,
+                      delta: str = "auto", dry_run: bool = False) -> dict:
     """Dispatch the off-session summary. archive=True (the default, and the
     only behaviour until the digest-reader actions) also archives the session
     the moment the summary is dispatched; archive=False leaves the session in
-    the sidebar — summary only. The dispatch itself is identical either way."""
+    the sidebar — summary only. The dispatch itself is identical either way.
+
+    `delta` scopes the pass (auto | force | off — see resolve_summary_scope):
+    a session already captured once is summarized only over the tail its prior
+    pass never saw, and the window travels to the child through the envelope's
+    appended system prompt. dry_run resolves the scope and returns it WITHOUT
+    claiming, spawning or archiving anything — the testable seam."""
+    if delta not in DELTA_MODES:
+        delta = "auto"
     if SUMMARIZING.get(sid) == "running":
         return {"ok": False, "error": "a summary is already running"}
+
+    scope = resolve_summary_scope(sid, delta)
+    idle = _idle_warning(sid)
+    src = find_session(sid)
+    base = {"action": "summarize", "session": sid,
+            "pass": scope["pass"], "since": scope["since"],
+            "delta_mode": "delta" if scope["delta"] else "full",
+            "prior": scope["prior"], "scope_note": scope["note"],
+            "warning": " · ".join(w for w in (scope["warning"], idle) if w) or None}
+    if dry_run:
+        return {"ok": True, "dry_run": True, "archived": False,
+                "transcript": str(src) if src else None,
+                "scope": scope, **base}
+
+    # One dispatch per session, console AND launchd: the claim is an advisory
+    # lock held for the whole pass. A lost claim REFUSES (two passes over one
+    # tail would write two entries); an unreachable ledger does not.
+    claim = _claim_pass(sid, scope["pass"])
+    if claim["refused"]:
+        return {"ok": False, "error": claim["refused"], **base}
+
     # Off-session: fresh `claude -p`, the UUID as the /session-summary argument.
     # No --resume — the original transcript is digested, never appended to.
     # A dedicated per-summary log lets _await_summary measure real output.
@@ -2574,12 +2869,20 @@ def summarize_session(sid: str, cwd: str, archive: bool = True) -> dict:
     # ~/.claude/projects (the ambient cwd here is the session's own working dir,
     # often a git worktree that cannot see it). The transcript path is resolved
     # HERE and handed down, so the child never needs the compound shell command
-    # a headless run cannot get approved.
-    src = find_session(sid)
-    proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
-                        log_path=log_path, action="summarize",
-                        envelope_ctx={"session_id": sid,
-                                      "transcript": str(src) if src else None})
+    # a headless run cannot get approved. On a continuation the delta window
+    # rides along the same channel — the child has no scope to resolve it.
+    ctx = {"session_id": sid, "transcript": str(src) if src else None}
+    if scope["delta"]:
+        ctx.update({"since": scope["since"], "pass": scope["pass"],
+                    "prior": scope["prior"]})
+    try:
+        proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
+                            log_path=log_path, action="summarize",
+                            envelope_ctx=ctx)
+    except Exception as exc:  # noqa: BLE001 — a failed spawn must free the claim
+        _settle_pass(sid, claim, scope["pass"], "failed",
+                     f"spawn failed: {type(exc).__name__}: {exc}")
+        return {"ok": False, "error": f"spawn failed: {exc}", **base}
     try:
         base_size = log_path.stat().st_size          # header only, pre-output
     except OSError:
@@ -2588,13 +2891,18 @@ def summarize_session(sid: str, cwd: str, archive: bool = True) -> dict:
     if archive:
         set_archived(sid, True, reason="session-summary")
     threading.Thread(target=_await_summary,
-                     args=(sid, proc, log_path, base_size),
+                     args=(sid, proc, log_path, base_size, claim, scope["pass"]),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
-    return {"ok": True, "action": "summarize", "session": sid, "pid": proc.pid,
-            "archived": archive,
+    return {"ok": True, "pid": proc.pid, "archived": archive,
             "envelope": getattr(proc, "envelope_note", None),
-            "note": "independent off-session summary dispatched; "
-                    + ("session archived" if archive else "session not archived")}
+            "ledger": claim.get("note"),
+            "note": ("independent off-session summary dispatched"
+                     + (f" — pass {scope['pass']}, NEW work since "
+                        f"{(scope['since'] or '')[:16]}" if scope["delta"]
+                        else " — full session scope")
+                     + "; "
+                     + ("session archived" if archive else "session not archived")),
+            **base}
 
 
 # ----------------------------------------------------------------------------
@@ -3864,6 +4172,16 @@ class Handler(SimpleHTTPRequestHandler):
             if p is None:
                 return self._json({"error": "not found"}, 404)
             return self._json({"timeline": session_timeline.payload(sid, p)})
+        if u.path == "/api/summary-scope":
+            # The Summarize label's data for ONE session (the reader overlay
+            # can be open on a session the detail pane isn't showing).
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            return self._json({"session_id": sid,
+                               "scope": None if ":" in sid
+                                        else summary_scope(sid)})
+
         if u.path == "/api/tldr":
             # Pure read for the reader popover: cached store + staleness +
             # worker status. Never enqueues (peek, not request).
@@ -4030,8 +4348,16 @@ class Handler(SimpleHTTPRequestHandler):
                               "on their own — summarize the parent"}, 400)
             # body.archive=false → summary only (the digest reader's plain
             # Summarize). Absent/true keeps the historical archive-on-dispatch.
+            # body.delta: auto (default) | force | off — how the pass is scoped.
+            mode = body.get("delta", "auto")
+            mode = {True: "force", False: "off"}.get(mode, mode)
+            if mode not in DELTA_MODES:
+                return self._json(
+                    {"error": f"delta must be one of {', '.join(DELTA_MODES)}"},
+                    400)
             r = summarize_session(sid, cwd,
-                                  archive=body.get("archive", True) is not False)
+                                  archive=body.get("archive", True) is not False,
+                                  delta=mode, dry_run=bool(body.get("dry_run")))
             return self._json(r, 200 if r["ok"] else 409)
 
         if route == "/api/angles/mine":

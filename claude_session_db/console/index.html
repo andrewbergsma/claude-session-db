@@ -2181,7 +2181,7 @@ function renderHeader(s){
           : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
       <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
       <button class="act" onclick="act('summarize')"
-        title="Summarize this session independently (a separate off-session claude run that never touches the transcript), then archive it">✎ Summarize + archive</button>
+        title="${esc(sumTitle(s.summary_scope, true))}">${sumLabel(s.summary_scope)} + archive</button>
       <button class="act" onclick="openMineMenu()"
         title="Mine the latest turn's angles now — all of them, or pick one from the menu">⟳ Mine angles ▾</button>
       <button class="act" onclick="setTitle()"
@@ -2530,6 +2530,37 @@ function searchDetail(e){
     ${hits ? `<div class="rl-hits"><div class="rl-hits-h">surfaced entries — offered, not consumed</div>${hits}</div>` : ""}`;
 }
 
+/* ---------- repeatable summary passes: the Summarize label -------------------
+   A session summarized once is summarized AGAIN only over the tail its prior
+   pass never saw (server side: resolve_summary_scope + summarize._delta_gate).
+   The button has to SAY that — "Summarize" on an already-captured session reads
+   as "do it all again", which is exactly what it no longer does. scope comes
+   from /api/session (summary_scope) or /api/summary-scope; a null scope (never
+   captured, or the archive unreachable) keeps the historic label. */
+function shortDate(iso){
+  if(!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d) ? String(iso).slice(0,10)
+    : d.toLocaleDateString(undefined, {month:"short", day:"numeric"});
+}
+function sumLabel(sc){
+  return (sc && sc.since)
+    ? `✎ Summarize NEW work since ${shortDate(sc.since)} (pass ${sc.pass})`
+    : "✎ Summarize";
+}
+function sumTitle(sc, archives){
+  const tail = archives
+    ? " The session is archived the moment the summary is dispatched."
+    : " The session is NOT archived.";
+  return (sc && sc.since)
+    ? `This session was already summarized up to ${sc.since}` +
+      (sc.prior ? ` (${sc.prior})` : "") +
+      `. Pass ${sc.pass} digests ONLY the tail after that watermark and links ` +
+      `back to the prior pass — it does not restate work already captured.` + tail
+    : "Summarize this session independently (a separate off-session claude run " +
+      "that digests the transcript from disk and never touches it)." + tail;
+}
+
 /* ---------- session actions: stop / archive / summarize ---------- */
 function actmsg(text, bad){
   const el = document.getElementById("actmsg");
@@ -2551,8 +2582,13 @@ async function act(kind){
       "Stop this run?\n\nSIGINT → SIGTERM → SIGKILL to the run this console " +
       "spawned. The turn in flight is lost."))
     return;
+  const sc = s.summary_scope;
   if(kind === "summarize" && !confirm(
-      "Summarize this session independently, then archive it?\n\n" +
+      (sc && sc.since
+        ? `Summarize NEW work since ${sc.since} (pass ${sc.pass}), then archive it?\n\n` +
+          "Only the tail after the prior summary's watermark is digested; the " +
+          "new entry links back to " + (sc.prior || "the earlier pass") + ".\n\n"
+        : "Summarize this session independently, then archive it?\n\n") +
       "This spawns a SEPARATE off-session Claude run that digests the transcript " +
       "from disk and writes to kmcp — it never resumes or touches this session. " +
       "The session is archived immediately."))
@@ -2566,9 +2602,13 @@ async function act(kind){
   // fresh empty span, so a message set before refreshSession was wiped
   // sub-second later (summarize had no other detail-pane feedback at all).
   await refreshSession(false, true); loadNav();
+  const dispatched = "archived · " + (d.delta_mode === "delta"
+    ? `pass ${d.pass} dispatched — NEW work only, since ${String(d.since||"").slice(0,16)}`
+    : "independent summary dispatched (full session scope)")
+    + (d.warning ? "  ⚠ " + d.warning : "");
   actmsg(kind === "stop" ? "stopped" :
          kind === "archive" ? (body.archived ? "archived" : "unarchived") :
-         "archived · independent summary dispatched (watch the summarizing chip)");
+         dispatched, kind === "summarize" && !!d.warning);
 }
 
 /* ---------- mine menu: all angles, or just one ------------------------------
@@ -4166,7 +4206,7 @@ function openReader(id, kind){
   // may already be gone (archiving removes it from the Projects list).
   const prev = (readerFor && readerFor.id === id) ? readerFor : null;
   readerFor = {id, kind};
-  if(prev) for(const k of ["archived","dispatched","cwd","msg","bad","busy"])
+  if(prev) for(const k of ["archived","dispatched","cwd","msg","bad","busy","scope"])
     readerFor[k] = prev[k];
   const row = (navData && navData.sessions || []).find(x => x.session_id === id);
   if(row){
@@ -4182,9 +4222,22 @@ function openReader(id, kind){
   const st = kind === "tldr" ? tldrStateOf(s) : tlStateOf(s);
   if(st === "abs" || st === "stale")
     post(kind === "tldr" ? "/api/tldr" : "/api/timeline", {session_id: id});
+  if(readerFor.scope === undefined){ readerFor.scope = null; loadReaderScope(id); }
   loadReader();
 }
 function switchReader(kind){ if(readerFor) openReader(readerFor.id, kind); }
+/* The reader can be open on a session the detail pane isn't showing, so its
+   Summarize label fetches the prior-capture facts itself (cheap, TTL-cached
+   server side). A failure leaves scope null — the historic label. */
+async function loadReaderScope(id){
+  if(id.includes(":")) return;
+  let d = null;
+  try { d = await (await fetch("/api/summary-scope?id=" + encodeURIComponent(id))).json(); }
+  catch(e){ return; }
+  if(!readerFor || readerFor.id !== id || !d) return;
+  readerFor.scope = d.scope || null;
+  renderReaderActs();
+}
 function closeReader(fromPop){
   const dlg = document.getElementById("readerdlg");
   if(!dlg.classList.contains("open")) return;
@@ -4282,14 +4335,14 @@ function readerActsHtml(){
     : r.busy ? "working…"
     : r.dispatched ? "summary dispatched — watch the summarizing chip"
     : running ? "a summary is already running for this session" : "";
+  const sc = r.scope;
   const btn = (label, fn, dis, title) =>
     `<button class="act sm" ${dis ? "disabled" : ""} onclick="readerAct('${fn}')"
        title="${esc(title)}">${label}</button>`;
   return `<div class="rd-acts" id="rd-acts">
-    ${btn("✎ Summarize", "summarize", sumDis, sumWhy ||
-      "Independent off-session summary (a separate claude run digests the transcript from disk and writes to kmcp — it never touches this session). The session is NOT archived.")}
-    ${btn("✎⇩ Sum + archive", "sumarch", sumDis, sumWhy ||
-      "Off-session summary, and the session is archived the moment it is dispatched — the existing Summarize + archive.")}
+    ${btn(sumLabel(sc), "summarize", sumDis, sumWhy || sumTitle(sc, false))}
+    ${btn(sc && sc.since ? "✎⇩ …and archive" : "✎⇩ Sum + archive", "sumarch",
+      sumDis, sumWhy || sumTitle(sc, true))}
     ${btn(r.archived ? "⇧ Unarchive" : "⇩ Archive", "archive", r.busy,
       r.busy ? "working…" : r.archived
         ? "Bring the session back to the sidebar (an index entry flips — nothing on disk changes)"
@@ -4324,12 +4377,18 @@ async function readerAct(kind){
     r.archived = !r.archived;
     r.msg = r.archived ? "archived ✓ — moved to the Archive tab"
                        : "unarchived ✓ — back in the sidebar";
-  } else if(kind === "sumarch"){
-    r.archived = true; r.dispatched = true;
-    r.msg = "summary dispatched ✓ · archived — moved to the Archive tab";
   } else {
+    const what = d.delta_mode === "delta"
+      ? `pass ${d.pass} dispatched ✓ — NEW work only, since ${String(d.since||"").slice(0,16)}`
+      : "summary dispatched ✓ (full session scope)";
     r.dispatched = true;
-    r.msg = "summary dispatched ✓ — session stays in the sidebar";
+    if(kind === "sumarch"){
+      r.archived = true;
+      r.msg = what + " · archived — moved to the Archive tab";
+    } else {
+      r.msg = what + " — session stays in the sidebar";
+    }
+    if(d.warning){ r.msg += "  ⚠ " + d.warning; r.bad = true; }
   }
   renderReaderActs();
   loadNav();                 // archived rows leave/rejoin the list; chips update

@@ -89,6 +89,19 @@ historically failing paths). Auto entries carry the `auto-summary` tag; the
 target application is inferred deterministically from the session cwd
 (`APP_ALIASES` + live app check, fallback `CSD_SUMMARIZE_DEFAULT_APP`).
 
+**Repeatable delta passes.** A session summarized once is summarized *again*
+over only the tail its prior pass never saw. `_watermark_for` resolves where the
+last pass stopped (leaf → count → kmcp entry `created_at`); `_delta_gate` grades
+the tail with `classify_delta` and opens a delta window only when it is `real`
+and clears `CSD_SUMMARIZE_MIN_DELTA_RECORDS` (never without a resolvable
+watermark — full scope wearing a continuation label is the failure this
+prevents). The digest is `render(since=)`, the entry is dated to the window's
+END, titled `Session (cont. N)`, spans the window, links the prior pass and
+carries `delta-capture`. The `summary_passes` ledger records every pass
+(`in_flight`/`written`/`failed`) behind a per-session advisory lock, so the
+console and the launchd timer can never dispatch two passes over one tail;
+`CSD_SUMMARIZE_MAX_PASSES` (6) caps a session's entries.
+
 Reliability mirrors the sweep: `summarize.lock` liveness guard +
 `summarize.heartbeat` (`csd summarize-health`), per-session failure isolation
 with a `summarize_attempts` backoff ledger (`MAX_ATTEMPTS`, 6h backoff), and a
@@ -176,6 +189,18 @@ when two runs share a project dir, and blind between spawn and first write.
   for visibility, not as an archive gate).
   Summarize is the **first action dispatched through the side-session permission
   envelope** (below); every other spawn is still ambient.
+  It is also **repeatable**: `resolve_summary_scope()` grades the session through
+  the *same* `summarize._delta_gate` the launchd timer uses, so a second press
+  captures only the work after the prior pass's watermark — the button reads
+  "Summarize NEW work since ‹date› (pass N)", and the window, the literal
+  `session_digest.py --since` command and the prior entry ref travel to the child
+  in the envelope's appended system prompt. `delta` in the POST body picks the
+  scope (`auto` default / `force` / `off`), the pass is claimed and recorded in
+  `summary_passes`, and a lost claim refuses. Same doctrine as `resolve_envelope`:
+  an unreachable archive degrades to full scope with the reason surfaced, never a
+  block. The console does not quiesce (a manual close-out is deliberate) — a
+  transcript written inside phase-4's idle window comes back as a `warning` the
+  UI shows, because a live session is digested short, silently.
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
 - **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,

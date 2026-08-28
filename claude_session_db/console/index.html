@@ -340,6 +340,44 @@
   .turn.assistant .who { color:var(--ink2); }
   .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
   .turn.assistant .txt { color:var(--ink); }
+  /* --- markdown-rendered turn text (mdLite) --------------------------------
+     .md drops pre-wrap: the renderer emits the block structure, so the raw
+     newlines must collapse or every paragraph doubles up. Code fences keep
+     their own `white-space:pre` and scroll INSIDE their box — #stream is
+     overflow-x:hidden and .ev .b is min-width:0, so a 300-column code block
+     can never push the chat column sideways. */
+  .txt.md { white-space:normal; line-height:1.5; }
+  .txt.md > :first-child { margin-top:0; }
+  .txt.md > :last-child { margin-bottom:0; }
+  .txt.md p { margin:0 0 7px; }
+  .txt.md ul, .txt.md ol { margin:0 0 7px; padding-left:20px; }
+  .txt.md li { margin:2px 0; }
+  .txt.md li > code { word-break:break-word; }
+  .txt.md h1, .txt.md h2, .txt.md h3, .txt.md h4 {
+      font:700 12.5px var(--mono); color:var(--ink); margin:11px 0 5px;
+      letter-spacing:.2px; }
+  .txt.md h1 { font-size:14px; }
+  .txt.md h3, .txt.md h4 { font-size:10.5px; color:var(--ink2);
+      text-transform:uppercase; letter-spacing:.6px; }
+  .txt.md code { font:12px var(--mono); background:var(--surface2);
+      border:1px solid var(--border); border-radius:4px; padding:0 4px;
+      color:var(--ink); }
+  .txt.md pre { background:var(--surface2); border:1px solid var(--border);
+      border-radius:6px; padding:8px 10px; margin:6px 0 8px;
+      max-width:100%; overflow-x:auto; }
+  .txt.md pre > code { display:block; white-space:pre; word-break:normal;
+      font:12px/1.45 var(--mono); background:none; border:0; padding:0; }
+  .txt.md pre[data-lang]::before { content:attr(data-lang); display:block;
+      font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.6px;
+      color:var(--muted); margin-bottom:5px; }
+  .txt.md blockquote { margin:6px 0; padding:1px 0 1px 10px; color:var(--ink2);
+      border-left:2px solid var(--border); }
+  .txt.md blockquote > :last-child { margin-bottom:0; }
+  .txt.md a { color:var(--accent); word-break:break-word; }
+  .txt.md strong { color:var(--ink); font-weight:600; }
+  .txt.md em { font-style:italic; }
+  .txt.md del { color:var(--muted); }
+  .txt.md hr { border:0; border-top:1px solid var(--border); margin:10px 0; }
   .subtools { margin-top:6px; }
   .trow { font:11px var(--mono); margin:2px 0; }
   .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
@@ -2448,10 +2486,10 @@ function renderStream(s){
               `<span class="gutter">${clock(e.ts)}</span>`;
     const tst = `<span class="tstamp">${hm(e.ts)}</span>`;
     if(e.kind==="user")
-      html += `${w}<div class="b${crCls('u:'+e.uuid)}"><div class="turn user"><div class="who">${crc('u:'+e.uuid)}you${tst}</div><div class="txt">${esc(e.text)}</div></div></div></div>`;
+      html += `${w}<div class="b${crCls('u:'+e.uuid)}"><div class="turn user"><div class="who">${crc('u:'+e.uuid)}you${tst}</div><div class="txt md">${mdText(e.text)}</div></div></div></div>`;
     else if(e.kind==="assistant"){
       const tools = e.tools?.length ? `<div class="subtools">${toolRows(e.tools, e.ts, live)}</div>` : "";
-      html += `${w}<div class="b${crCls('a:'+e.uuid)}"><div class="turn assistant"><div class="who">${crc('a:'+e.uuid)}agent${tst}</div><div class="txt">${esc(e.text)}</div>${tools}</div></div></div>`;
+      html += `${w}<div class="b${crCls('a:'+e.uuid)}"><div class="turn assistant"><div class="who">${crc('a:'+e.uuid)}agent${tst}</div><div class="txt md">${mdText(e.text)}</div>${tools}</div></div></div>`;
     } else if(e.kind==="read")
       html += `${w}<div class="b">${readRow(e, i)}</div></div>`;
     else if(e.kind==="search")
@@ -2478,7 +2516,7 @@ function renderStream(s){
         <div class="who">you<span class="tstamp">${hm(q.queued_at)}</span> <span class="qbadge${failed ? " bad" : ""}">${failed ? "✗ failed" : "⏸ queued"}</span>
           <span class="qcancel" onclick="cancelQueued('${esc(q.id)}')"
             title="${failed ? "dismiss this failed message" : "cancel this queued message"}">✕ ${failed ? "dismiss" : "cancel"}</span></div>
-        <div class="txt">${esc(q.text)}</div>${err}
+        <div class="txt md">${mdText(q.text)}</div>${err}
       </div></div></div>`;
   });
   // Optimistic sends: a submitted answer only reaches the transcript once the
@@ -2490,7 +2528,7 @@ function renderStream(s){
     html += `<div class="ev"><span class="gutter">${clock(p.ts)}</span>
       <div class="b"><div class="turn user sending">
         <div class="who">you<span class="tstamp">${hm(p.ts)}</span> <span class="qbadge sending">⏳ sending</span></div>
-        <div class="txt">${esc(p.text)}</div>
+        <div class="txt md">${mdText(p.text)}</div>
       </div></div></div>`;
   });
   const st = document.getElementById("stream");
@@ -4604,33 +4642,103 @@ function renderVersion(){
     + `\nClick for the changelog.`;
 }
 
-/* Minimal markdown → HTML: headings, bullet lists, paragraphs, and inline
-   code/bold/links. Everything is escaped FIRST, so the markup we emit is the
-   only markup there is. */
-function mdLite(src){
-  const inline = t => esc(t)
-    .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")   // after bold: no stray ** left
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
-             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  const out = [], para = [];
-  let list = null;
-  const flushP = () => { if(para.length){ out.push(`<p>${inline(para.join(" "))}</p>`); para.length = 0; } };
-  const flushL = () => { if(list){ out.push(`<ul>${list.join("")}</ul>`); list = null; } };
+/* Minimal markdown -> HTML, dependency-free: fenced code, headings, bullet and
+   ordered lists, blockquotes, rules, paragraphs, and inline code/bold/italic/
+   strike/links. ONE renderer, shared by the changelog overlay and chat turns.
+
+   Escaping order is the whole security argument: every byte goes through esc()
+   FIRST and the markup emitted afterwards is the only markup there is — so a
+   transcript carrying <script> or raw HTML renders as visible text. Inline
+   code spans are lifted to placeholders before the emphasis passes, so
+   `**not bold**` inside a code chip stays literal. */
+const MD_PH = "\u0000";   // impossible in transcript text; survives esc()
+function mdInline(t){
+  const spans = [];
+  let s = esc(t).replace(/`([^`\n]+)`/g, (m, c) => {
+    spans.push(c); return MD_PH + (spans.length - 1) + MD_PH; });
+  // Emphasis delimiters must "hug" their text (no space just inside), or a
+  // shell glob line — `*.md and *.py` — silently turns italic. And there is
+  // deliberately NO __bold__ rule: `mcp__knowledge__search` and `__init__` are
+  // everywhere in these transcripts and must stay literal.
+  s = s.replace(/\*\*(\S|\S[^*]*?\S)\*\*/g, "<strong>$1</strong>")
+       .replace(/(^|[^\w*])\*(\S|\S[^*\n]*?\S)\*/g, "$1<em>$2</em>")   // after bold: no stray ** left
+       .replace(/~~(\S|\S[^~\n]*?\S)~~/g, "<del>$1</del>")
+       .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+                '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>')
+       // bare URLs, but never one we just wrapped in an <a href="…">
+       .replace(/(^|[\s(])(https?:\/\/[^\s<>()"']+)/g,
+                '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+  return s.replace(new RegExp(MD_PH + "(\\d+)" + MD_PH, "g"),
+                   (m, i) => `<code>${spans[i]}</code>`);
+}
+/* `breaks`: treat a single newline inside a paragraph as a hard break. ON for
+   chat turns (a prompt's own line structure is meaningful and used to survive
+   the old pre-wrap), OFF for CHANGELOG.md, which is hard-wrapped prose that
+   must re-flow. */
+function mdLite(src, breaks){
+  const out = [], para = [], quote = [];
+  let list = null, listTag = "ul", fence = null, fenceLang = "", code = null;
+  const flushP = () => { if(!para.length) return;
+    out.push(`<p>${breaks ? para.map(mdInline).join("<br>") : mdInline(para.join(" "))}</p>`);
+    para.length = 0; };
+  const flushL = () => { if(list){ out.push(`<${listTag}>${list.join("")}</${listTag}>`); list = null; } };
+  const flushQ = () => { if(quote.length){ const q = quote.join("\n"); quote.length = 0;
+                                           out.push(`<blockquote>${mdLite(q, breaks)}</blockquote>`); } };
+  const flush = () => { flushP(); flushL(); flushQ(); };
   for(const raw of String(src || "").split("\n")){
-    const h = raw.match(/^(#{1,4})\s+(.*)$/);
-    if(h){ flushP(); flushL(); const n = h[1].length;
-           out.push(`<h${n}>${inline(h[2])}</h${n}>`); continue; }
-    const li = raw.match(/^\s*[-*]\s+(.*)$/);
-    if(li){ flushP(); (list = list || []).push(`<li>${inline(li[1])}</li>`); continue; }
-    if(!raw.trim()){ flushP(); flushL(); continue; }
+    // ---- fenced code: verbatim + escaped, never touched by the inline pass ----
+    const f = raw.match(/^\s*(```+|~~~+)\s*([\w+#.-]*)\s*$/);
+    if(fence !== null){
+      if(f && f[1][0] === fence[0] && f[1].length >= fence.length && !f[2]){
+        out.push(`<pre${fenceLang ? ` data-lang="${esc(fenceLang)}"` : ""}>`
+                 + `<code>${esc(code.join("\n"))}</code></pre>`);
+        fence = null; code = null; continue;
+      }
+      code.push(raw); continue;
+    }
+    if(f){ flush(); fence = f[1]; fenceLang = f[2] || ""; code = []; continue; }
+
+    const h = raw.match(/^(#{1,6})\s+(.*)$/);
+    if(h){ flush(); const n = Math.min(h[1].length, 4);
+           out.push(`<h${n}>${mdInline(h[2].replace(/\s+#+\s*$/, ""))}</h${n}>`); continue; }
+    if(/^\s*(?:([-*_])\s*)(?:\1\s*){2,}$/.test(raw)){ flush(); out.push("<hr>"); continue; }
+    const bq = raw.match(/^\s*>\s?(.*)$/);
+    if(bq){ flushP(); flushL(); quote.push(bq[1]); continue; }
+    if(quote.length && raw.trim()){ quote.push(raw); continue; }   // lazy quote continuation
+
+    const ul = raw.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = ul ? null : raw.match(/^\s*\d+[.)]\s+(.*)$/);
+    if(ul || ol){
+      const tag = ul ? "ul" : "ol";
+      flushP(); flushQ();
+      if(list && listTag !== tag) flushL();
+      listTag = tag;
+      (list = list || []).push(`<li>${mdInline((ul || ol)[1])}</li>`);
+      continue;
+    }
+    if(!raw.trim()){ flush(); continue; }
+    // lazy continuation of the open list item
     if(list){ list[list.length - 1] = list[list.length - 1]
-                .replace(/<\/li>$/, " " + inline(raw.trim()) + "</li>"); continue; }
+                .replace(/<\/li>$/, " " + mdInline(raw.trim()) + "</li>"); continue; }
     para.push(raw.trim());
   }
-  flushP(); flushL();
+  // an unterminated fence (a turn cut mid-stream) still renders what it has
+  if(fence !== null && code) out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+  flush();
   return out.join("");
+}
+/* Chat-turn markdown, memoized by text. renderStream re-runs over the WHOLE
+   transcript on every 3s poll; mdLite is cheap, but hundreds of turns x 20
+   polls/min is not free and a landed turn's text never changes. */
+const mdCache = new Map();
+function mdText(t){
+  const k = String(t ?? "");
+  let v = mdCache.get(k);
+  if(v === undefined){
+    if(mdCache.size > 1500) mdCache.clear();
+    v = mdLite(k, true); mdCache.set(k, v);
+  }
+  return v;
 }
 
 async function openChangelog(){

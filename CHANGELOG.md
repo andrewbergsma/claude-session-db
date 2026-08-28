@@ -19,6 +19,16 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.10.0] - 2026-08-28
+
+### Added
+- Console chat pane renders markdown, like Claude Code: `mdLite` extended with
+  fenced code blocks (with language label), ordered lists, blockquotes,
+  `~~del~~`, autolinked URLs, and h1-h6 headings; applied to user/assistant/
+  queued/optimistic turns via a memoized `mdText`. Escape-first, so raw HTML in
+  transcripts stays inert; `__dunder__` / `mcp__*` identifiers deliberately
+  never trigger emphasis. Changelog overlay shares the same renderer.
+
 ## [3.9.0] - 2026-08-28
 
 ### Added

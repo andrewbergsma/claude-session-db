@@ -15,6 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import click
 
+from . import __version__
 from .postgres import SessionArchive, resolve_dsn
 from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
 from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
@@ -73,6 +74,8 @@ def _redact(dsn: str) -> str:
 
 
 @click.group()
+@click.version_option(__version__, "-V", "--version", prog_name="csd",
+                      message="%(prog)s %(version)s")
 @click.option("--dsn", envvar="CSD_DATABASE_URL", default=None,
               help="Postgres DSN (default: derived from $DATABASE_URL → claude_sessions).")
 @click.pass_context

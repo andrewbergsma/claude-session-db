@@ -106,6 +106,56 @@
   #batchbar .bstat .bi .lb { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
   #batchbar .st-done { color:var(--good); } #batchbar .st-failed { color:var(--warn); }
   #batchbar .st-running { color:var(--accent); } #batchbar .st-queued, #batchbar .st-cancelled { color:var(--muted); }
+  /* ---- version chip (sidebar foot) + changelog overlay ----
+     The console is long-lived (usually launchd-respawned) and keeps executing
+     the code it BOOTED with; the amber dot fires when the running sha differs
+     from the repo's HEAD on disk, i.e. "restart to pick this up". */
+  #navver { position:sticky; bottom:0; z-index:5; background:var(--surface);
+            border-top:1px solid var(--border); padding:5px 12px 6px;
+            font:10.5px var(--mono); color:var(--muted); cursor:pointer;
+            display:flex; align-items:center; gap:6px; user-select:none; }
+  #navver:hover { color:var(--ink); background:var(--surface2); }
+  #navver .vdot { display:none; width:6px; height:6px; border-radius:50%;
+                  background:var(--warn); flex:none; }
+  #navver.stale .vdot { display:block; }
+  #navver.stale { color:var(--warn); }
+  #navver .vsha { opacity:.75; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #navver .vspacer { margin-left:auto; }
+  body.navmin #navver { justify-content:center; padding:5px 0 6px; }
+  body.navmin #navver .vsha, body.navmin #navver .vspacer { display:none; }
+  /* the batch bar stacks ABOVE the version footer instead of under it */
+  #batchbar { bottom:27px; }
+
+  /* changelog overlay — same fixed-inset idiom as #fileview (quiet header, Esc) */
+  #changelog { position:fixed; inset:0; background:var(--bg); z-index:62;
+               display:none; flex-direction:column; padding:16px 20px; overflow:hidden; }
+  #changelog.open { display:flex; }
+  #changelog .clh { display:flex; align-items:baseline; gap:12px; margin-bottom:10px; min-width:0; }
+  #changelog .clh h2 { font:600 14px var(--mono); flex:none; }
+  #changelog .clh .clmeta { color:var(--muted); font:11px var(--mono); min-width:0;
+                            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #changelog .clh .x { margin-left:auto; cursor:pointer; color:var(--muted);
+                       font:12px var(--mono); flex:none; }
+  #changelog .clh .x:hover { color:var(--ink); }
+  #clstale { font:11px var(--mono); color:var(--warn); margin-bottom:10px;
+             border:1px solid var(--warn); border-radius:6px; padding:6px 9px; display:none; }
+  #clstale.on { display:block; }
+  #clbody { flex:1; overflow:auto; min-height:0; max-width:860px;
+            -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+  #clbody h1 { font-size:15px; margin:0 0 8px; }
+  #clbody h2 { font:600 13px var(--mono); color:var(--accent); margin:20px 0 6px;
+               padding-top:10px; border-top:1px solid var(--border); }
+  #clbody h3, #clbody h4 { font-size:10.5px; font-family:var(--mono); letter-spacing:.6px;
+                           text-transform:uppercase; color:var(--ink2); margin:12px 0 4px; }
+  #clbody p { font-size:12.5px; color:var(--ink2); margin:6px 0; }
+  #clbody ul { margin:4px 0 10px; padding-left:18px; }
+  #clbody li { font-size:12.5px; color:var(--ink2); line-height:1.55; margin:3px 0; }
+  #clbody code { font:11.5px var(--mono); background:var(--surface2);
+                 border-radius:4px; padding:1px 4px; color:var(--ink); }
+  #clbody strong { color:var(--ink); }
+  #clbody em { color:var(--ink); font-style:italic; }
+  #clbody a { color:var(--accent); }
+
   .sess .bchk { cursor:pointer; color:var(--muted); font-size:12px; }
   .sess.bselrow { background:var(--surface2); box-shadow:inset 2px 0 0 var(--accent); }
   .sess.bselrow .bchk { color:var(--accent); }
@@ -1054,6 +1104,8 @@
     <div id="navrail"></div>
     <div id="navlist"></div>
     <div id="batchbar"></div>
+    <div id="navver" onclick="openChangelog()" title="version — click for the changelog">
+      <span class="vdot"></span><span class="vlbl">csd</span></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
   <div id="navback" onclick="closeNavDrawer()"></div>
@@ -1134,6 +1186,14 @@
       <button class="act sm primary" onclick="fvInsert()"
         title="append the root-relative path to the answer composer">↳ insert into composer</button>
     </div>
+  </div>
+
+  <!-- changelog overlay: CHANGELOG.md rendered client-side (no libraries) -->
+  <div id="changelog">
+    <div class="clh"><h2>Changelog</h2><span class="clmeta" id="clmeta"></span>
+      <span class="x" onclick="closeChangelog()">✕ close (Esc)</span></div>
+    <div id="clstale"></div>
+    <div id="clbody"></div>
   </div>
 
   <!-- topic dialog: reusable topic › subtopic taxonomy (datalist autocomplete) -->
@@ -1265,6 +1325,8 @@ const BROWSE_BASE = "https://kmcp-personal.bergsma.app/browse/";
 /* Escape also dismisses an open rail detail — as long as you're not typing. */
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
+  const cl = document.getElementById("changelog");
+  if(cl && cl.classList.contains("open")){ closeChangelog(); return; }
   const cd = document.getElementById("crdlg");
   if(cd && cd.classList.contains("open")){ closeCrDlg(); return; }
   const rd = document.getElementById("readerdlg");
@@ -1295,6 +1357,7 @@ function ovDone(){
 }
 window.addEventListener("popstate", () => {
   if(ovClosing > 0){ ovClosing--; return; }
+  if(document.getElementById("changelog").classList.contains("open")) return closeChangelog(true);
   if(document.getElementById("crdlg").classList.contains("open")) return closeCrDlg(true);
   if(document.getElementById("readerdlg").classList.contains("open")) return closeReader(true);
   if(document.getElementById("minedlg").classList.contains("open")) return closeMineMenu(true);
@@ -1340,7 +1403,7 @@ document.addEventListener("click", e => {
   // the file-preview / digest-reader overlays sit ABOVE the sheet/drawer — a
   // tap inside them must not count as "outside" and close what's beneath
   if(e.target.closest("#fileview") || e.target.closest("#readerdlg")
-     || e.target.closest("#crdlg")) return;
+     || e.target.closest("#crdlg") || e.target.closest("#changelog")) return;
   if(document.body.classList.contains("rail-open") &&
      Date.now() - railOpenedAt > 350 && !e.target.closest("#rail"))
     closeRailSheet();
@@ -4505,6 +4568,104 @@ async function showMgmtDigest(id, delta){
 
 setInterval(() => { if(mgmtOpen && !document.hidden) refreshMgmt(false); }, 30000);
 
+/* ---------- version chip + changelog overlay --------------------------------
+   Two questions the chip answers: what version is this, and is the RUNNING
+   process still the code on disk? The console is long-lived (launchd respawns
+   pick up new code only on restart), so /api/version reports the identity
+   captured at server start against the repo's HEAD now — an amber dot means
+   "restart to update". The changelog is CHANGELOG.md, served as markdown and
+   rendered here by a ~20-line renderer (headings/lists/inline only, no libs). */
+let verInfo = null, clLoaded = false;
+
+async function loadVersion(){
+  try {
+    const r = await fetch("/api/version");
+    if(!r.ok) return;                      // 401/500: leave the chip as-is
+    const d = await r.json();
+    if(d.error) return;
+    verInfo = d;
+  } catch(e){ return; }                    // offline: the chip is not the alarm
+  renderVersion();
+}
+
+function renderVersion(){
+  const el = document.getElementById("navver");
+  if(!el || !verInfo) return;
+  const v = verInfo;
+  const sha = v.sha ? v.sha + (v.dirty ? "*" : "") : "";
+  el.classList.toggle("stale", !!v.stale);
+  el.innerHTML = `<span class="vdot"></span><span class="vlbl">csd ${esc(v.version)}</span>`
+    + (sha ? `<span class="vsha vspacer">${esc(sha)}</span>` : "")
+    + (v.stale ? `<span class="vsha">→ restart</span>` : "");
+  el.title = (v.stale
+    ? `Stale process — running ${v.sha} (${v.version}), disk ${v.disk_sha} (${v.disk_version}).\n`
+      + `The console keeps executing the code it started with; restart it to pick this up.`
+    : `csd ${v.version}${v.sha ? " · " + v.sha : ""}${v.dirty ? " · working tree dirty" : ""}`)
+    + `\nClick for the changelog.`;
+}
+
+/* Minimal markdown → HTML: headings, bullet lists, paragraphs, and inline
+   code/bold/links. Everything is escaped FIRST, so the markup we emit is the
+   only markup there is. */
+function mdLite(src){
+  const inline = t => esc(t)
+    .replace(/`([^`]+)`/g, (m, c) => `<code>${c}</code>`)
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")   // after bold: no stray ** left
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g,
+             '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const out = [], para = [];
+  let list = null;
+  const flushP = () => { if(para.length){ out.push(`<p>${inline(para.join(" "))}</p>`); para.length = 0; } };
+  const flushL = () => { if(list){ out.push(`<ul>${list.join("")}</ul>`); list = null; } };
+  for(const raw of String(src || "").split("\n")){
+    const h = raw.match(/^(#{1,4})\s+(.*)$/);
+    if(h){ flushP(); flushL(); const n = h[1].length;
+           out.push(`<h${n}>${inline(h[2])}</h${n}>`); continue; }
+    const li = raw.match(/^\s*[-*]\s+(.*)$/);
+    if(li){ flushP(); (list = list || []).push(`<li>${inline(li[1])}</li>`); continue; }
+    if(!raw.trim()){ flushP(); flushL(); continue; }
+    if(list){ list[list.length - 1] = list[list.length - 1]
+                .replace(/<\/li>$/, " " + inline(raw.trim()) + "</li>"); continue; }
+    para.push(raw.trim());
+  }
+  flushP(); flushL();
+  return out.join("");
+}
+
+async function openChangelog(){
+  const ov = document.getElementById("changelog");
+  if(!ov.classList.contains("open")){ ov.classList.add("open"); ovOpen(); }
+  const meta = document.getElementById("clmeta"), stale = document.getElementById("clstale");
+  if(verInfo){
+    meta.textContent = `running csd ${verInfo.version}`
+      + (verInfo.sha ? ` · ${verInfo.sha}${verInfo.dirty ? "*" : ""}` : "");
+    stale.classList.toggle("on", !!verInfo.stale);
+    if(verInfo.stale)
+      stale.textContent = `⚠ this process is running ${verInfo.sha} (${verInfo.version}); `
+        + `the repo on disk is at ${verInfo.disk_sha} (${verInfo.disk_version}). `
+        + `Restart the console to run the newer code.`;
+  } else { meta.textContent = ""; stale.classList.remove("on"); }
+  if(clLoaded) return;
+  const body = document.getElementById("clbody");
+  body.innerHTML = `<div class="rl-empty">loading…</div>`;
+  try {
+    const d = await (await fetch("/api/changelog")).json();
+    if(d.error){ body.innerHTML = `<div class="rl-empty">${esc(d.error)}</div>`; return; }
+    body.innerHTML = mdLite(d.markdown);
+    clLoaded = true;
+  } catch(e){
+    body.innerHTML = `<div class="rl-empty">changelog unavailable — ${esc(String(e))}</div>`;
+  }
+}
+
+function closeChangelog(fromPop){
+  const ov = document.getElementById("changelog");
+  if(!ov.classList.contains("open")) return;
+  ov.classList.remove("open");
+  if(fromPop !== true) ovDone();
+}
+
 /* ---------- poll loops: visibility-aware, backoff on failure ----------
    A backgrounded phone tab must not poll (battery + LAN churn), and a dead
    server must not be hammered at full cadence — failStreak (fed by pollDone)
@@ -4529,6 +4690,8 @@ document.addEventListener("visibilitychange", () => {
   else { navTick(); sesTick(); }   // immediate catch-up on return
 });
 navTick(); sesTick();
+loadVersion();                                   // version chip + staleness dot
+setInterval(() => { if(!document.hidden) loadVersion(); }, 60000);
 pollBatch();   // pick up any batch resumed from batch.json after a restart
 </script>
 </body>

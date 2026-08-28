@@ -1,3 +1,6 @@
-"""Claude Session DB — Parse and analyze Claude Code session data in SQLite."""
+"""Claude Session DB — Claude Code session transcripts in a Postgres archive."""
 
-__version__ = "0.1.0"
+# THE canonical version. Everything reads this: pyproject (hatch `dynamic`),
+# `csd --version`, and the console's version chip. Semver — see CHANGELOG.md
+# for the bump discipline (minor = feature batch, patch = fixes).
+__version__ = "3.9.0"

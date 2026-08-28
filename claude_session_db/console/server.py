@@ -35,6 +35,8 @@ Endpoints
   GET  /api/file?id=<sid>&path=    one file's text/metadata (raw=1: image bytes)
   GET  /api/claudemd?id=<sid>&n=   one CLAUDE.md memory file's content (read-only)
   GET  /api/timeline?id=<sid>      cached whole-session tl;dr timeline (never generates)
+  GET  /api/version                running version+sha vs the repo on disk (staleness)
+  GET  /api/changelog              CHANGELOG.md markdown, for the console's chip
   POST /api/answer                 {session_id, cwd, text} -> claude -p --resume
                                    (busy session -> message queued, never refused)
   POST /api/queue/cancel           {session_id, queue_id} -> drop a queued message
@@ -85,6 +87,7 @@ from urllib.parse import urlparse, parse_qs
 from .. import cr as crlib
 from .. import tldr
 from .. import session_timeline
+from .. import version as vinfo
 from ..angles import ANGLE_SPECS, ANGLE_LABELS
 
 ROOT = Path(__file__).parent
@@ -4059,6 +4062,20 @@ class Handler(SimpleHTTPRequestHandler):
                     if s else self._json({"error": "not found"}, 404)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/version":
+            # Running identity (captured at server start) vs what is on disk
+            # NOW. A launchd-respawned console keeps executing the bytes it
+            # booted with; this is how the operator sees that.
+            try:
+                return self._json(vinfo.version_report())
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/changelog":
+            # Raw markdown; the client renders it (headings/lists only).
+            txt = vinfo.changelog_text()
+            if txt is None:
+                return self._json({"error": "CHANGELOG.md not found"}, 404)
+            return self._json({"markdown": txt, "version": vinfo.VERSION})
         if u.path == "/api/detail":
             q = parse_qs(u.query)
             sid = (q.get("id") or [""])[0]
@@ -4504,6 +4521,10 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     """Bind and serve. Non-loopback binds are authenticated unless no_auth."""
     global TOKEN, KMCP_DSN, CSD_DSN
 
+    # Freeze the running code's identity BEFORE anything else can matter: from
+    # here on, /api/version compares this snapshot against the repo on disk.
+    run = vinfo.capture_running()
+
     KMCP_DSN = kmcp_dsn or os.environ.get("DATABASE_URL")
     CSD_DSN = csd_dsn or os.environ.get("CSD_DATABASE_URL")
     _migrate_legacy_overlays()      # seed meta.json from legacy priority/titles
@@ -4514,6 +4535,10 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     _resume_batches()               # restart-safe batch queue (batch.json)
     if not no_ambient and os.environ.get("CSD_CONSOLE_AMBIENT", "1") != "0":
         _start_ambient()            # angles/tldr/timeline warm for active sessions
+
+    print(f"csd console {run['version']}"
+          + (f" ({run['sha']}{'+dirty' if run.get('dirty') else ''})"
+             if run.get("sha") else ""), flush=True)
 
     if _loopback(host) or no_auth:
         TOKEN = None

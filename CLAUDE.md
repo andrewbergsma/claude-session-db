@@ -54,6 +54,24 @@ csd usage use LABEL     # Switch the active account (replaces the interactive /l
 csd usage list          # List vaulted accounts (no network)
 ```
 
+## Versioning (`csd --version`, the console's version chip)
+
+Semver, one source of truth: `claude_session_db/__init__.py:__version__`.
+pyproject builds from it (hatch `dynamic`), `csd --version` prints it, and
+`version.py` serves it. **Bump the version and add its `CHANGELOG.md` entry in
+the same commit as the change** — minor for a feature batch, patch for
+fixes/perf/docs, major for an archive generation or a breaking CLI/schema
+change. The major tracks the archive generation (3.x = the Postgres Gen3 era).
+
+The console surfaces both: a version chip in the sidebar footer (click →
+changelog overlay, `GET /api/changelog`) and `GET /api/version`, which compares
+the identity **captured at server start** against the repo's HEAD on disk
+(cached 60s). An amber dot means *restart to update: running abc1234, disk
+def5678* — a launchd-respawned console keeps executing the code it booted with,
+which has silently shipped stale behaviour more than once. Staleness only fires
+on a KNOWN difference; no git / not a checkout degrades to "unknown", never a
+false alarm.
+
 ## Dual-account usage (`csd usage`)
 
 Reports live Claude Max quota for both Max accounts from the same OAuth endpoints

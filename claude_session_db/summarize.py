@@ -54,7 +54,8 @@ from .reconcile import mark_summarized, resolve_kmcp_dsn
 from .session_digest import load as load_jsonl
 from .session_digest import render as render_digest
 from .session_mgmt import (WATERMARK_SLACK_S, DeltaReport, _parse_ts,
-                           _watermark_for, classify_delta, resolve_transcript)
+                           _watermark_for, classify_delta, resolve_session_ref,
+                           resolve_transcript)
 
 # --- Tunables (env-overridable; flags override env) --------------------------
 
@@ -387,6 +388,195 @@ def _delta_gate(row: dict[str, Any], dsn: str, kmcp_dsn: Optional[str],
     elif report.records == 0:
         gate.skip = "nothing after the watermark"
     return gate
+
+
+# --- Next-pass scope (the ONE grader: console button, CLI, skill) --------------
+#
+# `resolve_summary_scope` used to live in console/server.py. It is the same
+# question the /session-summary skill asks before it writes ("has this session
+# been captured, and what would a NEXT pass cover?"), so it lives beside the
+# gate it wraps and BOTH surfaces call it — the console keeps a thin wrapper
+# that supplies its module-level DSNs, `csd summary-scope` calls it directly.
+#
+# DOCTRINE, unchanged in the move: it can never block a caller. No DSN, an
+# unreachable archive, a missing summary_passes table, a raising gate — every
+# failure degrades to FULL pass-1 scope with the reason surfaced instead of
+# swallowed. Nothing here raises.
+
+PRIOR_SQL = """
+    SELECT s.file_path, ss.state, ss.reason,
+           ss.message_count_at_summary AS prev_wm,
+           ss.leaf_uuid_at_summary     AS prev_leaf,
+           ss.kmcp_application         AS prev_app,
+           ss.kmcp_path                AS prev_path
+    FROM sessions s
+    LEFT JOIN summary_state ss USING (session_id)
+    WHERE s.session_id = %s
+"""
+
+# Human labels for DeltaGate.source (leaf | count | kmcp | none) — the raw
+# value stays in the JSON, the label is what a report prints.
+WATERMARK_SOURCES = {"leaf": "leaf_uuid", "count": "message_count",
+                     "kmcp": "kmcp_entry", "none": "none"}
+
+
+def prior_capture(sid: str, dsn: Optional[str]) -> dict[str, Any]:
+    """The row `_delta_gate` grades, for ONE session. RAISES (callers degrade)."""
+    if not dsn:
+        raise RuntimeError("no archive DSN configured")
+    with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        row = dict(conn.execute(PRIOR_SQL, (sid,)).fetchone() or {})
+        ledger = 0
+        if conn.execute("SELECT to_regclass('public.summary_passes') AS t"
+                        ).fetchone()["t"]:
+            hit = conn.execute("SELECT max(pass) AS p FROM summary_passes "
+                               "WHERE session_id = %s AND status = 'written'",
+                               (sid,)).fetchone()
+            ledger = int((hit or {}).get("p") or 0)
+    row["session_id"] = sid
+    # A session captured BEFORE the ledger existed has no row for its pass 1 —
+    # only a watermark. Count that capture, so its continuation is numbered
+    # (and titled) pass 2 instead of re-using pass 1's number.
+    captured = bool(row.get("prev_wm") or row.get("prev_leaf")
+                    or row.get("prev_app") or row.get("state") == "summarized")
+    row["prev_pass"] = max(ledger, 1 if captured else 0)
+    return row
+
+
+def _grade_scope(sid: str, dsn: Optional[str], kmcp_dsn: Optional[str],
+                 mode: str = "auto", prior_capture_fn=None):
+    """(scope dict, gate|None, row|None). The body of resolve_summary_scope;
+    split out so a reporter can also read the gate's own detail (the watermark
+    behind a `none` verdict) without widening the scope dict."""
+    out = {"delta": False, "pass": 1, "since": None, "source": "none",
+           "prior": None, "mode": mode, "records": None,
+           "note": None, "warning": None}
+    capture = prior_capture_fn or (lambda s: prior_capture(s, dsn))
+    try:
+        row = capture(sid)
+        gate = _delta_gate(row, dsn, kmcp_dsn, enabled=(mode != "off"))
+    except Exception as exc:  # noqa: BLE001 — degrade to full, never block
+        out["note"] = (f"prior capture unresolved ({type(exc).__name__}: "
+                       f"{exc}) — full scope")
+        return out, None, None
+
+    out["pass"] = gate.pass_no
+    out["prior"] = gate.prev_ref
+    out["source"] = gate.source
+    out["records"] = gate.report.records if gate.report else None
+
+    if mode == "off":
+        out["note"] = "delta disabled for this dispatch — full scope"
+        return out, gate, row
+    if gate.watermark is None:
+        # No window => no honest continuation. Full transcript, standalone —
+        # never full scope wearing a continuation label (_delta_gate's
+        # invariant, and the reason this branch does not "force" anything).
+        out["note"] = ("no summary watermark resolvable — full scope"
+                       if row.get("prev_pass") else None)
+        return out, gate, row
+
+    skip = gate.skip or ""
+    ceiling = skip.startswith("pass ceiling")
+    if not skip or ceiling or mode == "force":
+        out["delta"] = True
+        out["since"] = _iso(gate.watermark)
+        if skip:
+            out["warning"] = f"{skip} — windowed and dispatched anyway"
+    else:
+        # Deliberate: the gate found nothing substantive since the last pass, so
+        # a delta entry would say nothing. Falling back to full scope RESTATES
+        # pass 1, which is the surprising half — so it is surfaced, not hidden.
+        out["warning"] = (f"{skip} — summarizing the FULL session again "
+                          "(delta:\"force\" windows it to the tail regardless)")
+    return out, gate, row
+
+
+def resolve_summary_scope(sid: str, dsn: Optional[str],
+                          kmcp_dsn: Optional[str] = None, mode: str = "auto",
+                          prior_capture_fn=None) -> dict:
+    """How the next pass should be scoped. NEVER raises.
+
+    auto  — delta when a watermark resolves AND the gate calls the tail real.
+    force — delta from the watermark whatever the gate thinks of the tail.
+    off   — full scope, the historic behaviour.
+    """
+    return _grade_scope(sid, dsn, kmcp_dsn, mode, prior_capture_fn)[0]
+
+
+def summary_scope_report(ref: str, dsn: Optional[str] = None,
+                         kmcp_dsn: Optional[str] = None,
+                         mode: str = "auto") -> dict:
+    """`csd summary-scope`: does a kmcp summary already exist for this session,
+    and what would the NEXT pass cover? Never raises.
+
+    scope is one of:
+      full  — no prior capture (pass 1), or a prior capture with no resolvable
+              watermark: the honest scope is the whole transcript.
+      delta — a window opens at `since`; digest it with the printed command.
+      none  — captured already, and the tail since is not substantive (below
+              CSD_SUMMARIZE_MIN_DELTA_RECORDS, or not classified `real`).
+              Nothing new to write; `--mode force` windows it anyway.
+    """
+    sid, reason = ref, None
+    try:
+        sid, _fp = resolve_session_ref(ref, dsn)
+    except Exception as exc:  # noqa: BLE001 — an unresolved ref is not fatal
+        reason = f"session ref not resolved ({exc}) — using it verbatim"
+
+    scope, gate, _row = _grade_scope(sid, dsn, kmcp_dsn, mode)
+    watermark = _iso(getattr(gate, "watermark", None)) if gate else None
+    if scope["delta"]:
+        kind = "delta"
+    elif scope["warning"]:
+        kind = "none"           # captured, tail not substantive
+    else:
+        kind = "full"
+
+    prior_exists = bool(scope["prior"] or scope["pass"] > 1)
+    why = scope["warning"] or scope["note"]
+    if kind == "full" and not prior_exists and not why:
+        why = "no prior summary found"
+    rep = {
+        "session": sid, "ref": ref, "mode": mode,
+        "scope": kind, "pass": scope["pass"],
+        "summarized": prior_exists,
+        "since": scope["since"] or (watermark if kind == "none" else None),
+        "source": scope["source"],
+        "source_label": WATERMARK_SOURCES.get(scope["source"], scope["source"]),
+        "prior": scope["prior"],
+        "records": scope["records"],
+        "reason": " · ".join(x for x in (reason, why) if x) or None,
+    }
+    rep["digest"] = (f"csd digest {sid} --since {rep['since']}"
+                     if kind == "delta" and rep["since"]
+                     else f"csd digest {sid}")
+    return rep
+
+
+def format_scope_report(rep: dict) -> str:
+    """One human block — the shape the /session-summary skill reads."""
+    head = (f"session: {rep['session']}   pass: {rep['pass']}   "
+            f"scope: {rep['scope']}")
+    if rep["scope"] != "delta" and rep["reason"]:
+        head += f"   ({rep['reason']})" if rep["scope"] == "full" \
+            else f" — {rep['reason']}"
+    lines = [head]
+    if rep["since"]:
+        lines.append(f"since:   {rep['since']}   "
+                     f"(watermark source: {rep['source_label']})")
+    if rep["prior"]:
+        lines.append(f"prior:   {rep['prior']}")
+    if rep["records"] is not None:
+        lines.append(f"records: {rep['records']} after the watermark")
+    if rep["scope"] == "delta" and rep["reason"]:
+        lines.append(f"note:    {rep['reason']}")
+    lines.append(f"digest:  {rep['digest']}")
+    if rep["scope"] == "none":
+        lines.append("         (nothing new to capture; `--mode force` windows "
+                     "the tail anyway)")
+    return "\n".join(lines)
 
 
 # --- LLM roll-up ---------------------------------------------------------------

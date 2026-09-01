@@ -45,6 +45,10 @@ csd angles              # Pull-based turn mining: ID-addressable headlines for o
 csd angles show ID      # Print the persisted detail behind a headline
 csd angles sessions     # Session-management lens: open-thread inventory + delta verdicts
 csd angles digest REF   # Per-session digest (--delta = post-summary tail; --head/--tail/--full)
+csd digest REF          # THE digest by session id (worktree-aware, DB-free);
+                        #   --since TS windows the continuation tail
+csd summary-scope REF   # Already summarized? What would the NEXT pass cover?
+                        #   (--json; scope = full | delta | none)
 csd angles-watch        # Headless miner: keep the angles state dir warm (serves nothing)
 csd console             # THE web UI: reply-capable session console (127.0.0.1:4462; token auth on LAN binds)
 csd backfill-subagents  # One-shot: child session rows for already-ingested sidechains
@@ -127,6 +131,40 @@ quiesce gate (`--min-idle`, default 900s) so live sessions are never digested
 mid-flight. Launchd timer: `launchd/com.claude-session-db.summarize.plist`
 (every 30 min, default 2 sessions/tick — the ~700-session backlog drains
 gradually; `csd summarize -n 20` is the manual backfill lever).
+
+## The skill seam (`csd digest` / `csd summary-scope`)
+
+The two commands `/session-summary` calls. They exist so the skill stops
+carrying **repo-specific plumbing** it cannot get approved headless: a
+`find ~/.claude/projects -name "$SID.jsonl" | head -1` command substitution and
+an absolute `python3 .../session_digest.py` path.
+
+- **`csd digest REF [--since TS] [--full] [--head N] [--tail N]`** — resolves
+  the ref worktree-aware (`sessions.file_path`, then a glob over
+  `~/.claude/projects/*/<id>.jsonl`; a unique prefix is enough) and calls
+  `session_digest.render` — **not a second renderer**, so the header lines
+  (`SESSION DIGEST · …`, `span:` / `delta span:`) are byte-for-byte the old
+  script's. It runs with **no database** (the glob alone resolves a full id).
+  Default scope is the WHOLE transcript — `csd angles digest` is the
+  head/tail-windowed sibling, and a silently elided middle is a silently short
+  summary. `--since` is the DB-free half of `--delta`: an explicit watermark,
+  no lookup. Unresolvable → exit 1 with `NO TRANSCRIPT FOUND for <ref>` on
+  stderr; a `<parent>:<agent_id>` child key is refused pointing at the parent
+  (session_digest renders main-chain records only).
+- **`csd summary-scope REF [--json] [--mode auto|force|off]`** — does a kmcp
+  summary already exist, and what would the NEXT pass cover? `scope: full` (no
+  prior capture, or none with a resolvable watermark), `scope: delta` (window
+  opens at `since`; the exact `csd digest … --since …` command is printed),
+  `scope: none` (captured, tail not substantive — nothing new to write). This
+  is what lets an **in-session** `/session-summary` detect a continuation pass;
+  off-session the console still hands the window down in the envelope.
+
+**One grader.** `resolve_summary_scope` / `prior_capture` live in
+`summarize.py` beside the `_delta_gate` they wrap; the console binds its own
+DSNs to them and the CLI calls them directly, so the button, the launchd timer
+and the skill can never disagree about what a pass covers. Doctrine unchanged
+in the move: never raises, and an unreachable archive degrades to `pass 1 /
+full` with the reason printed, exit 0.
 
 ## Turn angles (`csd angles`) — pull-based per-turn mining
 

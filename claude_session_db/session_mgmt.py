@@ -468,7 +468,8 @@ def digest_for(ref: str, dsn: Optional[str] = None,
                kmcp_dsn: Optional[str] = None, delta: bool = False,
                head: Optional[int] = None, tail: Optional[int] = None,
                full: bool = False, result_head: int = 200,
-               full_inputs: bool = False) -> str:
+               full_inputs: bool = False,
+               since: Optional[str | datetime] = None) -> str:
     """Render a session digest addressed by (short) session id.
 
     Plain mode: head/tail-windowed digest (defaults DIGEST_HEAD/TAIL_DEFAULT;
@@ -476,13 +477,27 @@ def digest_for(ref: str, dsn: Optional[str] = None,
     what the existing summary has NOT seen — resolved through the same
     leaf/count/kmcp chain as the inventory (needs the archive; kmcp fallback
     needs the knowledge DB).
+
+    `since` is the DB-free half of the same window: an explicit ISO timestamp
+    (usually one `csd summary-scope` just reported), rendered verbatim by
+    session_digest — no watermark lookup, so it works with the archive down.
+    It is mutually exclusive with `delta`, which RESOLVES the watermark.
     """
+    if since is not None and delta:
+        raise ValueError("--since and --delta are mutually exclusive "
+                         "(--delta resolves the watermark; --since is one)")
+    if isinstance(since, str):
+        parsed = _parse_ts(since)
+        if parsed is None:
+            raise ValueError(f"unparseable --since timestamp {since!r} "
+                             "(ISO 8601, e.g. 2026-08-21T14:02:11Z)")
+        since = parsed
+
     sid, file_path = resolve_session_ref(ref, dsn)
     path = resolve_transcript(sid, file_path)
     if path is None:
         raise ValueError(f"no transcript on disk for session {sid}")
 
-    since: Optional[datetime] = None
     note = ""
     if delta:
         if not dsn:
@@ -496,6 +511,12 @@ def digest_for(ref: str, dsn: Optional[str] = None,
         note = f"DELTA after summary watermark {_iso(wm)} (source: {source})"
         if full or (head is None and tail is None):
             head = tail = None  # delta default: the whole post-watermark tail
+    elif since is not None:
+        # An explicit window is rendered WHOLE unless the caller asked for a
+        # head/tail themselves — same default as --delta, for the same reason:
+        # a tail the caller already bounded must not be silently elided again.
+        if full or (head is None and tail is None):
+            head = tail = None
     elif not full and head is None and tail is None:
         head, tail = DIGEST_HEAD_DEFAULT, DIGEST_TAIL_DEFAULT
 

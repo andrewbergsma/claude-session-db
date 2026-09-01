@@ -2607,42 +2607,17 @@ SCOPE_TTL_S = 120                    # the UI label rides the 3s session poll
 _SCOPE_CACHE: dict = {}              # sid -> (fetched_at, scope|None)
 _SCOPE_LOCK = threading.Lock()
 
-_PRIOR_SQL = """
-    SELECT s.file_path, ss.state, ss.reason,
-           ss.message_count_at_summary AS prev_wm,
-           ss.leaf_uuid_at_summary     AS prev_leaf,
-           ss.kmcp_application         AS prev_app,
-           ss.kmcp_path                AS prev_path
-    FROM sessions s
-    LEFT JOIN summary_state ss USING (session_id)
-    WHERE s.session_id = %s
-"""
+# The SQL, the prior-capture read and the grader itself now live in
+# summarize.py (`prior_capture` / `resolve_summary_scope`) — one grader for the
+# console button, `csd summary-scope` and the /session-summary skill. What stays
+# here is the console's binding of its module-level DSNs to that grader
+# (summarize is imported lazily — the console must not need psycopg to boot).
 
 
 def _prior_capture(sid: str) -> dict:
     """The row summarize._delta_gate grades, for ONE session. Raises."""
-    import psycopg
-    from psycopg.rows import dict_row
-    if not CSD_DSN:
-        raise RuntimeError("no archive DSN configured")
-    with psycopg.connect(CSD_DSN, row_factory=dict_row, connect_timeout=5) as conn:
-        conn.read_only = True
-        row = dict(conn.execute(_PRIOR_SQL, (sid,)).fetchone() or {})
-        ledger = 0
-        if conn.execute("SELECT to_regclass('public.summary_passes') AS t"
-                        ).fetchone()["t"]:
-            hit = conn.execute("SELECT max(pass) AS p FROM summary_passes "
-                               "WHERE session_id = %s AND status = 'written'",
-                               (sid,)).fetchone()
-            ledger = int((hit or {}).get("p") or 0)
-    row["session_id"] = sid
-    # A session captured BEFORE the ledger existed has no row for its pass 1 —
-    # only a watermark. Count that capture, so its continuation is numbered
-    # (and titled) pass 2 instead of re-using pass 1's number.
-    captured = bool(row.get("prev_wm") or row.get("prev_leaf")
-                    or row.get("prev_app") or row.get("state") == "summarized")
-    row["prev_pass"] = max(ledger, 1 if captured else 0)
-    return row
+    from .. import summarize as ph4
+    return ph4.prior_capture(sid, CSD_DSN)
 
 
 def summary_scope(sid: str):
@@ -2673,54 +2648,15 @@ def summary_scope(sid: str):
 
 
 def resolve_summary_scope(sid: str, mode: str = "auto") -> dict:
-    """How the next pass should be scoped. NEVER raises.
+    """How the next pass should be scoped, for THIS console's DSNs. NEVER raises.
 
     auto  — delta when a watermark resolves AND the gate calls the tail real.
     force — delta from the watermark whatever the gate thinks of the tail.
     off   — full scope, the historic behaviour.
     """
-    out = {"delta": False, "pass": 1, "since": None, "source": "none",
-           "prior": None, "mode": mode, "records": None,
-           "note": None, "warning": None}
-    try:
-        from .. import summarize as ph4
-        row = _prior_capture(sid)
-        gate = ph4._delta_gate(row, CSD_DSN, KMCP_DSN, enabled=(mode != "off"))
-    except Exception as exc:  # noqa: BLE001 — degrade to full, never block
-        out["note"] = (f"prior capture unresolved ({type(exc).__name__}: "
-                       f"{exc}) — full scope")
-        return out
-
-    out["pass"] = gate.pass_no
-    out["prior"] = gate.prev_ref
-    out["source"] = gate.source
-    out["records"] = gate.report.records if gate.report else None
-
-    if mode == "off":
-        out["note"] = "delta disabled for this dispatch — full scope"
-        return out
-    if gate.watermark is None:
-        # No window => no honest continuation. Full transcript, standalone —
-        # never full scope wearing a continuation label (summarize._delta_gate's
-        # invariant, and the reason this branch does not "force" anything).
-        out["note"] = ("no summary watermark resolvable — full scope"
-                       if row.get("prev_pass") else None)
-        return out
-
-    skip = gate.skip or ""
-    ceiling = skip.startswith("pass ceiling")
-    if not skip or ceiling or mode == "force":
-        out["delta"] = True
-        out["since"] = ph4._iso(gate.watermark)
-        if skip:
-            out["warning"] = f"{skip} — windowed and dispatched anyway"
-    else:
-        # Deliberate: the gate found nothing substantive since the last pass, so
-        # a delta entry would say nothing. Falling back to full scope RESTATES
-        # pass 1, which is the surprising half — so it is surfaced, not hidden.
-        out["warning"] = (f"{skip} — summarizing the FULL session again "
-                          "(delta:\"force\" windows it to the tail regardless)")
-    return out
+    from .. import summarize as ph4
+    return ph4.resolve_summary_scope(sid, CSD_DSN, KMCP_DSN, mode=mode,
+                                     prior_capture_fn=_prior_capture)
 
 
 def _idle_warning(sid: str):

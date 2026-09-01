@@ -73,6 +73,12 @@ def _redact(dsn: str) -> str:
     return urlunsplit(parts)
 
 
+# Commands that must still run with NO database configured: they read
+# transcripts off disk and use the archive only to sharpen the answer. Every
+# other command needs the DSN and keeps failing loudly at the group level.
+DB_OPTIONAL_COMMANDS = {"digest", "summary-scope"}
+
+
 @click.group()
 @click.version_option(__version__, "-V", "--version", prog_name="csd",
                       message="%(prog)s %(version)s")
@@ -83,7 +89,12 @@ def main(ctx: click.Context, dsn: str | None) -> None:
     """Claude Code session archive (Postgres)."""
     _load_dotenv()
     ctx.ensure_object(dict)
-    ctx.obj["dsn"] = resolve_dsn(dsn)
+    try:
+        ctx.obj["dsn"] = resolve_dsn(dsn)
+    except RuntimeError:
+        if ctx.invoked_subcommand not in DB_OPTIONAL_COMMANDS:
+            raise
+        ctx.obj["dsn"] = None      # transcript-only fallback
 
 
 @main.command()
@@ -746,6 +757,121 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
     except (FileNotFoundError, ValueError) as exc:
         click.echo(f"angles: {exc}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.argument("session_ref")
+@click.option("--since", default=None, metavar="TS",
+              help="ISO timestamp: render ONLY the records after it (the delta "
+                   "window a continuation pass covers — `csd summary-scope` "
+                   "prints the exact command).")
+@click.option("--full", "full_digest", is_flag=True,
+              help="No head/tail window — the whole transcript. This is already "
+                   "the default; the flag is here to say so explicitly.")
+@click.option("--head", type=int, default=None,
+              help="Keep only the first N records (elides the middle with --tail).")
+@click.option("--tail", type=int, default=None,
+              help="Keep only the last N records.")
+@click.option("--result-head", type=int, default=200,
+              help="Chars of each tool_result to keep (default 200).")
+@click.option("--full-inputs", is_flag=True,
+              help="Verbatim tool_use inputs instead of one-field hints.")
+@click.option("--kmcp-dsn", default=None, help="(unused here; accepted for symmetry).")
+@click.pass_context
+def digest(ctx: click.Context, session_ref: str, since: str | None,
+           full_digest: bool, head: int | None, tail: int | None,
+           result_head: int, full_inputs: bool, kmcp_dsn: str | None) -> None:
+    """Print one session's transcript digest (the /session-summary input).
+
+    SESSION_REF is a full session UUID or a unique prefix. Resolution is
+    worktree-aware — the archive's `sessions.file_path` first (it already points
+    into worktree-suffixed project dirs), then a glob over
+    `~/.claude/projects/*/<id>.jsonl`. It works with NO database at all: the
+    glob alone resolves a full id, so a skill can call this on a wedged archive.
+
+    \b
+    Output is byte-identical to `python3 claude_session_db/session_digest.py
+    <path>` — same `SESSION DIGEST · …` header, same `span:` / `delta span:`
+    lines — because it IS that renderer, not a copy of it.
+
+    \b
+      csd digest 4f2a1c9e                     the whole session
+      csd digest 4f2a1c9e --since 2026-08-21T14:02:11Z    only the tail
+      csd digest 4f2a1c9e --head 40 --tail 120            window a huge one
+
+    Default scope is the FULL transcript (session_digest's own default), which
+    can be megabytes; `csd angles digest REF` is the head/tail-windowed
+    sibling for interactive use.
+    """
+    if ":" in session_ref:
+        # A `<parent>:<agent_id>` child key. session_digest renders MAIN-chain
+        # records only (it skips isSidechain), so digesting the parent under a
+        # child's name would silently return work that is not the child's.
+        parent = session_ref.split(":", 1)[0]
+        click.echo(f"NO TRANSCRIPT FOUND for {session_ref}", err=True)
+        click.echo(f"  subagent child keys have no transcript of their own — "
+                   f"their records live in the parent's file, and the digest "
+                   f"renders main-chain records only. Try: csd digest {parent}",
+                   err=True)
+        sys.exit(1)
+    try:
+        click.echo(mgmt.digest_for(
+            session_ref, dsn=ctx.obj["dsn"], kmcp_dsn=None, since=since,
+            head=head, tail=tail,
+            full=full_digest or (head is None and tail is None),
+            result_head=result_head, full_inputs=full_inputs), nl=False)
+    except ValueError as exc:
+        click.echo(f"NO TRANSCRIPT FOUND for {session_ref}", err=True)
+        click.echo(f"  {exc}", err=True)
+        sys.exit(1)
+
+
+@main.command(name="summary-scope")
+@click.argument("session_ref")
+@click.option("--json", "as_json", is_flag=True, help="Emit the same facts as JSON.")
+@click.option("--mode", type=click.Choice(["auto", "force", "off"]), default="auto",
+              help="auto: delta only when the gate calls the tail substantive; "
+                   "force: window it from the watermark regardless; "
+                   "off: report full scope (the pre-delta behaviour).")
+@click.option("--kmcp-dsn", default=None,
+              help="Knowledge DB DSN for the kmcp-entry watermark fallback "
+                   "(default: archive DSN with db=knowledge).")
+@click.pass_context
+def summary_scope(ctx: click.Context, session_ref: str, as_json: bool,
+                  mode: str, kmcp_dsn: str | None) -> None:
+    """Does a kmcp summary already exist for this session — and what would a
+    NEXT pass cover?
+
+    The same grading the console's Summarize button and the launchd timer use
+    (`summarize._delta_gate`), so an in-session `/session-summary` can detect a
+    continuation pass instead of re-writing pass 1.
+
+    \b
+      scope: full    no prior capture (pass 1), or a capture with no resolvable
+                     watermark — the honest scope is the whole transcript.
+      scope: delta   a window opens at `since`; the printed `csd digest …
+                     --since …` command renders exactly it.
+      scope: none    captured already and the tail is not substantive (below
+                     CSD_SUMMARIZE_MIN_DELTA_RECORDS, or not classified `real`)
+                     — nothing new to write. `--mode force` windows it anyway.
+
+    NEVER raises and never blocks: an unreachable archive degrades to
+    `pass: 1  scope: full` with the reason printed, exit 0.
+    """
+    dsn = ctx.obj["dsn"]
+    resolved_kmcp = None
+    if dsn:
+        try:
+            resolved_kmcp = resolve_kmcp_dsn(dsn, kmcp_dsn)
+        except Exception:  # noqa: BLE001 — the kmcp fallback is optional
+            resolved_kmcp = None
+    rep = ph4.summary_scope_report(session_ref, dsn=dsn,
+                                   kmcp_dsn=resolved_kmcp, mode=mode)
+    if as_json:
+        import json as _json
+        click.echo(_json.dumps(rep, indent=2, default=str))
+        return
+    click.echo(ph4.format_scope_report(rep))
 
 
 @main.command(name="angles-watch")

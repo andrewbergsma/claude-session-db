@@ -19,6 +19,56 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.14.0] - 2026-09-01
+
+### Added
+- **`csd digest <SESSION_REF>` — the digest, addressable by session id.** The
+  `/session-summary` skill used to locate a transcript with
+  `find ~/.claude/projects -name "$SID.jsonl" | head -1` and then run
+  `python3 /Users/andrew/GitHub/claude-session-db/claude_session_db/session_digest.py`
+  — a command substitution a headless run can never get approved, plus a
+  hardcoded absolute interpreter path. Both are gone: `csd digest` resolves the
+  ref **worktree-aware** (archive `sessions.file_path` first, then a glob over
+  `~/.claude/projects/*/<id>.jsonl`), accepts a unique prefix, and calls
+  `session_digest.render` — so its output is byte-for-byte the old one, same
+  `SESSION DIGEST · …` header and `span:` / `delta span:` lines. It is NOT a
+  second renderer.
+  - Works with **no database at all**: the glob alone resolves a full id, so
+    the skill still digests when the archive is wedged.
+  - Default scope is the WHOLE transcript (session_digest's own default), not
+    the head/tail window `csd angles digest` applies — a silently elided middle
+    is a silently short summary. `--head/--tail` window it on demand.
+  - `--since TS` renders only the post-watermark tail (the continuation-pass
+    window), with no watermark lookup — the DB-free half of `--delta`.
+  - An unresolvable ref exits 1 with `NO TRANSCRIPT FOUND for <ref>` on stderr,
+    the string the skill branches on. A `<parent>:<agent_id>` child key is
+    refused pointing at the parent, because session_digest renders main-chain
+    records only — digesting the parent under a child's name would return work
+    that is not the child's.
+- **`csd summary-scope <SESSION_REF>` — is this a continuation pass?** Reports
+  whether a kmcp session summary already exists and what a NEXT pass would
+  cover, so an **in-session** `/session-summary` can detect pass N without the
+  console's dispatcher telling it. Three verdicts: `full` (no prior capture, or
+  one with no resolvable watermark — the honest scope is the whole transcript),
+  `delta` (a window opens at `since`; the exact `csd digest … --since …`
+  command is printed), `none` (captured already and the tail is not
+  substantive — nothing new to write). `--json` emits the same facts;
+  `--mode auto|force|off` picks the grading, matching the console's `delta`
+  body field.
+
+### Changed
+- **One grader, three surfaces.** `resolve_summary_scope` and `_prior_capture`
+  moved out of `console/server.py` into `summarize.py` (beside the
+  `_delta_gate` they wrap). The console keeps a thin wrapper binding its own
+  module-level DSNs — behaviour byte-for-byte identical, tests unchanged — and
+  the CLI (and through it the skill) now grades a pass through the *same* code
+  the Summarize button and the launchd timer use. Doctrine travels with it:
+  it never raises, and an unreachable archive degrades to `pass 1 / full` with
+  the reason printed, exit 0.
+- `csd` no longer needs a DSN to start for `digest` / `summary-scope`; every
+  other command still fails loudly at the group level when the archive is
+  unconfigured.
+
 ## [3.13.0] - 2026-09-01
 
 _Most of this batch's `index.html` code reached `main` inside the 3.12.3

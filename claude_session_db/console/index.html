@@ -60,7 +60,9 @@
 
   /* ---- left: projects + sessions (accordion + sortable columns) ---- */
   #nav { background:var(--surface); border-right:1px solid var(--border);
-         overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain; }
+         overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
+         scrollbar-gutter:stable; }   /* the gutter is always reserved, so a pill that
+                                        drops the list below one screen can't shift it */
   #nav .top { padding:10px 14px 9px; position:sticky; top:0; background:var(--surface);
               border-bottom:1px solid var(--border); z-index:4; }
   #nav .top .toprow { display:flex; align-items:center; justify-content:space-between; gap:8px; }
@@ -178,13 +180,14 @@
   /* repo pills: one per project (a project IS a repo here), each with its
      session count; the selected pill filters the list below. Wraps, and
      scrolls inside the sticky top once it outgrows ~4 rows. */
-  .pills { display:flex; flex-wrap:wrap; gap:5px; margin-top:8px; max-height:98px; overflow-y:auto; }
+  .pills { display:flex; flex-wrap:wrap; gap:5px; margin-top:8px; max-height:98px; overflow-y:auto;
+           scrollbar-gutter:stable; }
   .pill { cursor:pointer; padding:1px 8px; border:1px solid var(--border); border-radius:10px;
           color:var(--ink2); font:11px var(--mono); white-space:nowrap; user-select:none;
           display:inline-flex; align-items:center; gap:5px; max-width:100%; min-width:0; }
   .pill .pl { overflow:hidden; text-overflow:ellipsis; min-width:0; }
   .pill b { font-weight:600; color:var(--muted); flex:none; }
-  .pill .pw { color:var(--warn); font-weight:600; flex:none; }
+  .pill .pw { color:var(--warn); font-weight:600; flex:none; font-size:9px; }  /* ● waiting-for-you count */
   .pill:hover { color:var(--ink); }
   .pill.on { background:var(--accent); color:#fff; border-color:var(--accent); }
   .pill.on b, .pill.on .pw { color:#fff; }
@@ -1933,7 +1936,7 @@ function renderNavPills(d){
   const groups = groupByProject(all);
   const hits = new Map(); for(const s of hit) hits.set(projKey(s), (hits.get(projKey(s))||0)+1);
   const pill = (key,label,n,wait,on,dim) =>
-    `<span class="pill ${on?"on":""} ${dim?"dim":""}" title="${esc(label)} — ${n} session${n===1?"":"s"}${q?" matching":""}${wait?` · ${wait} waiting for you`:""}" onclick="selectPill(${key==null?"null":`'${esc(key)}'`})"><span class="pl">${esc(label)}</span><b>${n}</b>${wait?`<span class="pw">${wait}</span>`:""}</span>`;
+    `<span class="pill ${on?"on":""} ${dim?"dim":""}" title="${esc(label)} — ${n} session${n===1?"":"s"}${q?" matching":""}${wait?` · ${wait} waiting for you`:""}" onclick="selectPill(${key==null?"null":`'${esc(key)}'`})"><span class="pl">${esc(label)}</span><b>${n}</b>${wait?`<span class="pw">●${wait}</span>`:""}</span>`;
   const waitAll = hit.filter(s=>s.state==="waiting").length;
   let html = pill(null, "all", hit.length, waitAll, sel===null, false);
   for(const g of groups){

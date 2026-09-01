@@ -19,6 +19,34 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.13.0] - 2026-09-01
+
+_Most of this batch's `index.html` code reached `main` inside the 3.12.3
+tooltips commit (two sessions sharing one worktree); this entry labels it._
+
+### Added
+- **Repo pills in the sidebar.** The project accordion (and its ▤ flat/grouped
+  toggle) is replaced by a pill strip under the sort bar: an `all` pill plus
+  one per repo, each carrying its session count and an amber `●n` waiting-
+  for-you count. Selecting a pill filters the list to that repo; selecting it
+  again (or `all`) clears. The choice persists (`csd.navOpenProj`, the key the
+  accordion used, so the collapsed rail's project icons still land on it),
+  applies to both the Projects and Archive tabs, and falls back to `all`
+  without forgetting itself when the current tab has no sessions in that
+  repo. Under a search the counts become per-repo hits and empty repos dim.
+  The tl;dr-all batch queues exactly what the pill + search show.
+
+### Changed
+- **Three-line session rows.** Line 1 is the title on its own, full width;
+  line 2 the meta line (project only while `all` is in effect); line 3 a
+  right-aligned action strip — accept-proposal ✓, rename ✎, the T/⧗ digest
+  chips, the priority flag — every action a uniform `.rbtn` in one flex row
+  that wraps before truncating, so further buttons are one span appended in
+  `sessRow()`. The rename glyph is always visible now rather than hover-only.
+- **Sidebar scrollbar gutter is reserved** (`scrollbar-gutter: stable` on
+  the sidebar and the pill strip), so switching from a long list to a short
+  one no longer shifts the contents sideways.
+
 ## [3.12.3] - 2026-09-01
 
 ### Added

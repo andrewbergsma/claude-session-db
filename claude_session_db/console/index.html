@@ -19,6 +19,11 @@
     --cyan:#39c5cf;
     --mode-full:#d29922; --mode-summary:#4c8dff; --mode-sections:#3fb950;
     --mode-section:#3fb950; --mode-batch:#39c5cf;
+    /* markdown syntax tints — one place, shared by chat turns and the changelog.
+       Restrained on purpose: hue carries the block TYPE, never emphasis. */
+    --md-head:#79c0ff; --md-subhead:#39c5cf; --md-code:#ffa657;
+    --md-quote:#bc8cff; --md-strong:#f0f6fc; --md-marker:#5a7fb8;
+    --md-thead:#1f2937; --md-zebra:rgba(255,255,255,.022);
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
     --rail-w:320px; --nav-w:440px;
   }
@@ -358,31 +363,56 @@
   .txt.md ul, .txt.md ol { margin:0 0 7px; padding-left:20px; }
   .txt.md li { margin:2px 0; }
   .txt.md li > code { word-break:break-word; }
+  .txt.md li::marker { color:var(--md-marker); }
   .txt.md h1, .txt.md h2, .txt.md h3, .txt.md h4 {
-      font:700 12.5px var(--mono); color:var(--ink); margin:11px 0 5px;
+      font:700 12.5px var(--mono); color:var(--md-head); margin:11px 0 5px;
       letter-spacing:.2px; }
   .txt.md h1 { font-size:14px; }
-  .txt.md h3, .txt.md h4 { font-size:10.5px; color:var(--ink2);
+  .txt.md h3, .txt.md h4 { font-size:10.5px; color:var(--md-subhead);
       text-transform:uppercase; letter-spacing:.6px; }
   .txt.md code { font:12px var(--mono); background:var(--surface2);
       border:1px solid var(--border); border-radius:4px; padding:0 4px;
-      color:var(--ink); }
+      color:var(--md-code); }
   .txt.md pre { background:var(--surface2); border:1px solid var(--border);
       border-radius:6px; padding:8px 10px; margin:6px 0 8px;
       max-width:100%; overflow-x:auto; }
   .txt.md pre > code { display:block; white-space:pre; word-break:normal;
-      font:12px/1.45 var(--mono); background:none; border:0; padding:0; }
+      font:12px/1.45 var(--mono); background:none; border:0; padding:0;
+      color:var(--ink); }
   .txt.md pre[data-lang]::before { content:attr(data-lang); display:block;
       font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.6px;
-      color:var(--muted); margin-bottom:5px; }
-  .txt.md blockquote { margin:6px 0; padding:1px 0 1px 10px; color:var(--ink2);
-      border-left:2px solid var(--border); }
+      color:var(--md-subhead); margin-bottom:5px; }
+  .txt.md blockquote { margin:6px 0; padding:2px 0 2px 10px; color:var(--ink2);
+      border-left:2px solid var(--md-quote); background:rgba(188,140,255,.05);
+      border-radius:0 4px 4px 0; }
   .txt.md blockquote > :last-child { margin-bottom:0; }
   .txt.md a { color:var(--accent); word-break:break-word; }
-  .txt.md strong { color:var(--ink); font-weight:600; }
+  .txt.md a:hover { text-decoration:underline; }
+  .txt.md strong { color:var(--md-strong); font-weight:600; }
   .txt.md em { font-style:italic; }
   .txt.md del { color:var(--muted); }
   .txt.md hr { border:0; border-top:1px solid var(--border); margin:10px 0; }
+  /* --- GFM pipe tables (mdLite) -------------------------------------------
+     The wrapper — never the table — is the scroller: #stream is
+     overflow-x:hidden, so a 12-column table must scroll INSIDE its own box
+     exactly like a wide code fence, not widen the chat column. */
+  .mdtw { max-width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch;
+          margin:7px 0 9px; border:1px solid var(--border); border-radius:6px; }
+  .mdt { border-collapse:collapse; width:auto; min-width:100%;
+         font-size:12.5px; line-height:1.45; }
+  .mdt th, .mdt td { padding:5px 9px; text-align:left; vertical-align:top;
+                     border-bottom:1px solid var(--border);
+                     border-right:1px solid var(--border); }
+  .mdt th:last-child, .mdt td:last-child { border-right:0; }
+  .mdt tbody tr:last-child td { border-bottom:0; }
+  .mdt thead th { background:var(--md-thead); color:var(--md-head);
+                  font:600 11.5px var(--mono); letter-spacing:.3px;
+                  white-space:nowrap; }
+  .mdt tbody tr:nth-child(even) { background:var(--md-zebra); }
+  .mdt td { color:var(--ink2); }
+  .mdt td code, .mdt th code { white-space:pre-wrap; word-break:break-word; }
+  .mdt .ta-c { text-align:center; }
+  .mdt .ta-r { text-align:right; }
   .subtools { margin-top:6px; }
   .trow { font:11px var(--mono); margin:2px 0; }
   .tline { display:flex; gap:7px; align-items:baseline; color:var(--ink2); }
@@ -5156,8 +5186,9 @@ function renderVersion(){
 }
 
 /* Minimal markdown -> HTML, dependency-free: fenced code, headings, bullet and
-   ordered lists, blockquotes, rules, paragraphs, and inline code/bold/italic/
-   strike/links. ONE renderer, shared by the changelog overlay and chat turns.
+   ordered lists, blockquotes, GFM pipe tables, rules, paragraphs, and inline
+   code/bold/italic/strike/links. ONE renderer, shared by the changelog overlay
+   and chat turns.
 
    Escaping order is the whole security argument: every byte goes through esc()
    FIRST and the markup emitted afterwards is the only markup there is — so a
@@ -5184,6 +5215,57 @@ function mdInline(t){
   return s.replace(new RegExp(MD_PH + "(\\d+)" + MD_PH, "g"),
                    (m, i) => `<code>${spans[i]}</code>`);
 }
+/* ---- GFM pipe tables ------------------------------------------------------
+   Cells are split on UNESCAPED pipes only (`\|` is a literal pipe), exactly as
+   GFM does — the split happens before the inline pass, so a pipe inside a code
+   span still splits, the same way it does on GitHub. Leading/trailing pipes are
+   optional; a row's own edge pipes produce empty edge cells that are dropped.
+   Detection is a two-line contract (header + delimiter), so a lone `---` or a
+   fenced block full of pipes can never be mistaken for a table. */
+const MD_PIPE = /(?:^|[^\\])\|/;
+function mdCells(row){
+  const s = String(row).trim(), cells = [];
+  let cur = "";
+  for(let i = 0; i < s.length; i++){
+    if(s[i] === "\\" && s[i + 1] === "|"){ cur += "|"; i++; continue; }
+    if(s[i] === "|"){ cells.push(cur); cur = ""; continue; }
+    cur += s[i];
+  }
+  cells.push(cur);
+  if(cells.length > 1 && s.startsWith("|") && !cells[0].trim()) cells.shift();
+  if(cells.length > 1 && !cells[cells.length - 1].trim()) cells.pop();
+  return cells.map(c => c.trim());
+}
+/* the delimiter row: one `:?-+:?` per header cell, and (for a 1-column table)
+   a pipe of its own, so `foo |` over `---` stays prose. */
+function mdTableSep(line, n){
+  if(line === undefined) return false;
+  const c = mdCells(line);
+  if(c.length !== n || !n) return false;
+  if(n === 1 && !MD_PIPE.test(String(line))) return false;
+  return c.every(x => /^:?-+:?$/.test(x));
+}
+function mdAligns(line){
+  return mdCells(line).map(c => (c.startsWith(":") && c.endsWith(":")) ? "c"
+                              : c.endsWith(":") ? "r" : "");
+}
+function mdTable(head, aligns, rows){
+  const cls = i => aligns[i] ? ` class="ta-${aligns[i]}"` : "";
+  const n = head.length;
+  let h = `<div class="mdtw"><table class="mdt"><thead><tr>`;
+  for(let i = 0; i < n; i++) h += `<th${cls(i)}>${mdInline(head[i])}</th>`;
+  h += "</tr></thead>";
+  if(rows.length){
+    h += "<tbody>";
+    for(const r of rows){
+      h += "<tr>";
+      for(let i = 0; i < n; i++) h += `<td${cls(i)}>${mdInline(r[i] ?? "")}</td>`;
+      h += "</tr>";
+    }
+    h += "</tbody>";
+  }
+  return h + "</table></div>";
+}
 /* `breaks`: treat a single newline inside a paragraph as a hard break. ON for
    chat turns (a prompt's own line structure is meaningful and used to survive
    the old pre-wrap), OFF for CHANGELOG.md, which is hard-wrapped prose that
@@ -5198,7 +5280,9 @@ function mdLite(src, breaks){
   const flushQ = () => { if(quote.length){ const q = quote.join("\n"); quote.length = 0;
                                            out.push(`<blockquote>${mdLite(q, breaks)}</blockquote>`); } };
   const flush = () => { flushP(); flushL(); flushQ(); };
-  for(const raw of String(src || "").split("\n")){
+  const lines = String(src || "").split("\n");
+  for(let li = 0; li < lines.length; li++){
+    const raw = lines[li];
     // ---- fenced code: verbatim + escaped, never touched by the inline pass ----
     const f = raw.match(/^\s*(```+|~~~+)\s*([\w+#.-]*)\s*$/);
     if(fence !== null){
@@ -5218,6 +5302,29 @@ function mdLite(src, breaks){
     const bq = raw.match(/^\s*>\s?(.*)$/);
     if(bq){ flushP(); flushL(); quote.push(bq[1]); continue; }
     if(quote.length && raw.trim()){ quote.push(raw); continue; }   // lazy quote continuation
+
+    // ---- GFM pipe table: header row, delimiter row, then body rows --------
+    // Only ever reached OUTSIDE a fence (the fence branch `continue`s above),
+    // so a code block full of pipes is never mistaken for one.
+    if(MD_PIPE.test(raw) && mdTableSep(lines[li + 1], mdCells(raw).length)){
+      const head = mdCells(raw), aligns = mdAligns(lines[li + 1]), rows = [];
+      let j = li + 2;
+      for(; j < lines.length; j++){
+        const r = lines[j];
+        if(!r.trim() || !MD_PIPE.test(r) || /^\s*(?:```+|~~~+)/.test(r)) break;
+        rows.push(mdCells(r));
+      }
+      // a table under an open list item belongs INSIDE that item, the same way
+      // a lazy continuation line does
+      const inLi = !!list && !para.length;
+      flushP(); flushQ(); if(!inLi) flushL();
+      const tbl = mdTable(head, aligns, rows);
+      if(inLi) list[list.length - 1] = list[list.length - 1]
+                 .replace(/<\/li>$/, tbl + "</li>");
+      else out.push(tbl);
+      li = j - 1;
+      continue;
+    }
 
     const ul = raw.match(/^\s*[-*+]\s+(.*)$/);
     const ol = ul ? null : raw.match(/^\s*\d+[.)]\s+(.*)$/);

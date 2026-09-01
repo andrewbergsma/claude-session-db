@@ -3301,6 +3301,27 @@ GIT_TIMEOUT_S = 3
 GH_TIMEOUT_S = 10
 GIT_TTL_S = 12
 GH_TTL_S = 300
+# Well-known install dirs probed when `gh` is not on PATH. A launchd-parented
+# console inherits the bare default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so
+# `shutil.which` alone reports a Homebrew gh as "not installed" — the same
+# failure mode the `claude` resolver in spawn_claude() already guards against.
+GH_PROBE_DIRS = ("/opt/homebrew/bin", "/usr/local/bin",
+                 str(Path.home() / ".local" / "bin"))
+
+
+def _gh_bin() -> str | None:
+    """Resolve the `gh` binary: $CSD_GH_BIN, then PATH, then GH_PROBE_DIRS."""
+    env = os.environ.get("CSD_GH_BIN")
+    if env and Path(env).is_file():
+        return env
+    found = shutil.which("gh")
+    if found:
+        return found
+    for d in GH_PROBE_DIRS:
+        cand = Path(d) / "gh"
+        if cand.is_file() and os.access(cand, os.X_OK):
+            return str(cand)
+    return None
 GIT_LIST_CAP = 40          # max dirty/untracked paths returned per list
 GIT_LOG_N = 30             # recent commits scanned for window flagging
 GIT_WINDOW_END_MARGIN_S = 120
@@ -3483,9 +3504,13 @@ def _gh_prs(root: str, refresh: bool) -> dict:
         hit = _GH_CACHE.get(root)
         if hit and not refresh and hit[0] > now:
             return hit[1]
-    gh = shutil.which("gh")
+    gh = _gh_bin()
     if not gh:
-        payload = {"available": False, "reason": "gh CLI not installed"}
+        # Not a claim about the machine — only about what this process can see.
+        payload = {"available": False,
+                   "reason": "gh not found on the console's PATH "
+                             f"({os.environ.get('PATH', '')}); "
+                             "set CSD_GH_BIN or fix the launcher's PATH"}
     else:
         rc, url = _git(["remote", "get-url", "origin"], root)
         if rc != 0 or "github" not in (url or ""):

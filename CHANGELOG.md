@@ -19,6 +19,21 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.12.2] - 2026-09-01
+
+### Fixed
+- **Git rail said "gh CLI not installed" on a machine where it is.** The
+  console runs under launchd (`app.csd.console`), which hands the process the
+  bare default PATH (`/usr/bin:/bin:/usr/sbin:/sbin`), so `shutil.which("gh")`
+  never saw Homebrew's `/opt/homebrew/bin/gh`. Two-layer fix: `_gh_bin()`
+  resolves `$CSD_GH_BIN`, then PATH, then the well-known install dirs (the same
+  fallback the `claude` resolver in `spawn_claude` already has), and the
+  reason string now reports what the process could *see* ("gh not found on the
+  console's PATH (…)") instead of a claim about the machine. The launcher
+  (`~/.local/bin/csd-console-lan`, outside the repo) now prepends
+  `~/.local/bin:/opt/homebrew/bin:/usr/local/bin` so every other shell-out
+  gets the same fix at the source.
+
 ## [3.12.1] - 2026-09-01
 
 ### Fixed

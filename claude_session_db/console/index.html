@@ -226,6 +226,9 @@
   .ctitle .acts { display:flex; justify-content:flex-end; align-items:center; gap:6px;
                   flex-wrap:wrap; margin-top:4px; min-width:0; }
   .ctitle .acts > * { flex:none; }
+  .ctitle .acts .aproj { flex:1 1 auto; min-width:0; margin-right:auto; overflow:hidden;
+                         text-overflow:ellipsis; white-space:nowrap;
+                         font:10.5px var(--mono); color:var(--muted); cursor:default; }
   .rbtn { cursor:pointer; color:var(--muted); font-size:11px; line-height:18px; min-width:18px;
           text-align:center; border-radius:4px; padding:0 3px; }
   .rbtn:hover { color:var(--ink); background:var(--surface2); }
@@ -239,7 +242,7 @@
   .ctitle .m { display:flex; align-items:baseline; gap:5px; margin-top:2px; color:var(--muted);
                font:10.5px var(--mono); white-space:nowrap; overflow:hidden; min-width:0; }
   .ctitle .m > * { flex:none; }
-  .ctitle .m .mproj, .ctitle .m .mshrink { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
+  .ctitle .m .mshrink { flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
   .ctitle .m .mdates { flex:0 4 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; }
   .ctitle .m .msep { color:#3b434d; }
   .ctitle .m .warn { color:var(--warn); } .ctitle .m .bad { color:var(--bad); }
@@ -2020,18 +2023,17 @@ function groupByProject(sessions){
 
 /* three-line session row.
    Line 1: state dot | the title, full width (ellipsis only when genuinely long).
-   Line 2: one compact muted meta line — project (when no pill narrows it),
-           worktree, subagent/live badges, turns, ctx (over-budget coloring
+   Line 2: one compact muted meta line — worktree, subagent/live badges, turns, ctx (over-budget coloring
            carried over), compact "started → last" range, idle/active state.
            The shrinkable segments give way first so idle/active stays visible.
-   Line 3: the action strip, right-aligned — accept-proposal ✓, rename ✎, the
-           digest chips, the priority flag. Append new actions there. */
+   Line 3: the repo on the left (only while "all" is in effect — a selected
+           pill already says it), then the action strip, right-aligned —
+           accept-proposal ✓, rename ✎, the digest chips, the priority flag.
+           Append new actions there. */
 function sessRow(s, showProject){
   const id = s.session_id;
   const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
   const segs = [];
-  if(showProject)
-    segs.push(`<span class="mproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>`);
   if(busy)
     segs.push(`<span class="agc" title="a summarize run is in flight for this session">busy</span>`);
   if(s.worktree)
@@ -2058,7 +2060,9 @@ function sessRow(s, showProject){
   const editBtn = `<span class="rbtn edit" title="rename this session (an overlay — the transcript itself is never touched)" onclick="startTitleEdit(event,'${id}')">✎</span>`;
   const p = prioOf(s);
   const prioBtn = `<span class="rbtn prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span>`;
-  const acts = `<div class="acts">${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
+  const aproj = showProject
+    ? `<span class="aproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>` : "";
+  const acts = `<div class="acts">${aproj}${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div><div class="m">${meta}</div></div>`
     : `<div class="ctitle">

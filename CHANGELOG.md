@@ -167,7 +167,9 @@ tooltips commit (two sessions sharing one worktree); this entry labels it._
 - **Three-line session rows.** Line 1 is the title on its own, full width;
   line 2 the meta line (project only while `all` is in effect); line 3 a
   right-aligned action strip — accept-proposal ✓, rename ✎, the T/⧗ digest
-  chips, the priority flag — every action a uniform `.rbtn` in one flex row
+  chips, the priority flag — with the repo name at the line's left edge (shown
+  while `all` is in effect; a selected pill already names it). Every action is
+  a uniform `.rbtn` in one flex row
   that wraps before truncating, so further buttons are one span appended in
   `sessRow()`. The rename glyph is always visible now rather than hover-only.
 - **Sidebar scrollbar gutter is reserved** (`scrollbar-gutter: stable` on

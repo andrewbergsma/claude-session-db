@@ -242,7 +242,12 @@ when two runs share a project dir, and blind between spawn and first write.
   resuming or appending to the session**. Because nothing writes back, the 15s
   two-writer guard is gone and the archive is decoupled — the session is archived
   the moment the summary is dispatched (its outcome is tracked in `SUMMARIZING`
-  for visibility, not as an archive gate).
+  for visibility, not as an archive gate). **The run is itself a session the
+  console minted the id for** (`--session-id`, as with Fork): registered under
+  the child id so Stop in the child view reaches it, titled `Summary of
+  ‹parent› (pass N)` at dispatch, and linked both ways in the meta overlay
+  (`summary_of` / `summary_child`) — the parent's summarizing chip opens the
+  run, the run's header links back, and the link survives a restart.
   Summarize is the **first action dispatched through the side-session permission
   envelope** (below); every other spawn is still ambient.
   It is also **repeatable**: `resolve_summary_scope()` grades the session through

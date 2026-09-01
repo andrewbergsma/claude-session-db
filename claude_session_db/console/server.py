@@ -363,7 +363,11 @@ PRIORITY_FILE = CONSOLE_STATE / "priority.json"     # legacy, migrated once
 TITLES_FILE = CONSOLE_STATE / "titles.json"         # legacy, migrated once
 _META_LOCK = threading.Lock()
 _TOPICS_LOCK = threading.Lock()
-META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed")
+# summary_of / summary_child: the two ends of the off-session summary link —
+# the child run's overlay names the session it digests, the parent's names the
+# latest run that digested it. Durable (meta.json), unlike SUMMARIZING.
+META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed",
+               "summary_of", "summary_child")
 MAX_TITLE_LEN = 200
 MAX_TOPIC_LEN = 80
 
@@ -1369,6 +1373,8 @@ def _nav_row(p: Path, idx: dict, meta: dict):
     s["user_title"] = m.get("title")
     s["topic"] = m.get("topic")
     s["subtopic"] = m.get("subtopic")
+    s["summary_of"] = m.get("summary_of")
+    s["summary_child"] = m.get("summary_child")
     # Cached-or-nothing; stale rows queue an async regeneration.
     s["tldr"] = tldr.payload(p.stem, p)
     # Per-row digest presence for the sidebar glance: does a
@@ -2007,6 +2013,13 @@ def build_session(sid: str):
         # transition is visible on the session the operator is watching. Child
         # sids never summarize, so this is None for them.
         "summarizing": SUMMARIZING.get(sid),
+        # the off-session summary link, both directions: on the PARENT the
+        # latest child run (durable, meta.json) plus the live run record; on
+        # the CHILD the session it is digesting — so the chip is a link into
+        # the run and the run's header links back.
+        "summary_child": _m.get("summary_child"),
+        "summary_run": SUMMARY_RUNS.get(sid),
+        "summary_of": _m.get("summary_of"),
         # prior-capture facts (watermark date, next pass, prior entry ref) so
         # the Summarize buttons can say NEW work since <date>. DB-only and
         # TTL-cached — cheap enough to ride this poll; None when nothing was
@@ -3121,6 +3134,10 @@ def _settle_pass(sid: str, claim, pass_no: int, status: str, detail=None) -> Non
 
 SUMMARIZE_PROMPT = "/session-summary"
 SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
+# parent sid -> the run record: {child, pass, started, ended, rc}. The child
+# is a REAL session (a fresh `claude -p` under an id the console minted), so
+# it is addressable in the sidebar from the moment it is dispatched.
+SUMMARY_RUNS: dict[str, dict] = {}
 SUMMARY_MIN_OUTPUT_BYTES = 40        # child output past the header ⇒ it ran
 _SUMMARY_LOG_DIR = CONSOLE_STATE / "summaries"
 
@@ -3132,6 +3149,9 @@ def _await_summary(sid: str, proc, log_path: Path, base_size: int,
     is the observed silent no-op, so it is downgraded rather than called done.
     The same verdict settles the pass ledger row and releases its claim."""
     rc = proc.wait()
+    run = SUMMARY_RUNS.get(sid)
+    if run is not None:
+        run.update(ended=time.time(), rc=rc)
     if rc != 0:
         SUMMARIZING[sid] = f"summary failed (rc={rc})"
         _settle_pass(sid, claim, pass_no, "failed", f"child rc={rc}")
@@ -3199,8 +3219,23 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
     if scope["delta"]:
         ctx.update({"since": scope["since"], "pass": scope["pass"],
                     "prior": scope["prior"]})
+    # The console mints the CHILD's session id (the fork doctrine): the run is
+    # registered under it — so Stop in the child view aims at the run, and the
+    # parent stays free for Answer (the child never writes to it) — and it is
+    # titled + linked before it exists, so the sidebar shows a named row the
+    # moment the transcript appears instead of a bare uuid.
+    child = str(uuidlib.uuid4())
+    _pm = _meta_of(_read_meta_overlay(), sid)
+    ptitle = _pm.get("title")
+    if not ptitle:
+        try:
+            ptitle = ((summarize_nav(src) or {}).get("title") if src else None)
+        except OSError:
+            ptitle = None
+    ptitle = (ptitle or sid[:8]).strip()
     try:
-        proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}"], cwd, sid,
+        proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}",
+                             "--session-id", child], cwd, child,
                             log_path=log_path, action="summarize",
                             envelope_ctx=ctx)
     except Exception as exc:  # noqa: BLE001 — a failed spawn must free the claim
@@ -3212,12 +3247,19 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
     except OSError:
         base_size = 0
     SUMMARIZING[sid] = "running"
+    SUMMARY_RUNS[sid] = {"child": child, "pass": scope["pass"],
+                         "started": time.time(), "ended": None, "rc": None,
+                         "log": str(log_path)}
+    set_title(child, f"Summary of {ptitle} (pass {scope['pass']})")
+    _update_meta(child, summary_of=sid)
+    _update_meta(sid, summary_child=child)
     if archive:
         set_archived(sid, True, reason="session-summary")
     threading.Thread(target=_await_summary,
                      args=(sid, proc, log_path, base_size, claim, scope["pass"]),
                      daemon=True, name=f"summarize-{sid[:8]}").start()
     return {"ok": True, "pid": proc.pid, "archived": archive,
+            "child_session": child,
             "envelope": getattr(proc, "envelope_note", None),
             "ledger": claim.get("note"),
             "note": ("independent off-session summary dispatched"

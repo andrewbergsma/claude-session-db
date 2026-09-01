@@ -429,11 +429,16 @@ def mark_summarized(archive_conn: psycopg.Connection, session_id: str,
                    s.message_count,
                    -- The TRUE message tail, not s.last_prompt_leaf_uuid: that
                    -- column is the last USER PROMPT leaf, which resolves for only
-                   -- ~18% of sessions (261/1432) and points behind everything the
-                   -- session did after its last prompt. The delta window opens at
-                   -- the watermark, so a stale leaf re-renders work already
-                   -- summarized. See session_mgmt._watermark_for (leaf -> count
-                   -- -> kmcp resolution order).
+                   -- ~18 percent of sessions (261/1432) and points behind
+                   -- everything the session did after its last prompt. The
+                   -- delta window opens at the watermark, so a stale leaf
+                   -- re-renders work already summarized. See
+                   -- session_mgmt._watermark_for (leaf -> count -> kmcp
+                   -- resolution order).
+                   -- NB: spell percentages out — psycopg's client-side
+                   -- placeholder parser scans this whole string, comments
+                   -- included, so a lone percent sign here raises
+                   -- "incomplete placeholder" on every call.
                    (SELECT m.uuid FROM messages m
                     WHERE m.session_id = s.session_id AND m.ts IS NOT NULL
                     ORDER BY m.ts DESC LIMIT 1),

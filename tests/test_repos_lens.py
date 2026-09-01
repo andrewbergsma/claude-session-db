@@ -169,3 +169,64 @@ def test_payload_serves_the_store_without_touching_git(monkeypatch, tmp_path):
 
     out = S.repos_payload()
     assert out["repos"] == store["repos"] and out["age_s"] >= 0
+
+
+# ---- detail lens ------------------------------------------------------------
+def test_web_url_from_both_remote_spellings(repo):
+    git(repo, "remote", "set-url", "origin", "git@github.com:o/r.git")
+    assert S._web_url(str(repo)) == "https://github.com/o/r"
+    git(repo, "remote", "set-url", "origin", "https://github.com/o/r.git")
+    assert S._web_url(str(repo)) == "https://github.com/o/r"
+    git(repo, "remote", "set-url", "origin", "https://gitlab.com/o/r.git")
+    assert S._web_url(str(repo)) is None    # never guess a non-GitHub URL
+
+
+def test_commits_span_all_refs_and_flag_merges(repo):
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "s.txt").write_text("s\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-qm", "on side")
+    git(repo, "checkout", "-q", "main")
+    git(repo, "merge", "--no-ff", "-q", "side", "-m", "merge side")
+
+    cs = S._all_commits(str(repo), 10)
+    subs = [c["subject"] for c in cs]
+    assert "on side" in subs                # a branch commit HEAD's log would show
+    assert any(c["is_merge"] for c in cs)
+    assert not any(c["is_merge"] for c in cs if c["subject"] == "on side")
+
+
+def test_symbolic_head_refs_are_dropped(repo, monkeypatch):
+    """origin/HEAD is an alias for the default branch — a badge for it links nowhere."""
+    calls = {}
+
+    def fake(args, cwd):
+        if args[0] == "log":
+            return 0, S._FS.join(["abc1234", "s", "2026-01-01T00:00:00Z", "a",
+                                  "HEAD -> main, origin/main, origin/HEAD", "p1"])
+        return S._git(args, cwd)
+    monkeypatch.setattr(S, "_git", fake)
+    refs = S._all_commits(str(repo), 1)[0]["refs"]
+    assert refs == ["HEAD -> main", "origin/main"]
+
+
+def test_detail_refuses_a_root_the_registry_does_not_know(monkeypatch):
+    monkeypatch.setattr(S, "_repo_registry", lambda force=False: ([], "test"))
+    payload, code = S.repo_detail_payload("", "/etc")
+    assert code == 404 and payload["error"] == "unknown repo root"
+
+
+def test_detail_needs_an_address(monkeypatch):
+    monkeypatch.setattr(S, "_repo_registry", lambda force=False: ([], "test"))
+    payload, code = S.repo_detail_payload("", "")
+    assert code == 400
+
+
+def test_detail_lifts_the_card_caps(repo, monkeypatch):
+    for i in range(3):
+        git(repo, "branch", f"b{i}")
+    monkeypatch.setattr(S, "REPO_BRANCH_CAP", 1)          # card would show one
+    monkeypatch.setattr(S, "_repo_registry", lambda force=False: ([str(repo)], "test"))
+    card = S.repo_snapshot(str(repo))
+    assert len(card["branches"]) == 1 and card["branch_total"] == 4
+    detail, code = S.repo_detail_payload("", str(repo))
+    assert code == 200 and len(detail["branches"]) == 4   # detail shows all

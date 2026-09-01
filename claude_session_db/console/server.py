@@ -580,6 +580,36 @@ def _result_map(records):
     return out
 
 
+def tool_result_payload(sid: str, tid: str):
+    """(payload, code) for GET /api/tool_result — one tool_result's text.
+
+    Fetched lazily when a tool row is expanded, so the polled session payload
+    never carries result bodies. The text is the transcript's, verbatim (no
+    truncation — the archive's invariant applies to the surface too); a result
+    whose content is absent from the transcript reports that rather than an
+    empty string, so "empty output" and "not recorded" stay distinguishable.
+    """
+    path = find_session(sid)
+    if path is None:
+        return {"error": "session not found"}, 404
+    if not tid:
+        return {"error": "tid required"}, 400
+    records, _ = all_records(path)
+    for r in records:
+        content = (r.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if (isinstance(b, dict) and b.get("type") == "tool_result"
+                    and b.get("tool_use_id") == tid):
+                txt = _text_of(b.get("content"))
+                return {"tid": tid, "text": txt, "chars": len(txt),
+                        "is_error": bool(b.get("is_error")),
+                        "recorded": b.get("content") is not None}, 200
+    return {"tid": tid, "text": None, "chars": 0, "recorded": False,
+            "error": "no tool_result for this tool_use yet"}, 404
+
+
 def pending_tool_ids(records, rmap=None):
     """tool_use ids that have NO matching tool_result yet — the single source of
     truth for "in flight". Both the activity-state classifier (does the last
@@ -4856,6 +4886,16 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 return self._json(angle_catalog((q.get("id") or [""])[0]))
             except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/tool_result":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                payload, code = tool_result_payload(sid, (q.get("tid") or [""])[0])
+                return self._json(payload, code)
+            except Exception as e:  # noqa: BLE001 — surfaced, never a bodyless 500
                 return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/git":
             q = parse_qs(u.query)

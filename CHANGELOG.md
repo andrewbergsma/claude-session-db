@@ -19,6 +19,33 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.13.1] - 2026-09-01
+
+### Added
+- **GFM pipe tables in the console's markdown renderer.** A `| a | b |` header
+  over a `|---|---|` delimiter now renders as a real `<table>` — header row,
+  cell borders, zebra body rows — in chat turns and the changelog overlay
+  alike (`mdLite` is one renderer, shared). Leading/trailing pipes are
+  optional, `\|` is a literal pipe inside a cell, `:---` / `:---:` / `---:`
+  set column alignment, cell content goes through the same inline pass (code,
+  bold, links), and a table under an open list item lands *inside* that item.
+- Detection is a **two-line contract** (a row carrying an unescaped pipe plus a
+  matching delimiter row), evaluated only outside a code fence — so a fenced
+  block full of pipes, a bare `---`, and `foo |` over `---` all stay what they
+  were. Ragged rows follow GFM: short rows pad, long rows truncate.
+- The **wrapper**, never the table, is the scroller (`.mdtw` is
+  `overflow-x:auto`): a 12-column table scrolls inside its own box exactly like
+  a wide code fence rather than widening the chat column — verified at 418px
+  wrapper / 1542px table with the pane unmoved.
+
+### Changed
+- **Rendered markdown has colour.** New `--md-*` tokens on `:root` —
+  `--md-head`, `--md-subhead`, `--md-code`, `--md-quote`, `--md-strong`,
+  `--md-marker`, `--md-thead`, `--md-zebra` — tint headings, inline code and
+  fence-language labels, blockquotes (accented left border + a 5% wash), bold,
+  list markers and the table header. Hue carries the block *type*, never
+  emphasis; the console is dark-only, so there is no light pairing to keep.
+
 ## [3.12.1] - 2026-09-01
 
 ### Fixed

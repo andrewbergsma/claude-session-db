@@ -19,6 +19,28 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.17.0] - 2026-09-01
+
+### Added
+- **The off-session summary run is now a session you can open.** Summarize
+  used to spawn `claude -p /session-summary <uuid>` and remember only a
+  `running | done | failed` flag keyed by the parent, so the run was invisible
+  except as a bare-uuid row appearing in the sidebar. The console now mints
+  the child's session id itself (`--session-id`, the same doctrine as Fork),
+  registers the process under it — so **Stop in the child view aims at the
+  run**, and the parent is no longer held by the two-writer guard for a
+  process that never writes to it — titles it `Summary of ‹parent› (pass N)`
+  before it exists, and records the link both ways in the meta overlay
+  (`summary_of` on the child, `summary_child` on the parent — durable across
+  a console restart, unlike the in-memory flag). Surfaces: the parent's
+  `summarizing…` / `summary done` chip is a **link into the run** (after a
+  restart it still opens the last run as `⧉ last summary run`), the run's
+  header carries a `← summarizing ‹parent›` back-link, its sidebar row shows a
+  `⧉ summary run` marker, and the parent's `busy →` meta segment opens it.
+  `/api/summarize` returns `child_session`; `/api/session` carries
+  `summary_child`, `summary_run` (child, pass, started, ended, rc, log) and
+  `summary_of`.
+
 ## [3.16.0] - 2026-09-01
 
 ### Added

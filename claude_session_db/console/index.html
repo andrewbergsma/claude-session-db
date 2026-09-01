@@ -2081,7 +2081,9 @@ function sessRow(s, showProject){
   const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
   const segs = [];
   if(busy)
-    segs.push(`<span class="agc" title="a summarize run is in flight for this session">busy</span>`);
+    segs.push(`<span class="agc" title="a summarize run is in flight for this session${s.summary_child?" — tap to open the run":""}"${s.summary_child?` onclick="event.stopPropagation();openSession('${esc(s.summary_child)}')"`:""}>busy${s.summary_child?" →":""}</span>`);
+  if(s.summary_of)
+    segs.push(`<span class="brc mshrink" title="off-session summary run — digests session ${esc(s.summary_of.slice(0,8))} from disk; open it to follow the skill turn by turn">⧉ summary run</span>`);
   if(s.worktree)
     segs.push(`<span class="brc mshrink" title="git worktree ${esc(s.worktree)} — a second folder checked out from the same repo, on its own branch">⌥${esc(s.worktree)}</span>`);
   if(s.agents && s.agents.total)
@@ -2480,6 +2482,31 @@ function proposalLine(s){
       title="dismiss this suggestion">✕</span></div>`;
 }
 
+/* The off-session summary chip. The run is a real session the console
+   minted an id for, so the chip is a LINK into it: watch the skill work
+   turn by turn, or Stop it from there. Live state (SUMMARIZING) wins while
+   the console remembers the run; after a restart the durable meta link still
+   opens the last run, just without a verdict. */
+function summaryChip(s){
+  const child = s.summary_child || (s.summary_run && s.summary_run.child);
+  const st = s.summarizing;
+  if(!st && !child) return "";
+  const color = st==="running" ? "var(--accent)" : st==="done" ? "var(--good)" : st ? "var(--warn)" : "var(--muted)";
+  const label = st==="running" ? "⏳ summarizing…"
+              : st==="done"    ? "✓ summary done (unverified)"
+              : st             ? "⚠ "+esc(st)
+              :                  "⧉ last summary run";
+  const pass = s.summary_run && s.summary_run.pass ? ` (pass ${s.summary_run.pass})` : "";
+  const tip = "off-session /session-summary" + pass + " — a separate headless session the console spawned to digest this one"
+            + (st ? ". Status is the child's exit code + output, NOT a verified kmcp write; this pane polls every 3s" : "")
+            + (child ? ". Click to open the run's own transcript and follow it turn by turn" : "");
+  return child
+    ? `<span class="chip lnk" style="color:${color}" role="button" tabindex="0" title="${esc(tip)}"
+         onclick="openSession('${esc(child)}')"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openSession('${esc(child)}')}">${label} →</span>`
+    : `<span class="chip" style="color:${color}" title="${esc(tip)}">${label}</span>`;
+}
+
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const dtitle = s.user_title || s.title;   // user-set title overrides derived
@@ -2494,6 +2521,12 @@ function renderHeader(s){
       ${sub.spawn_depth!=null?`<span>· depth ${sub.spawn_depth}</span>`:""}
       <span>· agent ${esc((sub.agent_id||"").slice(0,8))}</span>
     </div>` : "";
+  const sumhdr = s.summary_of ? `<div class="subhdr">
+      <span class="back" onclick="openSession('${esc(s.summary_of)}')"
+        title="back to the session this run is summarizing">← summarizing ${esc(s.summary_of.slice(0,8))}</span>
+      <b>⧉ off-session summary run</b>
+      <span>· a headless /session-summary the console spawned; it digests the parent's transcript from disk and never appends to it</span>
+    </div>` : "";
   const html = `
     <div class="row1">
       <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list"
@@ -2506,7 +2539,7 @@ function renderHeader(s){
             aria-label="Toggle session details"
             title="Show/hide session details (chips, tl;dr, actions)">⋯</span>
     </div>
-    ${subhdr}
+    ${subhdr}${sumhdr}
     <div class="chips">
       <span class="chip sid" title="this session's transcript uuid — the name of its .jsonl file">${esc(s.session_id)}</span>
       <span class="chip lnk" onclick="openRepoFor()" role="button" tabindex="0"
@@ -2522,10 +2555,7 @@ function renderHeader(s){
       ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)" title="the transcript is too large to render whole — only its tail is shown here (the archive still holds all of it)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)" title="archived — hidden from the sidebar by an index entry; nothing on disk was moved or deleted">archived</span>`:""}
-      ${s.summarizing?`<span class="chip" style="color:${s.summarizing==="running"?"var(--accent)":s.summarizing==="done"?"var(--good)":"var(--warn)"}" title="off-session /session-summary status — based on the child's exit code + output, NOT a verified kmcp write. The detail pane polls every 3s, so running→done/failed shows live.">${
-        s.summarizing==="running" ? "⏳ summarizing…" :
-        s.summarizing==="done" ? "✓ summary done (unverified)" :
-        "⚠ "+esc(s.summarizing)}</span>`:""}
+      ${summaryChip(s)}
     </div>
     ${tldrLine(s)}
     ${proposalLine(s)}

@@ -68,7 +68,6 @@
             padding:1px 5px; border-radius:4px; }
   .navbtn:hover { color:var(--ink); background:var(--surface2); }
   .toprow-btns { display:flex; align-items:center; gap:6px; flex:none; }
-  #navflatbtn.on { color:var(--accent); }
   /* top-level tabs: Projects | Archive */
   .navtabs { display:flex; gap:16px; align-items:center; }
   .navtab { cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.3px; color:var(--muted);
@@ -165,7 +164,7 @@
   body.navmin #nav .top .toprow { justify-content:center; }
   body.navmin .navtabs, body.navmin #nav .top .sub, body.navmin .search,
   body.navmin .scoperow, body.navmin .sortbar, body.navmin #navlist,
-  body.navmin #navflatbtn { display:none; }
+  body.navmin #navpills { display:none; }
   body.navmin #navrail { display:flex; }
   #navrail { display:none; flex-direction:column; align-items:center; gap:8px; padding:10px 0; }
   .railproj { position:relative; width:34px; height:34px; border-radius:8px; background:var(--surface3);
@@ -176,22 +175,20 @@
              border-radius:7px; background:var(--warn); color:#0d1117; font:8px var(--mono); font-weight:700;
              display:grid; place-items:center; border:1.5px solid var(--surface); }
 
-  /* project accordion */
-  .pblock { border-bottom:1px solid #21262d; }
-  .phead { display:flex; align-items:center; gap:8px; padding:9px 14px; cursor:pointer; }
-  .phead:hover, .phead.open { background:var(--surface2); }
-  .phead .chev { color:var(--muted); width:10px; flex:none; font-size:10px; text-align:center; }
-  .phead .pico { width:20px; height:20px; border-radius:6px; flex:none; display:grid; place-items:center;
-                 background:var(--surface3); color:var(--ink2); font:11px var(--mono); }
-  .phead .pname { font-size:13px; font-weight:600; flex:1; min-width:0;
-                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  .phead.open .pname { color:var(--ink); }
-  .wbadge { flex:none; font:10px var(--mono); font-weight:600; padding:1px 7px; border-radius:10px;
-            display:inline-flex; align-items:center; gap:4px; background:rgba(210,153,34,.16);
-            color:var(--warn); border:1px solid rgba(210,153,34,.45); }
-  .wbadge i { width:5px; height:5px; border-radius:50%; display:block; background:var(--warn); }
-  .wk { flex:none; color:var(--accent); font:10px var(--mono); font-weight:600; }
-  .pcount { flex:none; color:var(--muted); font:11px var(--mono); min-width:18px; text-align:right; }
+  /* repo pills: one per project (a project IS a repo here), each with its
+     session count; the selected pill filters the list below. Wraps, and
+     scrolls inside the sticky top once it outgrows ~4 rows. */
+  .pills { display:flex; flex-wrap:wrap; gap:5px; margin-top:8px; max-height:98px; overflow-y:auto; }
+  .pill { cursor:pointer; padding:1px 8px; border:1px solid var(--border); border-radius:10px;
+          color:var(--ink2); font:11px var(--mono); white-space:nowrap; user-select:none;
+          display:inline-flex; align-items:center; gap:5px; max-width:100%; min-width:0; }
+  .pill .pl { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  .pill b { font-weight:600; color:var(--muted); flex:none; }
+  .pill .pw { color:var(--warn); font-weight:600; flex:none; }
+  .pill:hover { color:var(--ink); }
+  .pill.on { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .pill.on b, .pill.on .pw { color:#fff; }
+  .pill.dim { opacity:.4; }
 
   /* session rows — two lines: full-width title, then a compact muted meta line.
      Sorting moved off per-project column headers to the global sortbar above. */
@@ -204,21 +201,27 @@
                    border-radius:10px; color:var(--ink2); user-select:none; }
   .sortbar .sdir:hover { color:var(--ink); }
   .sortbar .tall { margin-left:auto; }   /* tl;dr-all sits at the toolbar's right edge */
-  .sess { display:grid; grid-template-columns:14px minmax(0,1fr) auto;
+  .sess { display:grid; grid-template-columns:14px minmax(0,1fr);
           align-items:start; column-gap:8px;
-          padding:7px 14px 7px 26px; cursor:pointer; border-bottom:1px solid #1a1f27; }
-  .sess.arch { padding-left:14px; }
+          padding:7px 14px; cursor:pointer; border-bottom:1px solid #1a1f27; }
   .sess:hover { background:var(--surface2); }
   .sess.active { background:var(--surface3); box-shadow:inset 2px 0 0 var(--accent); }
   .cstate { display:flex; justify-content:center; padding-top:5px; }
   .cstate .dot { margin-top:0; }
   .ctitle { min-width:0; }
   .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; min-width:0; }
-  .ctitle .ttxt { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .ctitle .ttxt { flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tmark { color:var(--muted); font-size:9px; }
-  .edit { flex:none; color:var(--muted); font-size:11px; cursor:pointer; opacity:0; transition:opacity .1s; }
-  .sess:hover .edit { opacity:.55; }
-  .edit:hover { opacity:1; color:var(--accent); }
+  /* line 3: the row's action strip, right-aligned. Every action is one
+     .rbtn in this flex row — a new button is one more span appended in
+     sessRow(); the strip wraps before anything truncates. */
+  .ctitle .acts { display:flex; justify-content:flex-end; align-items:center; gap:6px;
+                  flex-wrap:wrap; margin-top:4px; min-width:0; }
+  .ctitle .acts > * { flex:none; }
+  .rbtn { cursor:pointer; color:var(--muted); font-size:11px; line-height:18px; min-width:18px;
+          text-align:center; border-radius:4px; padding:0 3px; }
+  .rbtn:hover { color:var(--ink); background:var(--surface2); }
+  .edit:hover { color:var(--accent); }
   .tedit { width:100%; background:var(--bg); border:1px solid var(--accent); border-radius:4px;
            color:var(--ink); font:12.5px inherit; padding:2px 5px; }
   .tedit:focus { outline:none; }
@@ -238,8 +241,7 @@
   .snip { margin-top:2px; font:10px var(--mono); color:var(--ink2);
           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .snip mark { background:rgba(210,153,34,.25); color:var(--warn); border-radius:2px; padding:0 1px; }
-  .cprio { display:flex; justify-content:center; padding-top:2px; }
-  .prio { cursor:pointer; font-size:13px; line-height:1.2; }
+  .prio { cursor:pointer; font-size:13px; }
   .prio.critical { color:var(--bad); } .prio.high { color:var(--warn); }
   .prio.med { color:var(--accent); } .prio.low { color:var(--ink2); }
   .prio.normal { color:#3b434d; } .prio.normal:hover { color:var(--muted); }
@@ -1213,7 +1215,7 @@
     .mh .x, .mh .re, #mgmtdigest .dh .x, .tldr-re,
     .rd-h .re, .rd-h .rd-x{ display:inline-flex; align-items:center;
       justify-content:center; min-height:44px; min-width:44px; }
-    .dchip, .tacc, .tprop .tp-b{ min-height:26px; min-width:28px;
+    .dchip, .tacc, .rbtn, .tprop .tp-b{ min-height:26px; min-width:28px;
       display:inline-flex; align-items:center; justify-content:center; }
     /* CR mode on a phone: fat verb chips + tap-friendly cart controls */
     .crc{ min-height:28px; min-width:44px; justify-content:center; }
@@ -1235,8 +1237,6 @@
       <div class="toprow">
         <div class="navtabs" id="navtabs"></div>
         <span class="toprow-btns">
-          <span id="navflatbtn" class="navbtn" onclick="toggleNavFlat()"
-                title="Grouped by project — tap for a flat most-recent-first list">▤</span>
           <span id="navbatchbtn" class="navbtn" onclick="toggleBatchMode()"
                 title="Batch actions: select multiple sessions, then mine angles / generate timelines / summarize / tl;dr them as a queue">▣</span>
           <span id="navtoggle" class="navbtn" onclick="toggleNav()" title="Collapse sidebar">«</span>
@@ -1246,11 +1246,13 @@
       <input class="search" id="navq" placeholder="search — titles, content & id…" autocomplete="off">
       <div class="scoperow" id="navscope"></div>
       <div class="sortbar" id="navsortbar"></div>
+      <div class="pills" id="navpills"></div>
     </div>
     <div id="navrail"></div>
     <div id="navlist"></div>
     <div id="batchbar"></div>
-    <div id="navver" onclick="openChangelog()" title="version — click for the changelog">
+    <div id="navver" onclick="openChangelog()"
+         title="csd version — an amber dot means the running process is older than the code on disk; click for the changelog">
       <span class="vdot"></span><span class="vlbl">csd</span></div>
   </nav>
   <div id="navgrip" title="Drag to resize · double-click to reset"></div>
@@ -1258,7 +1260,8 @@
 
   <main id="main">
     <div id="chdr"><div class="row1" style="display:flex;align-items:center;gap:10px">
-      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list"
+            title="Open the session list">☰</span>
       <h2 style="color:var(--muted)">select a session</h2></div></div>
     <div id="stream"><div class="empty">pick a session on the left</div></div>
     <div id="cstatus"></div>
@@ -1266,8 +1269,10 @@
       <textarea id="cin" rows="1" placeholder="answer this session…" disabled
                 enterkeyhint="send" autocapitalize="sentences" spellcheck="true"
                 oninput="growComposer()" onkeydown="composerKey(event)"></textarea>
-      <button id="bans" class="primary" disabled onclick="send(false)">Answer</button>
-      <button id="bfork" disabled onclick="send(true)">Fork</button>
+      <button id="bans" class="primary" disabled onclick="send(false)"
+        title="Send this message into THIS session — a headless claude -p --resume appends it and replies. Queued if the session is busy.">Answer</button>
+      <button id="bfork" disabled onclick="send(true)"
+        title="Branch the conversation: your message starts a NEW session file copied from this one. The original session is never changed.">Fork</button>
       <button id="bcr" disabled onclick="toggleCR()"
         title="CR — context reduction: fork with curation. Pick which context survives (keep / stub / → ref), compile kmcp refs into a preamble, and write a NEW reduced session file. The original is never touched.">CR</button>
     </div>
@@ -1281,12 +1286,18 @@
       consumed from the base — mode, size, sections, and a link into /browse.
     </div>
     <div id="railtabs">
-      <span class="rtab" data-t="angles" onclick="setRailTab('angles')">Angles</span>
-      <span class="rtab" data-t="context" onclick="setRailTab('context')">Context</span>
-      <span class="rtab" data-t="writes" onclick="setRailTab('writes')">Writes</span>
-      <span class="rtab" data-t="git" onclick="setRailTab('git')">Git</span>
-      <span class="rtab" data-t="files" onclick="setRailTab('files')">Files</span>
-      <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')">Timeline</span>
+      <span class="rtab" data-t="angles" onclick="setRailTab('angles')"
+            title="ID-addressable headlines mined from the latest turn">Angles</span>
+      <span class="rtab" data-t="context" onclick="setRailTab('context')"
+            title="Token window, model, CLAUDE.md memory, deployed URLs and this session's kmcp reads">Context</span>
+      <span class="rtab" data-t="writes" onclick="setRailTab('writes')"
+            title="Every file and kmcp write seen in this transcript">Writes</span>
+      <span class="rtab" data-t="git" onclick="setRailTab('git')"
+            title="This session's repo — branch, working tree, commits inside the session window, PRs">Git</span>
+      <span class="rtab" data-t="files" onclick="setRailTab('files')"
+            title="Read-only browser rooted at the session's repo (or its cwd)">Files</span>
+      <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')"
+            title="Whole-session catch-up, one line per turn — served from cache; ⟳ generates">Timeline</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
@@ -1328,7 +1339,8 @@
     <div class="mh">
       <h2>repos</h2>
       <span class="note" id="reposnote"></span>
-      <span class="re" onclick="forceRepos()" title="Re-walk the registry now">⟳ refresh</span>
+      <span class="re" onclick="forceRepos()"
+        title="Re-walk every repo now and re-discover the registry — the only forced git walk; the list otherwise refreshes on a background timer">⟳ refresh</span>
       <span class="x" onclick="closeRepos()">✕ close (Esc)</span>
     </div>
     <div id="reposbody"><div class="empty">loading…</div></div>
@@ -1732,8 +1744,7 @@ const PRI_RANK = {critical:5, high:4, med:3, normal:2, low:1};
 let navTab   = "projects";                                          // projects | archive
 let navSort  = localStorage.getItem("csd.navSort2") || "recent";    // column sort key
 let navDir   = localStorage.getItem("csd.navDir2")  || "desc";
-let navOpenProj = localStorage.getItem("csd.navOpenProj") || null;  // single-open accordion
-let navFlat  = localStorage.getItem("csd.navFlat") === "1";         // projects tab: false = grouped accordion, true = one flat recent-first list
+let navOpenProj = localStorage.getItem("csd.navOpenProj") || null;  // selected repo pill (null = all)
 let navScope = localStorage.getItem("csd.navScope") || "both";      // title | content | both
 let navQuery = "";
 let navSearchMatches = null;   // {session_id: snippet} from /api/search, or null while pending
@@ -1757,6 +1768,13 @@ function subName(s){ return (s.subtopic || "").toLowerCase(); }
 const STATE_RANK = {working:0, waiting:1, idle:2, stale:3};
 const STATE_LABEL = {working:"agent working", waiting:"waiting for you",
                      idle:"idle", stale:"stale (no writer)"};
+/* what each state MEANS — the dot's tooltip and the header chip's */
+const STATE_TIP = {
+  working: "agent working — it is generating, or a tool call is in flight",
+  waiting: "waiting for you — the agent ended its turn cleanly; your move",
+  idle:    "idle — an open thread, quiet for a while; nothing in flight",
+  stale:   "stale — it claims to be working but the transcript has been frozen for minutes; the process was probably killed",
+};
 function stateRank(s){ return STATE_RANK[s.state] ?? 9; }
 function dotClass(s){
   let c = "dot " + (s.state || "idle");
@@ -1765,7 +1783,8 @@ function dotClass(s){
   return c;
 }
 function stateTitle(s){
-  return (STATE_LABEL[s.state] || s.state || "") + (s.sub_working ? " · via subagent" : "");
+  return (STATE_TIP[s.state] || STATE_LABEL[s.state] || s.state || "")
+       + (s.sub_working ? " · via a subagent, not the main chain" : "");
 }
 function stateDot(s){ return `<span class="${dotClass(s)}" title="${esc(stateTitle(s))}"></span>`; }
 
@@ -1882,7 +1901,48 @@ function renderNavRail(d){
   }).join("");
   document.getElementById("navrail").innerHTML = html;
 }
-function railOpen(key){ expandNav(); navTab="projects"; navOpenProj=key; localStorage.setItem("csd.navOpenProj", key); renderNav(); }
+function railOpen(key){ expandNav(); navTab="projects"; selectPill(key); }
+
+/* ---------- repo pills ---------- */
+function projKey(s){ return s.project_label || s.project || "?"; }
+/* the search predicate every list renderer + the tl;dr-all batch share:
+   title/content hit, or the project name itself matches the query */
+function navSearched(list){
+  const q = navQuery.trim().toLowerCase();
+  return q ? list.filter(s => navMatch(s).hit || projKey(s).toLowerCase().includes(q)) : list;
+}
+/* the pill that is actually in effect: the persisted choice, unless the
+   current tab's set has no such project — then "all", without clearing the
+   choice (it comes back when its sessions do) */
+function activePill(d){
+  if(!navOpenProj) return null;
+  return (d.sessions||[]).some(s => projKey(s)===navOpenProj) ? navOpenProj : null;
+}
+function selectPill(key){
+  navOpenProj = (key && key!==navOpenProj) ? key : null;
+  localStorage.setItem("csd.navOpenProj", navOpenProj||"");
+  renderNav();
+}
+/* one pill per repo with its session count (search-aware: under a query the
+   count is the hits in that repo, and a repo with none dims) plus an amber
+   waiting-for-you count; the "all" pill clears the filter */
+function renderNavPills(d){
+  const el = document.getElementById("navpills"); if(!el) return;
+  const all = d.sessions||[], hit = navSearched(all), q = navQuery.trim();
+  const sel = activePill(d);
+  const groups = groupByProject(all);
+  const hits = new Map(); for(const s of hit) hits.set(projKey(s), (hits.get(projKey(s))||0)+1);
+  const pill = (key,label,n,wait,on,dim) =>
+    `<span class="pill ${on?"on":""} ${dim?"dim":""}" title="${esc(label)} — ${n} session${n===1?"":"s"}${q?" matching":""}${wait?` · ${wait} waiting for you`:""}" onclick="selectPill(${key==null?"null":`'${esc(key)}'`})"><span class="pl">${esc(label)}</span><b>${n}</b>${wait?`<span class="pw">${wait}</span>`:""}</span>`;
+  const waitAll = hit.filter(s=>s.state==="waiting").length;
+  let html = pill(null, "all", hit.length, waitAll, sel===null, false);
+  for(const g of groups){
+    const n = hits.get(g.key)||0;
+    const wait = g.sessions.filter(s=>s.state==="waiting" && (!q || hit.includes(s))).length;
+    html += pill(g.key, g.label, n, wait, sel===g.key, q && !n);
+  }
+  el.innerHTML = html;
+}
 
 /* ---------- grouping + rendering ---------- */
 function groupByProject(sessions){
@@ -1895,25 +1955,28 @@ function groupByProject(sessions){
   return [...m.values()].sort((a,b)=> a.label.toLowerCase().localeCompare(b.label.toLowerCase()));
 }
 
-/* two-line session row.
-   Line 1: state dot | full-width title (ellipsis only when genuinely long) |
-           priority flag (unchanged cycle behavior).
-   Line 2: one compact muted meta line — project (flat/archive), worktree,
-           subagent/live badges, turns, ctx (over-budget coloring carried
-           over), compact "started → last" range, idle/active state. The
-           shrinkable segments give way first so idle/active stays visible. */
+/* three-line session row.
+   Line 1: state dot | the title, full width (ellipsis only when genuinely long).
+   Line 2: one compact muted meta line — project (when no pill narrows it),
+           worktree, subagent/live badges, turns, ctx (over-budget coloring
+           carried over), compact "started → last" range, idle/active state.
+           The shrinkable segments give way first so idle/active stays visible.
+   Line 3: the action strip, right-aligned — accept-proposal ✓, rename ✎, the
+           digest chips, the priority flag. Append new actions there. */
 function sessRow(s, showProject){
   const id = s.session_id;
   const busy = navData && navData.summarizing && navData.summarizing[id] === "running";
   const segs = [];
   if(showProject)
     segs.push(`<span class="mproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>`);
+  if(busy)
+    segs.push(`<span class="agc" title="a summarize run is in flight for this session">busy</span>`);
   if(s.worktree)
-    segs.push(`<span class="brc mshrink" title="worktree: ${esc(s.worktree)}">⌥${esc(s.worktree)}</span>`);
+    segs.push(`<span class="brc mshrink" title="git worktree ${esc(s.worktree)} — a second folder checked out from the same repo, on its own branch">⌥${esc(s.worktree)}</span>`);
   if(s.agents && s.agents.total)
-    segs.push(`<span class="agc" title="${s.agents.total} subagent(s)${s.agents.live?`, ${s.agents.live} live`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>`);
-  segs.push(`<span title="turns">${s.msg_count!=null?s.msg_count:"—"} turns</span>`);
-  segs.push(`<span class="${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?"context ≈ "+s.ctx_tokens.toLocaleString()+" tokens":"context unknown"}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"} ctx</span>`);
+    segs.push(`<span class="agc" title="${s.agents.total} subagent(s) spawned by this session${s.agents.live?`, ${s.agents.live} still running (▶)`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>`);
+  segs.push(`<span title="user + agent messages in the transcript, subagent turns included">${s.msg_count!=null?s.msg_count:"—"} turns</span>`);
+  segs.push(`<span class="${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?"context window ≈ "+s.ctx_tokens.toLocaleString()+" tokens carried into the last agent turn — amber past 200k, red past 350k":"context unknown — no usage recorded yet"}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"} ctx</span>`);
   const working = s.state==="working";
   segs.push(`<span class="mdates${working?" hot":""}" title="started → last activity">${rangeTxt(s)}</span>`);
   const it = idleTxt(s);
@@ -1927,28 +1990,28 @@ function sessRow(s, showProject){
   // proposed title as an italic placeholder with a one-press ✓ accept.
   const ghost = !s.user_title && s.title_src !== "set" && s.title_proposal;
   const disp = s.user_title || (ghost ? s.title_proposal : s.title) || id.slice(0,12);
-  const mark = s.user_title ? `<span class="tmark" title="custom title">✎</span>` : "";
-  const acc = ghost ? `<span class="tacc" title="accept the proposed title: “${esc(s.title_proposal)}”" onclick="acceptProposal(event,'${id}')">✓</span>` : "";
-  const titleCell = navEditing===id
-    ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div></div>`
-    : `<div class="ctitle">
-         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span>${acc}${busy?' <span class="agc">·busy</span>':""}<span class="edit" title="rename" onclick="startTitleEdit(event,'${id}')">✎</span>${digestChips(s)}</div>
-         <div class="m">${meta}</div>${snip}
-       </div>`;
+  const mark = s.user_title ? `<span class="tmark" title="a title you set — it overrides the one derived from the first prompt">✎</span>` : "";
+  const acc = ghost ? `<span class="rbtn tacc" title="accept the proposed title: “${esc(s.title_proposal)}”" onclick="acceptProposal(event,'${id}')">✓</span>` : "";
+  const editBtn = `<span class="rbtn edit" title="rename this session (an overlay — the transcript itself is never touched)" onclick="startTitleEdit(event,'${id}')">✎</span>`;
   const p = prioOf(s);
-  const prioCell = `<div class="cprio"><span class="prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span></div>`;
-  const arc = showProject ? " arch" : "";
+  const prioBtn = `<span class="rbtn prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span>`;
+  const acts = `<div class="acts">${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
+  const titleCell = navEditing===id
+    ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div><div class="m">${meta}</div></div>`
+    : `<div class="ctitle">
+         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span></div>
+         <div class="m">${meta}</div>${snip}${acts}
+       </div>`;
   /* batch mode: the row toggles selection instead of opening, and the state
      dot becomes a checkbox — no layout changes, so the grid is untouched */
   const rowClick = batchMode ? `batchToggle(event,'${id}')` : `openSession('${id}')`;
   const selCls = batchMode && batchSel.has(id) ? " bselrow" : "";
   const stateCell = batchMode
-    ? `<div class="cstate bchk">${batchSel.has(id)?"☑":"☐"}</div>`
+    ? `<div class="cstate bchk" title="${batchSel.has(id)?"selected for the batch — tap the row to deselect":"tap the row to select it for the batch"}">${batchSel.has(id)?"☑":"☐"}</div>`
     : `<div class="cstate">${stateDot(s)}</div>`;
-  return `<div class="sess${arc}${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
+  return `<div class="sess${selCls} ${id===curId?"active":""}" onclick="${rowClick}">
     ${stateCell}
     ${titleCell}
-    ${prioCell}
   </div>`;
 }
 
@@ -1958,54 +2021,18 @@ function sessionTable(list, showProject){
   return rows.map(s=>sessRow(s, showProject)).join("");
 }
 
-function renderProjects(d){
-  const q = navQuery.trim().toLowerCase();
-  let html = "";
-  for(const g of groupByProject(d.sessions||[])){
-    const nameMatch = g.label.toLowerCase().includes(q);
-    const matched = q ? g.sessions.filter(s=>navMatch(s).hit) : g.sessions;
-    if(q && !matched.length && !nameMatch) continue;
-    const open = q ? true : navOpenProj===g.key;
-    const waiting = g.sessions.filter(s=>s.state==="waiting").length;
-    const working = g.sessions.filter(s=>s.state==="working").length;
-    const badge = waiting ? `<span class="wbadge" title="${waiting} session(s) waiting for you"><i></i>${waiting}</span>` : "";
-    const workchip = working ? `<span class="wk" title="${working} agent(s) working">${working}▶</span>` : "";
-    html += `<div class="pblock"><div class="phead ${open?"open":""}" onclick="toggleProj('${esc(g.key)}')">
-        <span class="chev">${open?"▾":"▸"}</span>
-        <span class="pico">${initialsOf(g.label)}</span>
-        <span class="pname">${esc(g.label)}</span>
-        ${badge}${workchip}
-        <span class="pcount">${g.sessions.length}</span>
-      </div>${open ? sessionTable(q?matched:g.sessions, false) : ""}</div>`;
-  }
-  return html || `<div class="empty">${q?`no projects or sessions match “${esc(navQuery)}”`:"no recent sessions"}</div>`;
+/* ONE list for both tabs: the tab's set, narrowed by the search, then by the
+   selected pill. Grouping is gone — the pills are the project axis — so the
+   project name rides the meta line only while "all" is in effect. */
+function navVisible(d){
+  const sel = activePill(d);
+  return navSearched(d.sessions||[]).filter(s => !sel || projKey(s)===sel);
 }
-
-function renderArchiveList(d){
-  const q = navQuery.trim().toLowerCase();
-  const list = (d.sessions||[]).filter(s=> !q || navMatch(s).hit || (s.project_label||s.project||"").toLowerCase().includes(q));
-  return list.length ? sessionTable(list, true)
-                     : `<div class="empty">${q?"no archived sessions match":"nothing archived — “Summarize + archive” lands sessions here"}</div>`;
-}
-
-/* flat mode: every session in ONE sortable table, project inline on each
-   row's meta line ("inline" keeps the title column at grouped-mode width).
-   Grouping is a render-order concern only — same data, same navMatch, same
-   sessionTable as the accordion, so archive filtering / cutoff / badges /
-   sidechain glance all come along for free. */
-function renderFlatList(d){
-  const q = navQuery.trim().toLowerCase();
-  const list = (d.sessions||[]).filter(s=> !q || navMatch(s).hit ||
-                 (s.project_label||s.project||"").toLowerCase().includes(q));
-  return list.length ? sessionTable(list, "inline")
-    : `<div class="empty">${q?`no sessions match “${esc(navQuery)}”`:"no recent sessions"}</div>`;
-}
-
-function toggleProj(key){ navOpenProj = (navOpenProj===key ? null : key); localStorage.setItem("csd.navOpenProj", navOpenProj||""); renderNav(); }
-function toggleNavFlat(){
-  navFlat = !navFlat;
-  localStorage.setItem("csd.navFlat", navFlat ? "1" : "0");
-  renderNav();
+function renderSessionList(d){
+  const list = navVisible(d), q = navQuery.trim();
+  if(list.length) return sessionTable(list, activePill(d)===null);
+  if(q) return `<div class="empty">no ${navTab==="archive"?"archived ":""}sessions match “${esc(navQuery)}”${activePill(d)?" in this repo":""}</div>`;
+  return `<div class="empty">${navTab==="archive" ? "nothing archived — “Summarize + archive” lands sessions here" : "no recent sessions"}</div>`;
 }
 /* global sort control (sidebar toolbar) — replaces the per-project column
    headers. One key + direction, shared by the accordion tables, flat mode
@@ -2027,15 +2054,11 @@ function renderNavSort(){
           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();tldrAll(event.altKey);}">T all</span>`;
 }
 /* The session ids the sidebar is currently listing: the active tab's set
-   (recent or archived) after the search filter — the same predicate the
-   grouped/flat/archive renderers apply. This IS the "all sessions" target
+   (recent or archived) after the search filter and the selected pill — the
+   same predicate the list renderer applies. This IS the "all sessions" target
    set for the tl;dr-all batch: what you see is what queues. */
 function visibleSessionIds(){
-  const q = navQuery.trim().toLowerCase();
-  return ((navData && navData.sessions) || [])
-    .filter(s => !q || navMatch(s).hit ||
-                 (s.project_label || s.project || "").toLowerCase().includes(q))
-    .map(s => s.session_id);
+  return navData ? navVisible(navData).map(s => s.session_id) : [];
 }
 async function tldrAll(force){
   const ids = visibleSessionIds();
@@ -2080,9 +2103,9 @@ function tlStateOf(s){
 function digestChips(s){
   const id = s.session_id;
   const ts = tldrStateOf(s), ls = tlStateOf(s);
-  return `<span class="dchip ${ts}" title="tl;dr: ${DCHIP_STATE_TIP[ts]}"
+  return `<span class="dchip ${ts}" title="tl;dr (a last-3-turns catch-up) — ${DCHIP_STATE_TIP[ts]}"
       onclick="rowDigest(event,'${id}','tldr')">T</span>` +
-    `<span class="dchip ${ls}" title="timeline: ${DCHIP_STATE_TIP[ls]}"
+    `<span class="dchip ${ls}" title="timeline (the whole session, one line per turn) — ${DCHIP_STATE_TIP[ls]}"
       onclick="rowDigest(event,'${id}','timeline')">⧗</span>`;
 }
 function rowDigest(e, id, kind){
@@ -2157,20 +2180,10 @@ function renderNav(){
   renderNavScope();
   setNavSubBar(d);
   renderNavRail(d);
-  const fb = document.getElementById("navflatbtn");
-  if(fb){
-    fb.style.display = navTab==="archive" ? "none" : "";   // archive is already flat
-    fb.classList.toggle("on", navFlat);
-    fb.textContent = navFlat ? "≡" : "▤";
-    fb.title = navFlat ? "Flat list (most recent first) — tap to group by project"
-                       : "Grouped by project — tap for a flat most-recent-first list";
-  }
   renderNavSort();
-  const list = document.getElementById("navlist");
   const dv = navIdHits.length ? {...d, sessions: withIdHits(d.sessions||[])} : d;
-  list.innerHTML = navTab==="archive" ? renderArchiveList(dv)
-                 : navFlat            ? renderFlatList(dv)
-                 : renderProjects(dv);
+  renderNavPills(dv);
+  document.getElementById("navlist").innerHTML = renderSessionList(dv);
   const q = document.getElementById("navq");
   if(q) q.placeholder = navTab==="archive" ? "search archived — titles, content & id…" : "search — titles, content & id…";
   if(navEditing){ const el = document.querySelector("#navlist .tedit"); if(el){ el.focus(); el.select(); } }
@@ -2357,8 +2370,8 @@ function proposalLine(s){
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const dtitle = s.user_title || s.title;   // user-set title overrides derived
-  const ctx = s.ctx_tokens ? `<span class="chip">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
-  const model = s.model ? `<span class="chip">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
+  const ctx = s.ctx_tokens ? `<span class="chip" title="context carried into the last agent turn — input + cache reads + cache writes; the ceiling depends on the model">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
+  const model = s.model ? `<span class="chip" title="the model this session's last agent turn ran on">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
   const sub = s.subagent;
   const subhdr = sub ? `<div class="subhdr">
       <span class="back" onclick="openParent('${esc(sub.parent_session_id)}','${esc(sub.anchor_uuid||"")}')"
@@ -2370,7 +2383,8 @@ function renderHeader(s){
     </div>` : "";
   const html = `
     <div class="row1">
-      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list">☰</span>
+      <span class="navham" onclick="toggleNav()" role="button" aria-label="Open session list"
+            title="Open the session list">☰</span>
       ${stateDot(s)}
       <h2 title="${esc(dtitle)}">${esc(dtitle)}</h2>
       <span class="hbtn" onclick="openRailSheet()" role="button"
@@ -2381,7 +2395,7 @@ function renderHeader(s){
     </div>
     ${subhdr}
     <div class="chips">
-      <span class="chip sid">${esc(s.session_id)}</span>
+      <span class="chip sid" title="this session's transcript uuid — the name of its .jsonl file">${esc(s.session_id)}</span>
       <span class="chip lnk" onclick="openRepoFor()" role="button" tabindex="0"
             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openRepoFor()}"
             title="Open this repo: every branch, worktree, commit and PR">📁 <b>${esc(folder)}</b></span>
@@ -2389,12 +2403,12 @@ function renderHeader(s){
             onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openRepoFor('${esc(s.branch)}')}"
             title="Open this repo, focused on ${esc(s.branch)}">⎇ ${esc(s.branch)}</span>`:""}
       ${model}${ctx}
-      <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
-      <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
-      <span class="chip" title="activity state">${esc(STATE_LABEL[s.state]||s.state)}</span>
+      <span class="chip" title="kmcp entries this session pulled INTO context — click any 📖 row in the transcript for the detail">📖 <b>${s.counts.reads}</b> reads</span>
+      <span class="chip" title="kmcp searches this session ran — hits were offered, not necessarily read">🔍 <b>${s.counts.searches}</b> searches</span>
+      <span class="chip" title="${esc(STATE_TIP[s.state]||"activity state")}">${esc(STATE_LABEL[s.state]||s.state)}</span>
       ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
-      ${s.truncated?`<span class="chip" style="color:var(--warn)">tail only</span>`:""}
-      ${s.archived?`<span class="chip" style="color:var(--warn)">archived</span>`:""}
+      ${s.truncated?`<span class="chip" style="color:var(--warn)" title="the transcript is too large to render whole — only its tail is shown here (the archive still holds all of it)">tail only</span>`:""}
+      ${s.archived?`<span class="chip" style="color:var(--warn)" title="archived — hidden from the sidebar by an index entry; nothing on disk was moved or deleted">archived</span>`:""}
       ${s.summarizing?`<span class="chip" style="color:${s.summarizing==="running"?"var(--accent)":s.summarizing==="done"?"var(--good)":"var(--warn)"}" title="off-session /session-summary status — based on the child's exit code + output, NOT a verified kmcp write. The detail pane polls every 3s, so running→done/failed shows live.">${
         s.summarizing==="running" ? "⏳ summarizing…" :
         s.summarizing==="done" ? "✓ summary done (unverified)" :
@@ -2408,7 +2422,8 @@ function renderHeader(s){
         title="${s.stoppable
           ? "SIGINT the run this console spawned (same signal as Esc)"
           : "Nothing to stop: this console didn't spawn this session's run. A `claude` started in a terminal exposes no control channel and no pid we can find, so it can't be stopped from here."}">■ Stop</button>
-      <button class="act" onclick="act('archive')">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
+      <button class="act" onclick="act('archive')"
+        title="${s.archived?"Bring this session back into the sidebar — an index entry flips, nothing on disk changes":"Hide this session from the sidebar without summarizing it — an index entry, never a mutation; it stays in the Archive tab"}">${s.archived?"⇧ Unarchive":"⇩ Archive"}</button>
       <button class="act" onclick="act('summarize')"
         title="${esc(sumTitle(s.summary_scope, true))}">${sumLabel(s.summary_scope)} + archive</button>
       <button class="act" onclick="openMineMenu()"
@@ -2505,7 +2520,7 @@ function readRow(e, idx){
   return `<div class="read ${e.sub?"sub":""} ${idx===selIdx?"sel":""}${e.tid?crCls("t:"+e.tid):""}" onclick="selectEvent(${idx})"${tip}>
     ${e.tid?crc("t:"+e.tid):""}<span class="ic">📖</span>
     <span class="pth">${pth}</span>
-    ${cnt}<span class="badge ${mode}">${mode}</span>${secs}
+    ${cnt}<span class="badge ${mode}" title="read mode — how much of the entry was pulled into context">${mode}</span>${secs}
     <span class="sz">${kb(e.chars)}</span>
   </div>`;
 }
@@ -2516,8 +2531,8 @@ function searchRow(e, idx){
   return `<div class="read search ${e.sub?"sub":""} ${idx===selIdx?"sel":""}${e.tid?crCls("t:"+e.tid):""}" onclick="selectEvent(${idx})">
     ${e.tid?crc("t:"+e.tid):""}<span class="ic">🔍</span>
     <span class="pth"><span class="app">${esc(e.tool)}:</span> ${esc(e.query)}</span>
-    ${n!=null?`<span class="badge srf">${n.toLocaleString()} hits</span>`:""}
-    ${got?`<span class="sz">▸${got}</span>`:""}
+    ${n!=null?`<span class="badge srf" title="total matches the search reported">${n.toLocaleString()} hits</span>`:""}
+    ${got?`<span class="sz" title="entries actually returned to the session">▸${got}</span>`:""}
     <span class="sz">${kb(e.chars)}</span>
   </div>`;
 }
@@ -2641,7 +2656,7 @@ function renderStream(s){
       : "";
     html += `<div class="ev"><span class="gutter">${clock(q.queued_at)}</span>
       <div class="b"><div class="turn user queued${failed ? " qfailed" : ""}">
-        <div class="who">you<span class="tstamp">${hm(q.queued_at)}</span> <span class="qbadge${failed ? " bad" : ""}">${failed ? "✗ failed" : "⏸ queued"}</span>
+        <div class="who">you<span class="tstamp">${hm(q.queued_at)}</span> <span class="qbadge${failed ? " bad" : ""}" title="${failed ? "dispatch failed after 3 attempts — this message blocks its queue until you dismiss it" : "held until the session settles, then sent automatically — strictly in order, one at a time"}">${failed ? "✗ failed" : "⏸ queued"}</span>
           <span class="qcancel" onclick="cancelQueued('${esc(q.id)}')"
             title="${failed ? "dismiss this failed message" : "cancel this queued message"}">✕ ${failed ? "dismiss" : "cancel"}</span></div>
         <div class="txt md">${mdText(q.text)}</div>${err}
@@ -2655,7 +2670,7 @@ function renderStream(s){
   pendingSends.filter(p => p.sid === s.session_id).forEach(p => {
     html += `<div class="ev"><span class="gutter">${clock(p.ts)}</span>
       <div class="b"><div class="turn user sending">
-        <div class="who">you<span class="tstamp">${hm(p.ts)}</span> <span class="qbadge sending">⏳ sending</span></div>
+        <div class="who">you<span class="tstamp">${hm(p.ts)}</span> <span class="qbadge sending" title="sent — waiting for the transcript to catch up; a headless run takes a few seconds to start writing">⏳ sending</span></div>
         <div class="txt md">${mdText(p.text)}</div>
       </div></div></div>`;
   });
@@ -2980,6 +2995,10 @@ function batchLabel(sid){
   return (s && (s.user_title || s.title)) || sid.slice(0, 8);
 }
 const BATCH_GLYPH = {queued:"·", running:"▶", done:"✓", failed:"✗", cancelled:"–"};
+const BATCH_TIP = {queued:"queued — waiting for its worker lane",
+                   running:"running now", done:"finished",
+                   failed:"failed — this item only; the rest of the batch carries on",
+                   cancelled:"cancelled before it started"};
 function renderBatchBar(){
   const el = document.getElementById("batchbar");
   if(!el) return;
@@ -3019,7 +3038,7 @@ function renderBatchBar(){
     const lines = last.items
       .filter(it => it.status === "running" || it.status === "failed" || it.status === "queued")
       .slice(0, 30)
-      .map(it => `<div class="bi"><span class="st-${it.status}">${BATCH_GLYPH[it.status]||"?"}</span>` +
+      .map(it => `<div class="bi"><span class="st-${it.status}" title="${esc(BATCH_TIP[it.status]||it.status)}">${BATCH_GLYPH[it.status]||"?"}</span>` +
                  `<span class="lb" title="${esc(it.session_id)}">${esc(batchLabel(it.session_id))}</span>` +
                  `<span>${esc(it.action)}</span>` +
                  (it.error ? `<span class="st-failed" title="${esc(it.error)}">${esc(it.error.slice(0,60))}</span>` : "") +
@@ -3296,14 +3315,18 @@ function deployedGroup(s){
   const dep = s.deployed || [];
   if(!dep.length) return "";
   const K = {artifact:"A", deploy:"D", local:"L", pr:"PR"};
+  const KT = {artifact:"A — an Artifact published from this session",
+              deploy:"D — a deploy this session ran",
+              local:"L — a local server this session started",
+              pr:"PR — a pull request opened from this session"};
   return `<div class="ang-g"><div class="ang-h">⛅ deployed · ${dep.length}</div>
     ${dep.map(d=>{
       const dim = d.kind==="pr" || (d.kind==="local" && d.up===false);
       const st = d.kind==="local" && d.up!=null
-        ? `<span class="dep-st${d.up?" up":""}">${d.up?"up":"down"}</span>` : "";
+        ? `<span class="dep-st${d.up?" up":""}" title="${d.up?"a loopback probe reached this port just now":"nothing is answering on this port — the server is not running"}">${d.up?"up":"down"}</span>` : "";
       return `<div class="ang-i${dim?" dep-dim":""}"
         title="${esc(d.source||"")}${d.ts?" · "+esc(clock(d.ts)):""}">
-        <span class="ang-id">${K[d.kind]||"?"}</span>
+        <span class="ang-id" title="${esc(KT[d.kind]||"")}">${K[d.kind]||"?"}</span>
         <a class="dep-url" href="${esc(d.url)}" target="_blank"
            rel="noopener noreferrer">${esc(d.label||d.url)}</a>${st}</div>`;
     }).join("")}</div>`;
@@ -3317,7 +3340,7 @@ function claudeMdGroup(s){
   if(!mem.length) return "";
   return `<div class="ang-g"><div class="ang-h">≡ memory (CLAUDE.md)</div>
     ${mem.map((f,i)=>`<div class="ang-i" onclick="showClaudeMd(${i})" title="${esc(f.path)}">
-      <span class="ang-id">${f.scope==="global"?"G":"P"}</span> ${esc(shortPath(f.path))}
+      <span class="ang-id" title="${f.scope==="global"?"G — global memory, ~/.claude/CLAUDE.md":"P — project memory, a CLAUDE.md in this session's directory chain"}">${f.scope==="global"?"G":"P"}</span> ${esc(shortPath(f.path))}
       <span class="k" style="float:right">${kb(f.chars)}</span></div>`).join("")}</div>`;
 }
 
@@ -3404,8 +3427,8 @@ function renderWrites(s){
   }).join("");
   const parts = [];
   if(gs.length) parts.push(angGroups(gs));
-  if(fileWr.length) parts.push(`<div class="wr-h">file writes · ${fileWr.length}</div>${wrRows(fileWr)}`);
-  if(kmcpWr.length) parts.push(`<div class="wr-h">kmcp writes · ${kmcpWr.length}</div>${wrRows(kmcpWr)}`);
+  if(fileWr.length) parts.push(`<div class="wr-h" title="Write / Edit / NotebookEdit calls seen in this transcript — every file this session changed">file writes · ${fileWr.length}</div>${wrRows(fileWr)}`);
+  if(kmcpWr.length) parts.push(`<div class="wr-h" title="kmcp write tools called in this transcript (create / update / patch / import / …)">kmcp writes · ${kmcpWr.length}</div>${wrRows(kmcpWr)}`);
   el.innerHTML = `<h3>Writes</h3>` +
     (parts.length ? parts.join("")
                   : `<div class="rl-empty">no file or kmcp writes seen in this
@@ -3448,7 +3471,7 @@ function shortPath(p){
 
 function gitFiles(list, untracked){
   return (list||[]).map(f => `<div class="gfile">
-    <span class="gf ${untracked?"unt":""}">${esc(untracked?"?":(f.flags||"·"))}</span>
+    <span class="gf ${untracked?"unt":""}" title="${untracked?"untracked — git has never recorded this file; it is not in the repo until you git add it":"changed since the last commit — git status code M modified, A added, D deleted, R renamed"}">${esc(untracked?"?":(f.flags||"·"))}</span>
     <span class="gp">${esc(f.path)}</span></div>`).join("");
 }
 
@@ -3456,10 +3479,22 @@ function prStateCls(state, draft){
   return draft ? "draft" : (state||"").toLowerCase();  // open | merged | closed
 }
 
+/* what a PR's state and its CI rollup actually mean, in plain English */
+const PR_STATE_TIP = {
+  open:   "open — proposed, not merged yet",
+  merged: "merged — its commits are now part of the base branch",
+  closed: "closed without merging — the work was not taken",
+  draft:  "draft — still being written; not up for review yet",
+};
+const CHECKS_TIP = {
+  pass:    "CI checks passed on this PR",
+  fail:    "a CI check failed on this PR",
+  pending: "CI checks are still running on this PR",
+};
 function checksGlyph(checks){
   if(!checks) return "";
   const g = {pass:"✓", fail:"✗", pending:"⏳"}[checks] || "";
-  return g ? ` <span class="gchk ${checks}" title="checks: ${checks}">${g}</span>` : "";
+  return g ? ` <span class="gchk ${checks}" title="${esc(CHECKS_TIP[checks] || ("checks: " + checks))}">${g}</span>` : "";
 }
 
 function gitCommitRow(c){
@@ -3472,10 +3507,10 @@ function gitCommitRow(c){
     : c.pr === null
     ? `<span class="gpr-tag" title="not part of any PR">—</span>`
     : "";   // pr key absent: gh unavailable, membership unknown
-  return `<div class="gcommit"><span class="gh">${esc(c.hash)}</span>
+  return `<div class="gcommit"><span class="gh" title="the commit's abbreviated hash — git's id for this exact snapshot">${esc(c.hash)}</span>
     <span class="gs">${esc(c.subject)}</span>
     ${pr}
-    <span class="gt">${c.when?rel(c.when):""}</span></div>`;
+    <span class="gt" title="how long ago this commit was made">${c.when?rel(c.when):""}</span></div>`;
 }
 
 function renderGit(d){
@@ -3509,13 +3544,13 @@ function renderGit(d){
     <span class="v" title="${esc(r.root||"")}">${esc(shortPath(r.root))}</span></div>`;
   if(r.is_worktree)
     html += `<div class="kv"><span class="k">worktree</span>
-      <span class="v gwt" title="linked worktree of ${esc(r.parent_root||"?")}">⌥ of ${esc(shortPath(r.parent_root||"?"))}</span></div>`;
+      <span class="v gwt" title="a linked git worktree — a second folder checked out from ${esc(r.parent_root||"?")}, on its own branch, sharing that repo's history">⌥ of ${esc(shortPath(r.parent_root||"?"))}</span></div>`;
   html += `<div class="kv"><span class="k">branch</span>
-    <span class="v">⎇ ${esc(r.branch||"?")}${r.detached?" (detached)":""}</span></div>`;
+    <span class="v" title="${r.detached?"detached HEAD — this checkout sits on a commit, not a branch, so new commits would belong to no branch":"the branch this checkout is on — commits you make land here"}">⎇ ${esc(r.branch||"?")}${r.detached?" (detached)":""}</span></div>`;
 
   // working tree
   const clean = !st.dirty_count && !st.untracked_count;
-  html += `<div class="wr-h">working tree · ${clean ? "clean"
+  html += `<div class="wr-h" title="dirty = tracked files changed since the last commit; untracked = files git has never recorded; stashed = changes parked with git stash">working tree · ${clean ? "clean"
     : `${st.dirty_count||0} dirty · ${st.untracked_count||0} untracked`}${
     st.stash_count ? ` · ${st.stash_count} stashed` : ""}</div>`;
   if(st.dirty_count) html += gitFiles(st.dirty, false);
@@ -3529,8 +3564,11 @@ function renderGit(d){
   const upd = bs.upstream
     ? `${esc(bs.upstream)}${bs.ahead||bs.behind ? ` · ↑${bs.ahead||0} ↓${bs.behind||0}` : " · in sync"}`
     : "no upstream";
+  const uptip = bs.upstream
+    ? `↑${bs.ahead||0} = commits you have that ${bs.upstream} does not (unpushed); ↓${bs.behind||0} = commits it has that you do not, as of your last fetch`
+    : "this branch has no remote copy — nothing to push to or pull from until you push it (git push -u origin <branch>)";
   html += `<div class="wr-h">branch</div>
-    <div class="kv"><span class="k">upstream</span><span class="v">${upd}</span></div>`;
+    <div class="kv"><span class="k">upstream</span><span class="v" title="${esc(uptip)}">${upd}</span></div>`;
   if(bs.last_commit)
     html += `<div class="kv"><span class="k">last commit</span>
       <span class="v" style="text-align:left">${gitCommitRow(bs.last_commit)}</span></div>`;
@@ -3544,7 +3582,7 @@ function renderGit(d){
 
   // PRs
   const gh = d.gh || {};
-  html += `<div class="wr-h">pull requests${
+  html += `<div class="wr-h" title="a pull request asks to merge one branch into another; until it is merged its commits are not on the trunk">pull requests${
     gh.fetched_at ? ` · fetched ${rel(gh.fetched_at*1000)} ago` : ""}</div>`;
   if(!gh.available)
     html += `<div class="rl-empty">${esc(gh.reason||"gh unavailable")}</div>`;
@@ -3559,15 +3597,17 @@ function renderGit(d){
       const cls = prStateCls(p.state, p.draft);
       const when = p.state === "MERGED" && p.merged_at
         ? ` · merged ${rel(p.merged_at)}` : "";
+      const prtip = `PR #${p.number} — a request to merge ${p.branch||"?"} into the base branch`
+        + (p.session_branch ? " · this is the branch this session is on" : "");
       return `<a class="gpr ${cls}${p.session_branch?" session":""}" href="${esc(p.url||"#")}" target="_blank"
-        ${p.session_branch?`title="this session's branch"`:""}>
-        <span class="gt1"><span class="gnum">#${p.number}</span> ${esc(p.title||"")}<span class="gpstate ${cls}">${p.draft?"draft":esc((p.state||"").toLowerCase())}</span>${checksGlyph(p.checks)}</span>
-        <span class="gt2">${esc(p.branch||"")}${when}${p.local||p.state!=="OPEN"?"":" · not local"}</span></a>`;
+        title="${esc(prtip)}">
+        <span class="gt1"><span class="gnum">#${p.number}</span> ${esc(p.title||"")}<span class="gpstate ${cls}" title="${esc(PR_STATE_TIP[cls]||"")}">${p.draft?"draft":esc((p.state||"").toLowerCase())}</span>${checksGlyph(p.checks)}</span>
+        <span class="gt2">${esc(p.branch||"")}${when}${p.local||p.state!=="OPEN"?"":` <span title="this PR's branch does not exist in your checkout — you have not fetched or created it locally">· not local</span>`}</span></a>`;
     };
     html += open.length ? open.map(row).join("")
                         : `<div class="rl-empty">no open PRs</div>`;
     if(done.length)
-      html += `<div class="wr-h">recently merged / closed</div>` + done.map(row).join("");
+      html += `<div class="wr-h" title="PRs already merged into the base branch, or closed without merging — the most recent few">recently merged / closed</div>` + done.map(row).join("");
   }
   el.innerHTML = html;
 }
@@ -3696,8 +3736,8 @@ function fileRows(rel, depth, g){
       if(open) html += fileRows(p, depth + 1, g);
     } else if(isFile){
       const flag = g.dirty.has(p)
-        ? `<span class="fgit" title="modified (${esc(g.dirty.get(p))})">M</span>`
-        : g.unt.has(p) ? `<span class="fgit unt" title="untracked">?</span>` : "";
+        ? `<span class="fgit" title="modified since the last commit — git status ${esc(g.dirty.get(p))}">M</span>`
+        : g.unt.has(p) ? `<span class="fgit unt" title="untracked — git has never recorded this file">?</span>` : "";
       html += `<div class="frow${link}" ${pad} onclick="openFileView(${jsArg(p)})" title="${esc(p)}">
         <span class="fch"></span><span class="fn">${esc(e.name)}</span>${flag}
         ${e.size!=null?`<span class="fsz">${fsize(e.size)}</span>`:""}</div>`;
@@ -4079,7 +4119,10 @@ function renderCrCart(){
     const kept = rows.filter(r => crAct(r.id) === "keep").length;
     const btn = (a, txt) => {
       const all = rows.length > 0 && rows.every(r => r.locked || crAct(r.id) === a);
-      return `<span class="gb ${all ? "on" : ""}" onclick="crGroupSet('${k}','${a}')">${txt}</span>`;
+      const tip = a === "keep" ? `keep every ${label} row in the fork, in full`
+        : a === "stub" ? `replace every ${label} row with a one-line breadcrumb`
+        : "stub every kmcp row AND add its app:path to the cart";
+      return `<span class="gb ${all ? "on" : ""}" title="${esc(tip)}" onclick="crGroupSet('${k}','${a}')">${txt}</span>`;
     };
     const btns = k === "thinking" ? "" :
       btn("keep", "keep") + btn("stub", "stub") + (k === "kmcp" ? btn("ref", "ref") : "");
@@ -4104,7 +4147,7 @@ function renderCrCart(){
       const inCart = refs.includes(ref);
       return `<div class="cr-hit"><span class="t" title="${esc(h.description || ref)}">${esc(h.title || ref)}</span>
         <span class="sz">${esc(h.application || "")}</span>
-        <span class="add" onclick="crAddRef(${jsArg(ref)},${jsArg(h.title || "")},${h.chars || 0})">${inCart ? "✓" : "＋"}</span></div>`;
+        <span class="add" title="${inCart ? "already in the cart" : "add this entry to the cart — its body travels in the fork's preamble"}" onclick="crAddRef(${jsArg(ref)},${jsArg(h.title || "")},${h.chars || 0})">${inCart ? "✓" : "＋"}</span></div>`;
     }).join("");
   document.getElementById("crcart").innerHTML = `
     <h3>CR — context reduction</h3>
@@ -4115,7 +4158,7 @@ function renderCrCart(){
       (system prompt, tools, memory — not reducible from here) · chars/4, all numbers ≈</div>
     ${groups}
     <div class="cr-grp"><span class="gl">last ${m.recent_turns} turns</span>
-      <span class="gb" onclick="crKeepRecent()">keep all</span>
+      <span class="gb" title="keep every row from the last ${m.recent_turns} turns in full" onclick="crKeepRecent()">keep all</span>
       <span class="n">${m.turns} turns total</span></div>
     <div class="cr-sec">kmcp cart (travels in the fork's preamble)</div>
     ${cartRows}
@@ -4129,10 +4172,10 @@ function renderCrCart(){
     <button class="act sm" onclick="crSearch()">🔍 search</button>
     ${hits}
     <div class="cr-acts">
-      <button class="act sm" onclick="crPreview()">Preview</button>
-      <button class="act sm primary" onclick="crPreview(true)">Fork ⑂</button>
-      <button class="act sm" onclick="crCompile()">Compile only</button>
-      <button class="act sm" onclick="exitCR()">✕ exit CR</button>
+      <button class="act sm" title="Compile the preamble and show the honest before/after totals — nothing is written" onclick="crPreview()">Preview</button>
+      <button class="act sm primary" title="Same review gate as Preview — the reduced session file is only written after you confirm there" onclick="crPreview(true)">Fork ⑂</button>
+      <button class="act sm" title="Build the context document from the cart alone — copy it or drop it into the composer; no fork" onclick="crCompile()">Compile only</button>
+      <button class="act sm" title="Leave CR mode — your keep / stub / ref picks stay remembered for this session" onclick="exitCR()">✕ exit CR</button>
     </div>
     <div class="cr-hint">Stubs shrink bytes, not turn count — turns are gutted,
       not removed. Cart size is awareness only (no budget gate). The fork is a
@@ -4196,8 +4239,8 @@ async function crPreview(intentFork){
                     <pre>${esc(d.preamble)}</pre>`
                  : `<div class="cr-hint">empty cart — no preamble record will be appended</div>`}
     <div class="cr-acts">
-      <button class="act sm primary" onclick="crForkNow()">⑂ Fork now</button>
-      <button class="act sm" onclick="closeCrDlg()">Back to curation</button>
+      <button class="act sm primary" title="Write the reduced session file now — a NEW session; this one is never touched" onclick="crForkNow()">⑂ Fork now</button>
+      <button class="act sm" title="Close without writing anything" onclick="closeCrDlg()">Back to curation</button>
     </div>`);
   if(intentFork === true){ /* same gate — Fork ⑂ also reviews before writing */ }
 }
@@ -4225,8 +4268,8 @@ async function crCompile(){
     ${d.error ? `<div class="cr-err">refs not hydrated — ${esc(d.error)}; plain pointers below</div>` : ""}
     <pre id="crdoc">${esc(d.document)}</pre>
     <div class="cr-acts">
-      <button class="act sm" onclick="navigator.clipboard?.writeText(document.getElementById('crdoc').textContent).then(()=>toast('copied'))">⧉ copy</button>
-      <button class="act sm primary" onclick="crInsertDoc()">↳ insert into composer</button>
+      <button class="act sm" title="copy the compiled document to the clipboard" onclick="navigator.clipboard?.writeText(document.getElementById('crdoc').textContent).then(()=>toast('copied'))">⧉ copy</button>
+      <button class="act sm primary" title="append the compiled document to the answer composer" onclick="crInsertDoc()">↳ insert into composer</button>
       <button class="act sm" onclick="closeCrDlg()">close</button>
     </div>`);
 }
@@ -4674,6 +4717,15 @@ function fmtDelta(d){
           auto_compaction_only:"compaction-only"}[d.class] + ` ${body}`;
 }
 
+/* what each threads-lens verdict is saying about a session */
+const VERDICT_TIP = {
+  "LIVE": "last message within ~15 min — this session is still moving",
+  "OPEN": "never summarized — this thread still owes a capture",
+  "OPEN-delta": "summarized once, but real work landed after that watermark — it needs re-capture",
+  "OPEN?": "summarized, but the tail after the watermark could not be classified",
+  "CLOSED": "summarized, or classified as not needing one — nothing owed",
+};
+
 function agentsBadge(a){
   if(!a || !a.total) return "";
   let t = String(a.total);
@@ -4697,23 +4749,34 @@ function renderMgmt(){
     const wantDelta = s.verdict === "OPEN-delta";
     const state = (s.state || "—") + (s.reason ? "/" + s.reason : "");
     return `<tr class="row" onclick="showMgmtDigest('${s.session_id}',${wantDelta})">
-      <td class="${vcls}">${esc(s.verdict)}</td>
+      <td class="${vcls}" title="${esc(VERDICT_TIP[s.verdict] || "")}">${esc(s.verdict)}</td>
       <td title="${esc(s.session_id)}"><span class="agentlink"
+        title="open this session in the console"
         onclick="event.stopPropagation();closeMgmt();openSession('${s.session_id}')">${s.session_id.slice(0,8)}</span></td>
       <td>${esc(s.project_name || "?")}</td>
-      <td>${esc(s.git_branch || "—")}</td>
+      <td title="the git branch this session was working on">${esc(s.git_branch || "—")}</td>
       <td>${mgmtClock(s.last_ts)}</td>
-      <td class="num">${mgmtAge(s.idle_s)}</td>
-      <td class="num">${s.message_count || 0}</td>
-      <td>${agentsBadge(s.agents)}</td>
-      <td title="${esc(s.kmcp_target || "")}">${esc(state)}</td>
+      <td class="num" title="time since that last message">${mgmtAge(s.idle_s)}</td>
+      <td class="num" title="messages the archive holds for this session">${s.message_count || 0}</td>
+      <td title="subagents this session spawned — r = still running, f = failed">${agentsBadge(s.agents)}</td>
+      <td title="${esc("summary gate: " + state + (s.kmcp_target ? " · kmcp entry " + s.kmcp_target : ""))}">${esc(state)}</td>
       <td class="${s.delta && s.delta.class === "real" ? "v-OPENdelta" : ""}"
-          title="${esc((s.delta && s.delta.signals || []).join("\n"))}">${esc(fmtDelta(s.delta))}</td>
+          title="${esc(!s.delta ? "" :
+                       "work in the transcript AFTER the last summary's watermark — REAL means it needs re-capture"
+                       + ((s.delta.signals || []).length ? "\n" + s.delta.signals.join("\n") : ""))}">${esc(fmtDelta(s.delta))}</td>
       </tr>`;
   }).join("");
-  body.innerHTML = `<table><thead><tr><th>verdict</th><th>session</th>
-    <th>project</th><th>branch</th><th>last activity</th><th>idle</th>
-    <th>msgs</th><th>agents</th><th>summary</th><th>delta after summary</th></tr></thead>
+  body.innerHTML = `<table><thead><tr>
+    <th title="LIVE = still moving · OPEN = never captured · OPEN-delta = captured, then more real work · CLOSED = nothing owed">verdict</th>
+    <th title="short session id — click it to open the session">session</th>
+    <th title="the project folder the session ran in">project</th>
+    <th title="the git branch the session was working on">branch</th>
+    <th title="the newest message in the archive — never the transcript's file mtime">last activity</th>
+    <th title="time since that last message">idle</th>
+    <th title="messages the archive holds for this session">msgs</th>
+    <th title="subagents spawned — r = running, f = failed">agents</th>
+    <th title="the pre-LLM reconcile gate: summarized / not_required / pending">summary</th>
+    <th title="how much real work landed after the last summary's watermark">delta after summary</th></tr></thead>
     <tbody>${trs}</tbody></table>`;
 }
 
@@ -4797,22 +4860,22 @@ function repoAgo(iso){
 function repoChips(r){
   const c = [];
   if(r.trunk_ahead === null || r.trunk_ahead === undefined)
-    c.push(`<span class="rchip" title="no origin/${esc(r.trunk||"trunk")} on disk">no remote</span>`);
+    c.push(`<span class="rchip" title="no origin/${esc(r.trunk||"trunk")} on disk — this repo has no remote copy, so there is nothing to push to or pull from">no remote</span>`);
   else {
     if(r.trunk_ahead > 0)
-      c.push(`<span class="rchip warn" title="${esc(r.trunk)} has commits origin does not — push">${esc(r.trunk)} ↑${r.trunk_ahead} unpushed</span>`);
+      c.push(`<span class="rchip warn" title="${r.trunk_ahead} commit(s) on ${esc(r.trunk)} that origin does not have yet — they exist only on this machine until you push">${esc(r.trunk)} ↑${r.trunk_ahead} unpushed</span>`);
     if(r.trunk_behind > 0)
-      c.push(`<span class="rchip on" title="origin/${esc(r.trunk)} has commits you do not — as of the last fetch">${esc(r.trunk)} ↓${r.trunk_behind} behind</span>`);
+      c.push(`<span class="rchip on" title="origin/${esc(r.trunk)} has ${r.trunk_behind} commit(s) you do not, as of your last fetch — git pull brings them in">${esc(r.trunk)} ↓${r.trunk_behind} behind</span>`);
     if(!r.trunk_ahead && !r.trunk_behind)
-      c.push(`<span class="rchip good">${esc(r.trunk)} level</span>`);
+      c.push(`<span class="rchip good" title="${esc(r.trunk)} and origin/${esc(r.trunk)} hold exactly the same commits — nothing to push, nothing to pull">${esc(r.trunk)} level</span>`);
   }
-  if(r.dirty) c.push(`<span class="rchip warn" title="${esc((r.dirty_paths||[]).join("\n"))}">${r.dirty} modified</span>`);
-  if(r.untracked) c.push(`<span class="rchip">${r.untracked} untracked</span>`);
-  if(r.stash) c.push(`<span class="rchip pur">${r.stash} stashed</span>`);
+  if(r.dirty) c.push(`<span class="rchip warn" title="${esc(r.dirty + " tracked file(s) changed since the last commit — edits git is watching but has not saved yet\n" + (r.dirty_paths||[]).join("\n"))}">${r.dirty} modified</span>`);
+  if(r.untracked) c.push(`<span class="rchip" title="files git has never recorded — they are not in the repo until you git add them">${r.untracked} untracked</span>`);
+  if(r.stash) c.push(`<span class="rchip pur" title="changes parked with git stash — set aside, not committed, and easy to forget">${r.stash} stashed</span>`);
   if(!r.dirty && !r.untracked && !r.stash)
-    c.push(`<span class="rchip good">clean tree</span>`);
+    c.push(`<span class="rchip good" title="nothing changed, added or stashed — this folder matches its last commit exactly">clean tree</span>`);
   if(r.unmerged_count)
-    c.push(`<span class="rchip pur">${r.unmerged_count} unmerged</span>`);
+    c.push(`<span class="rchip pur" title="${r.unmerged_count} branch(es) carry commits ${esc(r.trunk||"the trunk")} does not have yet — unmerged work, not a problem in itself">${r.unmerged_count} unmerged</span>`);
   return c.join("");
 }
 
@@ -4825,17 +4888,21 @@ function repoCard(r){
   // Branches worth a line: the trunk is already summarised by its chip, and a
   // branch level with the trunk is not news. Unmerged work is the whole point.
   const bs = (r.branches || []).filter(b => !b.is_trunk && (b.ahead === null || b.ahead > 0));
+  const btip = b => b.ahead === null
+    ? "ahead/behind unavailable — this git is too old for the one-call comparison"
+    : `↑${b.ahead} = ${b.ahead} commit(s) on this branch that ${r.trunk||"the trunk"} does not have yet — unmerged work, not a problem in itself`
+      + (b.behind ? ` · ↓${b.behind} = commits ${r.trunk||"the trunk"} has that this branch does not` : "");
   const brows = bs.slice(0, 6).map(b => `<div class="brow">
       <span class="bn${b.name === r.branch ? " trunk" : ""}"
-            title="${esc(b.subject || "")}">${esc(b.name)}</span>
-      <span class="ab">${b.ahead === null ? "?" : "↑" + b.ahead}${b.behind ? " ↓" + b.behind : ""}</span>
-      <span class="sub">${esc(repoAgo(b.when))}</span></div>`).join("");
+            title="${esc(b.subject ? "last commit on this branch: " + b.subject : "branch " + b.name)}">${esc(b.name)}</span>
+      <span class="ab" title="${esc(btip(b))}">${b.ahead === null ? "?" : "↑" + b.ahead}${b.behind ? " ↓" + b.behind : ""}</span>
+      <span class="sub" title="when this branch last received a commit">${esc(repoAgo(b.when))}</span></div>`).join("");
   const more = bs.length > 6 ? `<div class="brow"><span class="sub">…and ${bs.length - 6} more</span></div>` : "";
 
   const wts = (r.worktrees || []).map(w => `<div class="wt">
-      <span class="${w.exists ? "" : "gone"}" title="${esc(w.path)}">${esc(w.path.split("/").slice(-2).join("/"))}</span>
-      <span class="sub" style="color:var(--muted)">${esc(w.branch || (w.detached ? "detached " + (w.hash||"") : "?"))}</span>
-      ${w.exists ? "" : '<span class="gone">· folder gone (prune)</span>'}</div>`).join("");
+      <span class="${w.exists ? "" : "gone"}" title="${esc(w.path + " — a worktree: a second folder checked out from this repo, on its own branch")}">${esc(w.path.split("/").slice(-2).join("/"))}</span>
+      <span class="sub" style="color:var(--muted)" title="the branch checked out in that folder — one branch can only be checked out in one worktree at a time">${esc(w.branch || (w.detached ? "detached " + (w.hash||"") : "?"))}</span>
+      ${w.exists ? "" : '<span class="gone" title="git still records this worktree but its folder is gone — git worktree prune clears the stale entry">· folder gone (prune)</span>'}</div>`).join("");
 
   // Same narrow rule the server bands on: losable edits, an unpushed trunk, or
   // a worktree registration that outlived its folder. Untracked files and old
@@ -4843,16 +4910,19 @@ function repoCard(r){
   const staleWt = (r.worktrees || []).some(w => !w.exists);
   const noisy = r.dirty || r.trunk_ahead || staleWt;
   const head = r.detached ? `detached @ ${esc(r.branch || "?")}` : esc(r.branch || "?");
+  const headTip = r.detached
+    ? "detached HEAD — this folder sits on a commit rather than a branch, so new commits would belong to no branch"
+    : "the branch this repo folder is currently checked out on";
   return `<div class="rcard${noisy ? " attn" : ""}" onclick="openRepoDetail('${esc(r.root)}')"
        role="button" tabindex="0" title="Open ${esc(r.name)} in full"
        onkeydown="if(event.key==='Enter'){openRepoDetail('${esc(r.root)}')}">
     <div class="rh"><span class="nm">${esc(r.name)}</span>
-      <span class="tk">on ${head}</span></div>
+      <span class="tk" title="${esc(headTip)}">on ${head}</span></div>
     <div class="path">${esc(r.root)}</div>
     <div class="chips">${repoChips(r)}</div>
-    ${brows ? `<div class="sect"><div class="lbl">unmerged into ${esc(r.trunk || "trunk")} · ${bs.length} of ${r.branch_total}</div>${brows}${more}</div>` : ""}
-    ${wts ? `<div class="sect"><div class="lbl">worktrees · ${r.worktree_total}</div>${wts}</div>` : ""}
-    ${r.last_commit ? `<div class="sect"><div class="last" title="${esc(r.last_commit.subject)}">${esc(r.last_commit.hash)} · ${esc(repoAgo(r.last_commit.when))} · ${esc(r.last_commit.subject)}</div></div>` : ""}
+    ${brows ? `<div class="sect"><div class="lbl" title="branches holding commits ${esc(r.trunk || "the trunk")} does not have yet — merging them (usually through a PR) is what puts that work on ${esc(r.trunk || "the trunk")}">unmerged into ${esc(r.trunk || "trunk")} · ${bs.length} of ${r.branch_total}</div>${brows}${more}</div>` : ""}
+    ${wts ? `<div class="sect"><div class="lbl" title="extra folders checked out from this same repo, each sitting on its own branch">worktrees · ${r.worktree_total}</div>${wts}</div>` : ""}
+    ${r.last_commit ? `<div class="sect"><div class="last" title="${esc("most recent commit anywhere in this repo: " + r.last_commit.subject)}">${esc(r.last_commit.hash)} · ${esc(repoAgo(r.last_commit.when))} · ${esc(r.last_commit.subject)}</div></div>` : ""}
   </div>`;
 }
 
@@ -4941,11 +5011,15 @@ function refBadge(r, web, remotes){
   const rem = (remotes || []).find(rm => name.startsWith(rm + "/"));
   const cls = head ? "ref head" : rem ? "ref rem" : "ref";
   const txt = head ? "HEAD → " + name : r;
+  const tip = head
+    ? "HEAD — the commit this checkout is currently sitting on"
+    : rem ? "a remote-tracking branch — where the remote had this branch at your last fetch"
+          : "a local branch or tag — it exists only on this machine, so GitHub has no page for it";
   if(web && rem && !head)
     return `<a class="ext ${cls}" target="_blank" rel="noopener"
       href="${esc(web)}/tree/${ghPath(name.slice(rem.length + 1))}"
-      >${esc(txt)}</a>`;
-  return `<span class="${cls}"${rem || head ? "" : ' title="local only — not on GitHub"'}>${esc(txt)}</span>`;
+      title="${esc(tip)}">${esc(txt)}</a>`;
+  return `<span class="${cls}" title="${esc(tip)}">${esc(txt)}</span>`;
 }
 
 function renderRepoDetail(d){
@@ -4967,45 +5041,46 @@ function renderRepoDetail(d){
     const bcell = (web && upName)
       ? `<a class="ext" target="_blank" rel="noopener"
            href="${esc(web)}/tree/${ghPath(upName)}">${esc(b.name)}</a>`
-      : `<span title="${b.upstream ? "" : "local only — not pushed to GitHub"}">${esc(b.name)}</span>`;
+      : `<span title="${esc(b.upstream ? "tracks " + b.upstream : "local only — this branch has never been pushed, so GitHub has no page for it")}">${esc(b.name)}</span>`;
+    const tk = d.trunk || "the trunk";
     return `<tr${focus ? ' style="background:var(--surface2)"' : ""}>
-      <td>${bcell}${b.is_trunk ? ' <span class="ref head">trunk</span>' : ""}</td>
-      <td class="num">${b.ahead === null ? "?" : (b.ahead ? "↑" + b.ahead : "")}</td>
-      <td class="num">${b.behind ? "↓" + b.behind : ""}</td>
-      <td>${b.upstream ? esc(b.upstream) : '<span style="color:var(--warn)">no upstream</span>'}</td>
+      <td>${bcell}${b.is_trunk ? ` <span class="ref head" title="${esc("the trunk — this repo's main line (" + tk + "); every other branch is measured against it")}">trunk</span>` : ""}</td>
+      <td class="num" title="${esc("↑ commits on this branch that " + tk + " does not have yet — unmerged work")}">${b.ahead === null ? "?" : (b.ahead ? "↑" + b.ahead : "")}</td>
+      <td class="num" title="${esc("↓ commits " + tk + " has that this branch does not — merge or rebase to catch it up")}">${b.behind ? "↓" + b.behind : ""}</td>
+      <td title="${esc(b.upstream ? "the remote branch this one is paired with — push and pull go there" : "no remote branch is paired with this one; git push -u origin " + b.name + " creates it")}">${b.upstream ? esc(b.upstream) : '<span style="color:var(--warn)">no upstream</span>'}</td>
       <td class="w" title="${esc(b.subject || "")}">${esc(b.subject || "")}</td>
-      <td style="color:var(--muted)">${esc(repoAgo(b.when))}</td></tr>`;
+      <td style="color:var(--muted)" title="when this branch last received a commit">${esc(repoAgo(b.when))}</td></tr>`;
   }).join("");
 
   const wrows = (d.worktrees || []).map(w => `<tr>
-      <td class="${w.exists ? "" : "ck-fail"}" title="${esc(w.path)}">${esc(w.path)}</td>
-      <td>${esc(w.branch || (w.detached ? "detached" : "?"))}</td>
-      <td>${esc(w.hash || "")}</td>
-      <td class="w">${w.exists ? "" : '<span class="ck-fail">folder gone — git worktree prune</span>'}</td>
+      <td class="${w.exists ? "" : "ck-fail"}" title="${esc(w.path + " — a second folder checked out from this repo, on its own branch")}">${esc(w.path)}</td>
+      <td title="the branch checked out in that folder — one branch can only be checked out in one worktree at a time">${esc(w.branch || (w.detached ? "detached" : "?"))}</td>
+      <td title="the commit that worktree is sitting on">${esc(w.hash || "")}</td>
+      <td class="w">${w.exists ? "" : '<span class="ck-fail" title="git still records this worktree but the folder is gone — git worktree prune clears the stale entry">folder gone — git worktree prune</span>'}</td>
       </tr>`).join("");
 
   const gh = d.gh || {};
   const prs = gh.prs || [];
   const prows = prs.map(p => `<tr>
-      <td>${p.url ? `<a class="ext" target="_blank" rel="noopener" href="${esc(p.url)}">#${esc(p.number)}</a>` : "#" + esc(p.number)}</td>
-      <td class="st-${esc(p.state)}">${esc(p.state)}${p.draft ? " (draft)" : ""}</td>
-      <td>${p.checks ? `<span class="ck-${esc(p.checks)}">${esc(p.checks)}</span>` : ""}</td>
-      <td>${esc(p.branch || "")}</td>
+      <td title="${esc("pull request #" + p.number + " — a request to merge " + (p.branch || "its branch") + " into the base branch")}">${p.url ? `<a class="ext" target="_blank" rel="noopener" href="${esc(p.url)}">#${esc(p.number)}</a>` : "#" + esc(p.number)}</td>
+      <td class="st-${esc(p.state)}" title="${esc(PR_STATE_TIP[p.draft ? "draft" : (p.state || "").toLowerCase()] || "")}">${esc(p.state)}${p.draft ? " (draft)" : ""}</td>
+      <td title="${esc(p.checks ? (CHECKS_TIP[p.checks] || ("checks: " + p.checks)) : "no CI checks reported for this PR")}">${p.checks ? `<span class="ck-${esc(p.checks)}">${esc(p.checks)}</span>` : ""}</td>
+      <td title="the branch this PR would merge in">${esc(p.branch || "")}</td>
       <td class="w" title="${esc(p.title || "")}">${esc(p.title || "")}</td>
-      <td style="color:var(--muted)">${p.merged_at ? esc(repoAgo(p.merged_at)) : ""}</td>
+      <td style="color:var(--muted)" title="when it was merged">${p.merged_at ? esc(repoAgo(p.merged_at)) : ""}</td>
       </tr>`).join("");
   const prNote = gh.available === false
     ? `<div style="color:var(--muted)">unavailable — ${esc(gh.reason || "?")}</div>` : "";
 
   const crows = (d.commits || []).map(c => `<tr>
       <td>${(web && c.pushed)
-        ? `<a class="ext" target="_blank" rel="noopener" href="${esc(web)}/commit/${ghPath(c.hash)}">${esc(c.hash)}</a>`
-        : `<span title="${c.pushed === false ? "not pushed — no GitHub page yet" : "push state unknown"}">${esc(c.hash)}${c.pushed === false ? " ↑" : ""}</span>`}</td>
-      <td>${c.is_merge ? '<span class="mg" title="a merge commit — two parents">⑂</span>' : ""}</td>
-      <td>${(c.refs || []).map(r => refBadge(r, web, d.remotes)).join("")}</td>
+        ? `<a class="ext" target="_blank" rel="noopener" title="pushed — a remote has this commit; opens it on GitHub" href="${esc(web)}/commit/${ghPath(c.hash)}">${esc(c.hash)}</a>`
+        : `<span title="${c.pushed === false ? "the ↑ means this commit exists only on this machine — push its branch and GitHub will have it" : "push state unknown — git could not tell whether any remote has this commit"}">${esc(c.hash)}${c.pushed === false ? " ↑" : ""}</span>`}</td>
+      <td>${c.is_merge ? '<span class="mg" title="a merge commit — where one branch was merged into another, so it has two parents">⑂</span>' : ""}</td>
+      <td title="branch and tag names pointing at this commit">${(c.refs || []).map(r => refBadge(r, web, d.remotes)).join("")}</td>
       <td class="w" title="${esc(c.subject)}">${esc(c.subject)}</td>
-      <td style="color:var(--muted)">${esc(c.author)}</td>
-      <td style="color:var(--muted)">${esc(repoAgo(c.when))}</td>
+      <td style="color:var(--muted)" title="who authored the commit">${esc(c.author)}</td>
+      <td style="color:var(--muted)" title="when the commit was made">${esc(repoAgo(c.when))}</td>
       </tr>`).join("");
 
   // Group headers link at the repo-level pages — /branches, /commits, /pulls —
@@ -5025,12 +5100,12 @@ function renderRepoDetail(d){
     </div>
     <div class="dh"><span class="pth">${esc(d.root)}</span></div>
     <div class="chips">${repoChips(d)}</div>
-    ${grp(`branches · ${d.branch_total}${d.trunk ? " · ahead/behind " + esc(d.trunk) : ""}`,
+    ${grp(`<span title="${esc("↑ = commits the branch has that " + (d.trunk || "the trunk") + " does not; ↓ = the reverse. Both are counted from where the two diverged.")}">branches · ${d.branch_total}${d.trunk ? " · ahead/behind " + esc(d.trunk) : ""}</span>`,
           brows, "/branches", "all branches")}
-    ${d.worktree_total ? grp(`worktrees · ${d.worktree_total}`, wrows) : ""}
-    <div class="grp"><h3>pull requests${prs.length ? " · " + prs.length : ""}${ghLink("/pulls", "all PRs")}</h3>
+    ${d.worktree_total ? grp(`<span title="extra folders checked out from this repo, each on its own branch">worktrees · ${d.worktree_total}</span>`, wrows) : ""}
+    <div class="grp"><h3><span title="a pull request asks to merge one branch into another; until it is merged its commits are not on the trunk">pull requests${prs.length ? " · " + prs.length : ""}</span>${ghLink("/pulls", "all PRs")}</h3>
       ${prows ? `<table>${prows}</table>` : (prNote || '<div style="color:var(--muted)">none</div>')}</div>
-    ${grp(`commits · latest ${(d.commits||[]).length} across all branches`,
+    ${grp(`<span title="every branch's recent commits, not only the one you are on — a hash with ↑ has not been pushed anywhere">commits · latest ${(d.commits||[]).length} across all branches</span>`,
           crows, "/commits", "all commits")}
   `;
   if(repoFocusBranch){

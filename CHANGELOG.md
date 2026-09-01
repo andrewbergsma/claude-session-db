@@ -19,6 +19,28 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.12.3] - 2026-09-01
+
+### Added
+- **Tooltips throughout the console** — 101 new `title=` attributes across 69
+  sites, weighted toward git: every ahead/behind arrow, `unmerged`, `trunk`,
+  `no upstream`, worktree row, merge marker and unpushed `↑` now explains in
+  plain English what it means, not just what it is called. e.g. `↑4` reads
+  *"4 commits on this branch that main does not have yet — unmerged work, not
+  a problem in itself"*. Bare-glyph controls, state/verdict indicators and the
+  threads-overlay column headers are covered too.
+
+### Fixed
+- Two tooltips that stated something untrue, caught on review:
+  - "N modified" claimed tracked edits were *"the only edits here you could
+    actually lose"*. Untracked files are **more** losable, not less — git has
+    never recorded them and `git clean` deletes them outright. Now: *"tracked
+    file(s) changed since the last commit — edits git is watching but has not
+    saved yet"*.
+  - The ctx chip named a *"roughly 200k"* ceiling. The window is per-model and
+    this very console is often driven by a 1M-context session, so the chip
+    cannot know the number; it now says the ceiling depends on the model.
+
 ## [3.12.2] - 2026-09-01
 
 ### Fixed

@@ -30,6 +30,10 @@ Endpoints
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
+  GET  /api/repos                  cross-repo inventory: trunk, ahead/behind,
+                                   dirty, unmerged branches, live worktrees
+                                   (cached-first; never fans out on request)
+  POST /api/repos/refresh          force one registry+snapshot walk now
   GET  /api/files?id=<sid>&path=   one directory listing under the session's
                                    repo root / cwd (read-only, root-confined)
   GET  /api/file?id=<sid>&path=    one file's text/metadata (raw=1: image bytes)
@@ -3635,6 +3639,368 @@ def git_payload(sid: str, refresh: bool = False):
 
 
 # ----------------------------------------------------------------------------
+# repos lens — the cross-REPO inventory (/api/repos)
+#
+# /api/git is a SESSION lens: one cwd, derived from one transcript, one repo.
+# This is the other axis — every repo the operator's sessions have touched,
+# each answering the same questions at once: what is the trunk, is it level
+# with its remote, what is dirty, which branches are unmerged, which worktrees
+# are still mounted. The threads overlay is this shape for sessions; this is it
+# for repos.
+#
+# Doctrine, inherited from session_mgmt.py and the angles state dir:
+#
+#   - READ-ONLY, and never a fetch. Every git call goes through _git(), which
+#     passes --no-optional-locks, so observing a repo cannot write into it.
+#     ahead/behind is measured against the remote-tracking refs ALREADY on
+#     disk; a stale origin/main reports stale numbers rather than the console
+#     reaching over the network on a poll. The payload says so (`no_fetch`).
+#   - The registry is DISCOVERED, not configured: distinct `sessions.cwd` from
+#     the archive, resolved through `rev-parse --show-toplevel`. A cwd that is
+#     not a repo simply never appears. CSD_REPOS pins extra roots; the archive
+#     being unreachable degrades to the transcript-tail derivation the nav
+#     already uses, so the lens works with no database at all.
+#   - CACHED-FIRST, pull not push. One repo snapshot is ~9 git invocations; a
+#     20-repo grid on a 30s poll would be ~180 subprocesses a tick. The request
+#     path NEVER fans out — it serves the store off disk, and a single
+#     background refresher walks the registry one repo at a time. Same seam as
+#     tldr/timeline: the endpoint reads, the worker writes.
+#   - Failure isolates per ROW. A deleted directory, a git that times out, a
+#     branch atom an older git does not know — each degrades that repo (or that
+#     one field) to a reason string. The lens never raises.
+# ----------------------------------------------------------------------------
+REPOS_FILE = CONSOLE_STATE / "repos.json"
+REPO_REFRESH_S = int(os.environ.get("CSD_REPOS_REFRESH_S", "90"))
+REPO_REGISTRY_TTL_S = int(os.environ.get("CSD_REPOS_REGISTRY_TTL_S", "600"))
+REPO_WINDOW_DAYS = int(os.environ.get("CSD_REPOS_WINDOW_DAYS", "30"))
+REPO_STAGGER_S = float(os.environ.get("CSD_REPOS_STAGGER_S", "0.35"))
+REPO_MAX = 40              # registry cap — the fan-out is bounded by design
+REPO_BRANCH_CAP = 14       # branches shown per repo, most recent first
+REPO_WORKTREE_CAP = 12
+_REPOS_LOCK = threading.Lock()
+_REPOS: dict = {}          # the served store, mirrored to REPOS_FILE
+_REGISTRY: tuple = (0.0, [], "")   # (discovered_at, [roots], source)
+
+
+def _repo_toplevel(cwd: str):
+    """Repo root for a cwd, or None — a linked worktree folded into its PARENT.
+
+    A worktree is a second checkout, not a second repository. Left un-folded it
+    lands in the grid as its own row carrying its parent's branch and worktree
+    counts, so `controltech` and its `receive-packing-slip-cli` worktree both
+    claim the same 22 branches. One row per repository; the worktrees are a
+    field on that row (same derivation _git_snapshot uses for parent_root).
+    """
+    if not cwd or not Path(cwd).is_dir():
+        return None
+    rc, top = _git(["rev-parse", "--show-toplevel"], cwd)
+    if rc != 0 or not top.strip():
+        return None
+    root = top.strip()
+    rc2, dirs = _git(["rev-parse", "--git-dir", "--git-common-dir"], root)
+    lines = dirs.strip().split("\n") if rc2 == 0 else []
+    if len(lines) < 2 or not lines[0] or not lines[1]:
+        return root
+    git_dir = str((Path(root) / lines[0]).resolve())
+    common = str((Path(root) / lines[1]).resolve())
+    if git_dir == common:                   # the main checkout — already the root
+        return root
+    parent = (common[:-len("/.git")] if common.endswith("/.git")
+              else str(Path(common).parent))
+    return parent if Path(parent).is_dir() else root
+
+
+def _registry_cwds() -> tuple[list[str], str]:
+    """(candidate cwds, where they came from) — archive first, transcripts second.
+
+    The archive is the better source (it knows every cwd a session ever ran in,
+    not just the ones still in the 72h nav window), but it is not required: the
+    transcript tail carries cwd too, which is the same derivation /api/git uses.
+    """
+    pinned = [p for p in os.environ.get("CSD_REPOS", "").split(":") if p.strip()]
+    if CSD_DSN:
+        try:
+            import psycopg
+            with psycopg.connect(CSD_DSN, connect_timeout=5) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT DISTINCT cwd FROM sessions "
+                        "WHERE cwd IS NOT NULL AND NOT is_subagent "
+                        "  AND modified_at > now() - make_interval(days => %s) "
+                        "ORDER BY 1", (REPO_WINDOW_DAYS,))
+                    rows = [r[0] for r in cur.fetchall()]
+            return pinned + rows, f"archive ({REPO_WINDOW_DAYS}d)"
+        except Exception:  # noqa: BLE001 — degrade to transcripts, never die
+            pass
+    cwds = []
+    for s in discover_sessions():
+        p = find_session(s["session_id"])
+        if p is not None:
+            c = _session_cwd(p)
+            if c:
+                cwds.append(c)
+    return pinned + cwds, "transcripts (nav window)"
+
+
+def _repo_registry(force: bool = False) -> tuple[list[str], str]:
+    """The repo roots to watch, cached REPO_REGISTRY_TTL_S. Ordered, deduped.
+
+    Discovery is the expensive half (a DB round-trip, or tailing every nav
+    transcript) and the answer barely moves, so it is cached far longer than
+    the snapshots that hang off it.
+    """
+    global _REGISTRY
+    now = time.time()
+    with _REPOS_LOCK:
+        at, roots, src = _REGISTRY
+        if roots and not force and now - at < REPO_REGISTRY_TTL_S:
+            return roots, src        # the real source, not "cached" — the UI
+                                     # names where the list came FROM, and
+                                     # "cached" answers a question nobody asked
+    cwds, source = _registry_cwds()
+    seen, roots = set(), []
+    for c in cwds:
+        root = _repo_toplevel(c)
+        if root and root not in seen:
+            seen.add(root)
+            roots.append(root)
+        if len(roots) >= REPO_MAX:
+            break
+    with _REPOS_LOCK:
+        _REGISTRY = (now, roots, source)
+    return roots, source
+
+
+def _trunk_of(root: str):
+    """The repo's trunk branch name — origin/HEAD if it is set, else a probe.
+
+    Three of these repos call it `main` and the older ones call it `master`;
+    guessing one is how a lens ends up reporting every branch as unmerged.
+    """
+    rc, out = _git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], root)
+    if rc == 0 and out.strip():
+        return out.strip().split("/", 1)[-1], "origin/HEAD"
+    for cand in ("main", "master", "trunk"):
+        rc, _ = _git(["show-ref", "--verify", "--quiet",
+                      f"refs/heads/{cand}"], root)
+        if rc == 0:
+            return cand, "probe"
+    return None, "unresolved"
+
+
+def _branch_inventory(root: str, trunk: str | None):
+    """Every local branch with ahead/behind vs the trunk, newest commit first.
+
+    ONE git call: for-each-ref's %(ahead-behind:<trunk>) atom does the whole
+    matrix that would otherwise be a rev-list per branch. The atom needs git
+    2.41+, and an unknown atom fails the WHOLE command rather than one field —
+    so a non-zero rc retries without it and reports counts as unknown instead
+    of losing the branch list.
+    """
+    fmt = ("%(refname:short)" + _FS + "%(committerdate:iso-strict)" + _FS
+           + "%(objectname:short)" + _FS + "%(upstream:short)" + _FS
+           + "%(contents:subject)")
+    ab = trunk is not None
+    args = ["for-each-ref", "refs/heads", "--sort=-committerdate"]
+    rc, out = _git(args + [f"--format={fmt}{_FS}%(ahead-behind:{trunk})"
+                           if ab else f"--format={fmt}"], root)
+    if rc != 0 and ab:                      # older git: no ahead-behind atom
+        ab = False
+        rc, out = _git(args + [f"--format={fmt}"], root)
+    if rc != 0:
+        return [], 0, "branch list unavailable"
+    rows = []
+    for ln in out.splitlines():
+        p = ln.split(_FS)
+        if len(p) < 5:
+            continue
+        ahead = behind = None
+        if ab and len(p) > 5 and len(p[5].split()) == 2:
+            ahead, behind = (int(x) for x in p[5].split())
+        rows.append({"name": p[0], "when": p[1], "hash": p[2],
+                     "upstream": p[3] or None, "subject": p[4],
+                     "ahead": ahead, "behind": behind,
+                     "is_trunk": p[0] == trunk})
+    total = len(rows)
+    # Surface order: the trunk, then branches carrying unmerged work, then the
+    # rest — a 40-branch repo's interesting rows are never below the cap.
+    rows.sort(key=lambda b: (not b["is_trunk"], -(b["ahead"] or 0)))
+    return rows[:REPO_BRANCH_CAP], total, None
+
+
+def _worktree_inventory(root: str):
+    """Linked worktrees for the repo: path, branch, and whether it still exists.
+
+    `worktree list` reports what .git/worktrees records, which is exactly the
+    point — a /tmp worktree the machine has since cleaned still has an entry
+    until someone prunes it, and that gap is worth seeing.
+    """
+    rc, out = _git(["worktree", "list", "--porcelain"], root)
+    if rc != 0:
+        return [], 0
+    trees, cur = [], {}
+    for ln in out.splitlines() + [""]:
+        if not ln.strip():
+            if cur.get("path"):
+                trees.append(cur)
+            cur = {}
+        elif ln.startswith("worktree "):
+            cur["path"] = ln[9:]
+        elif ln.startswith("branch "):
+            cur["branch"] = ln[7:].replace("refs/heads/", "")
+        elif ln.startswith("HEAD "):
+            cur["hash"] = ln[5:][:7]
+        elif ln.strip() in ("detached", "bare", "locked", "prunable"):
+            cur[ln.strip()] = True
+    linked = []
+    for t in trees:
+        if t.get("path") == root:           # the main checkout, not a worktree
+            continue
+        t["exists"] = Path(t["path"]).is_dir()
+        linked.append(t)
+    return linked[:REPO_WORKTREE_CAP], len(linked)
+
+
+def repo_snapshot(root: str) -> dict:
+    """One repo's row: identity + working tree + trunk + branches + worktrees.
+
+    Built on _git_snapshot (the /api/git engine) so the two lenses can never
+    disagree about the same repo; everything after it is the repo-level detail
+    a single-cwd view has no reason to collect.
+    """
+    started = time.time()
+    snap = _git_snapshot(root)
+    if not snap.get("repo"):
+        return {"root": root, "name": Path(root).name, "ok": False,
+                "reason": (snap.get("git_error") or
+                           ("directory is gone" if not snap.get("cwd_exists")
+                            else "not a git repository")),
+                "checked_at": started}
+    trunk, trunk_from = _trunk_of(root)
+    branches, branch_total, branch_note = _branch_inventory(root, trunk)
+    worktrees, worktree_total = _worktree_inventory(root)
+
+    # trunk vs its remote, which is NOT necessarily HEAD's upstream: the whole
+    # point of the lens is answering "is main pushed?" while sitting on a
+    # feature branch. Measured against the ref on disk — no fetch (see above).
+    tr_ahead = tr_behind = None
+    if trunk:
+        rc, cnt = _git(["rev-list", "--left-right", "--count",
+                        f"origin/{trunk}...{trunk}"], root)
+        if rc == 0 and len(cnt.split()) == 2:
+            tr_behind, tr_ahead = (int(x) for x in cnt.split())
+
+    st, bs = snap["status"], snap["branch_status"]
+    unmerged = [b for b in branches if not b["is_trunk"] and (b["ahead"] or 0) > 0]
+    return {
+        "root": root, "name": Path(root).name, "ok": True,
+        "branch": snap["repo"]["branch"],
+        "detached": snap["repo"]["detached"],
+        "is_worktree": snap["repo"]["is_worktree"],
+        "parent_root": snap["repo"]["parent_root"],
+        "trunk": trunk, "trunk_from": trunk_from,
+        "trunk_ahead": tr_ahead, "trunk_behind": tr_behind,
+        "dirty": st["dirty_count"], "untracked": st["untracked_count"],
+        "stash": st["stash_count"],
+        "dirty_paths": [d["path"] for d in st["dirty"][:8]],
+        "upstream": bs["upstream"], "ahead": bs["ahead"], "behind": bs["behind"],
+        "last_commit": bs["last_commit"],
+        "branches": branches, "branch_total": branch_total,
+        "branch_note": branch_note,
+        "unmerged_count": len(unmerged),
+        "worktrees": worktrees, "worktree_total": worktree_total,
+        "took_ms": int((time.time() - started) * 1000),
+        "checked_at": started,
+    }
+
+
+def _read_repos_store() -> dict:
+    try:
+        return json.loads(REPOS_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _refresh_repos(force_registry: bool = False) -> dict:
+    """Walk the registry once, one repo at a time, and replace the store.
+
+    Serial and staggered on purpose: the refresher exists so the REQUEST path
+    never fans out, and a burst of 20 concurrent `git status` calls would just
+    move the stampede rather than remove it.
+    """
+    global _REPOS
+    roots, source = _repo_registry(force=force_registry)
+    rows = []
+    for i, root in enumerate(roots):
+        try:
+            rows.append(repo_snapshot(root))
+        except Exception as exc:  # noqa: BLE001 — one bad repo, one bad row
+            rows.append({"root": root, "name": Path(root).name, "ok": False,
+                         "reason": f"{type(exc).__name__}: {exc}"[:200],
+                         "checked_at": time.time()})
+        if REPO_STAGGER_S and i + 1 < len(roots):
+            time.sleep(REPO_STAGGER_S)
+    # Attention first, recency within each band. Two stable passes, not one
+    # compound key: the recency sort is what orders rows inside a band.
+    def _band(r):
+        """0 broken · 1 needs a decision · 2 quiet.
+
+        Deliberately NARROW. Untracked files and months-old unmerged branches
+        are the normal resting state of a working repo — banding on them put 16
+        of 17 rows in the attention band, which is the same as having no band.
+        What earns it: uncommitted TRACKED edits (losable), an unpushed trunk
+        (invisible to everyone else), and a worktree whose folder is gone
+        (git's registration outliving the directory).
+        """
+        if not r.get("ok"):
+            return 0                        # broken — surface it, don't bury it
+        stale_wt = any(not w.get("exists") for w in (r.get("worktrees") or []))
+        if r.get("dirty") or r.get("trunk_ahead") or stale_wt:
+            return 1
+        return 2
+    rows.sort(key=lambda r: ((r.get("last_commit") or {}).get("when") or ""),
+              reverse=True)
+    rows.sort(key=_band)
+    store = {"repos": rows, "registry_source": source,
+             "registry_count": len(roots), "no_fetch": True,
+             "refresh_s": REPO_REFRESH_S, "generated_at": time.time()}
+    with _REPOS_LOCK:
+        _REPOS = store
+    try:
+        _atomic_write_json(REPOS_FILE, store)
+    except OSError:
+        pass                                # the in-memory store still serves
+    return store
+
+
+def repos_payload() -> dict:
+    """GET /api/repos — cached-first, and NEVER a fan-out on the request path.
+
+    Cold start (nothing on disk yet) reports `warming` so the UI can say so
+    instead of showing an empty grid that looks like "no repos".
+    """
+    with _REPOS_LOCK:
+        store = dict(_REPOS)
+    if not store:
+        store = _read_repos_store()
+    if not store:
+        return {"repos": [], "warming": True,
+                "note": "first snapshot in flight — this fills in on the next poll"}
+    store["age_s"] = int(time.time() - (store.get("generated_at") or 0))
+    return store
+
+
+def _repos_refresher():
+    """The single background walker. One tick per REPO_REFRESH_S, forever."""
+    while True:
+        try:
+            _refresh_repos()
+        except Exception:  # noqa: BLE001 — a thread that dies stops the lens
+            pass
+        time.sleep(REPO_REFRESH_S)
+
+
+# ----------------------------------------------------------------------------
 # files tab — read-only file browser rooted at the session's repo root
 #
 # The root derives SERVER-SIDE from the session transcript — the same cwd
@@ -4102,6 +4468,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/repos":
+            # Pure read: serves the background refresher's store off disk.
+            try:
+                return self._json(repos_payload())
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/files":
             q = parse_qs(u.query)
             sid = (q.get("id") or [""])[0]
@@ -4232,6 +4604,18 @@ class Handler(SimpleHTTPRequestHandler):
             return self._json({"error": "bad JSON"}, 400)
         # Route on the PATH alone: a POST may legitimately carry ?token=.
         route = urlparse(self.path).path
+
+        # The one FORCED walk. The refresher owns the cadence; this is the ⟳
+        # the operator presses when they have just merged something and do not
+        # want to wait out the tick. Registry included — a repo that appeared
+        # since boot should show up without a console restart.
+        if route == "/api/repos/refresh":
+            try:
+                store = _refresh_repos(force_registry=True)
+                return self._json({"ok": True, "count": len(store["repos"]),
+                                   "generated_at": store["generated_at"]})
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
 
         # Content search is session-independent: it matches the archive DB text
         # (assistant content_blocks + user prompts) scoped to the visible ids.
@@ -4533,6 +4917,10 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     threading.Thread(target=_queue_dispatcher, daemon=True,
                      name="reply-queue").start()
     _resume_batches()               # restart-safe batch queue (batch.json)
+    # Repos lens: ONE background walker keeps repos.json warm, so /api/repos is
+    # a disk read and a 30s poll never fans git out over 20 repositories.
+    threading.Thread(target=_repos_refresher, daemon=True,
+                     name="repos-refresh").start()
     if not no_ambient and os.environ.get("CSD_CONSOLE_AMBIENT", "1") != "0":
         _start_ambient()            # angles/tldr/timeline warm for active sessions
 

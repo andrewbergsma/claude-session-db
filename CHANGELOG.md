@@ -19,6 +19,17 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.18.0] - 2026-09-01
+
+### Added
+- **Runs tab.** The sidebar's top tabs are now Projects | Runs | Archive. A
+  run is an off-session summary session the console spawned (`summary_of`
+  set): it is work *about* a session, not a session of yours, so it lives on
+  its own tab with a running count (`n▶`) and never pads the Projects list or
+  its repo pills. Repo pills, search, sort and the tl;dr-all batch all
+  partition per tab; the Archive tab is the archived set as fetched, runs
+  included.
+
 ## [3.17.0] - 2026-09-01
 
 ### Added

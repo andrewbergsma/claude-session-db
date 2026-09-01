@@ -287,6 +287,17 @@ is measured against the remote-tracking refs already on disk. The header says so
 Trunk is `origin/HEAD`, then a `main`/`master`/`trunk` probe: guessing `main` is
 how a lens reports every branch in an older repo as unmerged.
 
+**The 📁 and ⎇ chips in the chat header are links into it.** Folder opens that
+session's repo in full; branch opens it focused on that branch. The detail view
+(also reached by clicking any grid card) carries every branch with ahead/behind
+vs the trunk, every worktree, **commits across all refs** (`log --all` with ref
+decoration — HEAD's log hides the parallel branches a repo view exists to show),
+and the PR listing with checks. When `origin` is GitHub, hashes / branches / PRs
+are **real hyperlinks** out; a non-GitHub remote renders plain text rather than a
+guessed URL. `GET /api/repo?id=<sid>` derives the root server-side from the
+transcript; `?root=` is admitted only for a root the registry already knows —
+a repo root IS a git command's cwd, so an unvalidated one is path injection.
+
 **The attention band is deliberately narrow**: uncommitted *tracked* edits, an
 unpushed trunk, or a worktree whose folder is gone. Untracked files and
 months-old unmerged branches are a working repo's normal resting state — banding

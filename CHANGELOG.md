@@ -19,6 +19,43 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.12.0] - 2026-09-01
+
+### Added
+- **The chat header's 📁 and ⎇ chips are now links into the repo.** Clicking the
+  folder chip opens that session's repository in full; clicking the branch chip
+  opens it focused on that branch (the row is highlighted and scrolled to).
+  Both are keyboard-reachable (Enter/Space, visible focus ring).
+- **Repo detail view** — the drill-down behind a chip or a grid card: every
+  branch with ahead/behind vs the trunk and its upstream, every worktree,
+  **commits across all refs** (`log --all`, with ref decoration and merge
+  commits marked `⑂`), and the repo's **pull requests** with state, checks
+  rollup and merge age.
+- **Real hyperlinks out to GitHub** when `origin` is GitHub — commit hashes to
+  `/commit/<sha>`, branches and ref badges to `/tree/<branch>`, PRs to their own
+  URL, and the repo name to its GitHub page. A non-GitHub remote renders plain
+  text: a guessed URL is worse than none.
+- Console `GET /api/repo?id=<sid>` / `?root=<root>` — the detail payload.
+
+### Notes
+- **The caller never names a path.** `id` derives the root server-side from the
+  transcript (the `/api/git` derivation); `root` is admitted only when the
+  registry already knows it, and an unknown root is refused with a 404 rather
+  than handed to git as a cwd. A repo root *is* a git command's working
+  directory, so an unvalidated one is a path-injection surface.
+- `log --all` rather than HEAD's log: HEAD's line hides exactly what a repo view
+  is for — the other branches moving in parallel.
+- `origin/HEAD` / `upstream/HEAD` are dropped from ref decorations. They are
+  symbolic aliases for the default branch, which is already in the list beside
+  them, and kept they render a badge linking at `/tree/HEAD` — a URL that means
+  nothing.
+
+### Fixed
+- `_branch_inventory` / `_worktree_inventory` resolve their caps at CALL time
+  rather than binding `REPO_BRANCH_CAP` / `REPO_WORKTREE_CAP` as def-time
+  defaults, which had quietly made both module constants decorative. Caught by
+  the test that asserts the detail view lifts the card's caps.
+
 ## [3.11.0] - 2026-09-01
 
 ### Added

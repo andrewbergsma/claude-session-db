@@ -34,6 +34,8 @@ Endpoints
                                    dirty, unmerged branches, live worktrees
                                    (cached-first; never fans out on request)
   POST /api/repos/refresh          force one registry+snapshot walk now
+  GET  /api/repo?id=<sid>|root=    one repo in full: every branch + worktree,
+                                   commits across all refs, and its PRs
   GET  /api/files?id=<sid>&path=   one directory listing under the session's
                                    repo root / cwd (read-only, root-confined)
   GET  /api/file?id=<sid>&path=    one file's text/metadata (raw=1: image bytes)
@@ -3788,7 +3790,7 @@ def _trunk_of(root: str):
     return None, "unresolved"
 
 
-def _branch_inventory(root: str, trunk: str | None):
+def _branch_inventory(root: str, trunk: str | None, cap: int | None = None):
     """Every local branch with ahead/behind vs the trunk, newest commit first.
 
     ONE git call: for-each-ref's %(ahead-behind:<trunk>) atom does the whole
@@ -3797,6 +3799,7 @@ def _branch_inventory(root: str, trunk: str | None):
     so a non-zero rc retries without it and reports counts as unknown instead
     of losing the branch list.
     """
+    cap = REPO_BRANCH_CAP if cap is None else cap
     fmt = ("%(refname:short)" + _FS + "%(committerdate:iso-strict)" + _FS
            + "%(objectname:short)" + _FS + "%(upstream:short)" + _FS
            + "%(contents:subject)")
@@ -3825,16 +3828,17 @@ def _branch_inventory(root: str, trunk: str | None):
     # Surface order: the trunk, then branches carrying unmerged work, then the
     # rest — a 40-branch repo's interesting rows are never below the cap.
     rows.sort(key=lambda b: (not b["is_trunk"], -(b["ahead"] or 0)))
-    return rows[:REPO_BRANCH_CAP], total, None
+    return rows[:cap], total, None
 
 
-def _worktree_inventory(root: str):
+def _worktree_inventory(root: str, cap: int | None = None):
     """Linked worktrees for the repo: path, branch, and whether it still exists.
 
     `worktree list` reports what .git/worktrees records, which is exactly the
     point — a /tmp worktree the machine has since cleaned still has an entry
     until someone prunes it, and that gap is worth seeing.
     """
+    cap = REPO_WORKTREE_CAP if cap is None else cap
     rc, out = _git(["worktree", "list", "--porcelain"], root)
     if rc != 0:
         return [], 0
@@ -3858,7 +3862,7 @@ def _worktree_inventory(root: str):
             continue
         t["exists"] = Path(t["path"]).is_dir()
         linked.append(t)
-    return linked[:REPO_WORKTREE_CAP], len(linked)
+    return linked[:cap], len(linked)
 
 
 def repo_snapshot(root: str) -> dict:
@@ -3912,6 +3916,126 @@ def repo_snapshot(root: str) -> dict:
         "took_ms": int((time.time() - started) * 1000),
         "checked_at": started,
     }
+
+
+# ---- repo detail: one repo, everything ------------------------------------
+# The grid card is a glance; this is the drill-down behind the chat header's
+# 📁 / ⎇ chips. Same doctrine — read-only, no fetch — widened to the whole
+# repo: every branch, every worktree, recent commits ACROSS ALL REFS (not just
+# HEAD's line, which hides the parallel branches that are the point), and the
+# PR listing /api/git already knows how to fetch.
+#
+# The caller NEVER names a path. `id` resolves through the transcript (the
+# /api/git derivation); `root` is accepted only when it is already in the
+# registry. A repo root is a git command's cwd, so an unvalidated one is a
+# path-injection surface, and the console's posture everywhere else is that no
+# request parameter can move a root.
+REPO_DETAIL_LOG_N = 40
+
+
+def _web_url(root: str):
+    """The repo's GitHub web base, or None — for linking commits/branches out.
+
+    Handles both remote spellings (scp-style `git@host:owner/repo.git` and
+    `https://host/owner/repo.git`). Anything that is not GitHub returns None
+    rather than a guessed URL: a dead link is worse than a plain hash.
+    """
+    rc, url = _git(["remote", "get-url", "origin"], root)
+    if rc != 0 or not url.strip():
+        return None
+    u = url.strip()
+    if u.startswith("git@"):
+        host, _, path = u[4:].partition(":")
+    elif "://" in u:
+        rest = u.split("://", 1)[1]
+        if "@" in rest.split("/", 1)[0]:            # strip any userinfo
+            rest = rest.split("@", 1)[1]
+        host, _, path = rest.partition("/")
+    else:
+        return None
+    if "github" not in host:
+        return None
+    return f"https://{host}/{path[:-4] if path.endswith('.git') else path}"
+
+
+def _all_commits(root: str, n: int):
+    """Recent commits across ALL refs, with their ref decoration.
+
+    HEAD's log alone hides exactly what a repo view is for — the other branches
+    moving in parallel — so this is `log --all`, and %D carries the branch/tag
+    names so a merge is legible as a merge.
+    """
+    rc, out = _git(["log", "--all", f"-{n}", "--date-order",
+                    f"--format=%h{_FS}%s{_FS}%cI{_FS}%an{_FS}%D{_FS}%p"], root)
+    rows = []
+    for ln in (out.splitlines() if rc == 0 else []):
+        p = ln.split(_FS)
+        if len(p) < 6:
+            continue
+        # origin/HEAD and upstream/HEAD are SYMBOLIC aliases for the default
+        # branch, which is already in the list beside them. Kept, they render as
+        # a second badge linking at /tree/HEAD — a URL that means nothing.
+        refs = [r.strip() for r in p[4].split(",") if r.strip()
+                and not r.strip().endswith("/HEAD")]
+        rows.append({"hash": p[0], "subject": p[1], "when": p[2], "author": p[3],
+                     "refs": refs, "is_merge": len(p[5].split()) > 1})
+    return rows
+
+
+def repo_detail(root: str) -> dict:
+    """The full drill-down for one repo. Caller-validated root only."""
+    base = repo_snapshot(root)
+    if not base.get("ok"):
+        return base
+    trunk = base["trunk"]
+    # The card caps branches to keep a glance a glance; the detail is the one
+    # place that shows every branch, so re-read with the cap lifted.
+    branches, total, note = _branch_inventory(root, trunk, cap=10_000)
+    worktrees, wt_total = _worktree_inventory(root, cap=10_000)
+    base.update({
+        "detail": True,
+        "web": _web_url(root),
+        "branches": branches, "branch_total": total, "branch_note": note,
+        "worktrees": worktrees, "worktree_total": wt_total,
+        "commits": _all_commits(root, REPO_DETAIL_LOG_N),
+        "gh": _gh_prs(root, refresh=False),
+    })
+    # The oid payload is for commit->PR attribution, not for the wire.
+    if base["gh"].get("prs"):
+        base["gh"] = dict(base["gh"], prs=[
+            {k: v for k, v in p.items() if k not in ("oids", "subs")}
+            for p in base["gh"]["prs"]])
+    return base
+
+
+def repo_detail_payload(sid: str, root: str):
+    """(payload, code) for GET /api/repo — addressed by SESSION or by root.
+
+    `id` is the safe address: the root is derived server-side from the
+    transcript, exactly as /api/git does it. `root` exists for the grid's own
+    cards and is admitted only if the registry already knows it — a root that
+    is not in the registry is refused rather than handed to git as a cwd.
+    """
+    if sid:
+        path = find_session(sid)
+        if path is None:
+            return {"error": "session not found"}, 404
+        cwd = _session_cwd(path)
+        if not cwd:
+            return {"error": "no cwd recorded in this transcript"}, 404
+        resolved = _repo_toplevel(cwd)
+        if not resolved:
+            return {"error": f"{cwd} is not inside a git repository",
+                    "cwd": cwd}, 404
+        return repo_detail(resolved), 200
+    if not root:
+        return {"error": "id or root required"}, 400
+    known, _ = _repo_registry()
+    if root not in known:
+        known, _ = _repo_registry(force=True)   # a repo added since boot
+    if root not in known:
+        return {"error": "unknown repo root"}, 404
+    return repo_detail(root), 200
 
 
 def _read_repos_store() -> dict:
@@ -4465,6 +4589,16 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload, code = git_payload(
                     sid, refresh=(q.get("refresh") or ["0"])[0] == "1")
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/repo":
+            # Addressed by SESSION id (root derived server-side) or by a root
+            # the registry already knows. A caller-supplied path is never run.
+            q = parse_qs(u.query)
+            try:
+                payload, code = repo_detail_payload(
+                    (q.get("id") or [""])[0], (q.get("root") or [""])[0])
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)

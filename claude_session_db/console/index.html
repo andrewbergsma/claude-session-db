@@ -761,6 +761,9 @@
   .rcard { background:var(--surface); border:1px solid var(--border);
            border-radius:8px; padding:10px 12px 11px; font:12px var(--mono);
            display:flex; flex-direction:column; gap:7px; }
+  .rcard { cursor:pointer; }
+  .rcard:hover { border-color:var(--accent); }
+  .rcard:focus-visible { outline:1px solid var(--accent); outline-offset:1px; }
   .rcard.attn { border-color:#3d3524; }
   .rcard.bad  { border-color:var(--bad); }
   .rcard .rh { display:flex; align-items:baseline; gap:8px; }
@@ -793,6 +796,46 @@
   .rcard .last { color:var(--muted); font-size:11px; overflow:hidden;
                  text-overflow:ellipsis; white-space:nowrap; }
   .rcard .why { color:var(--bad); font-size:11px; }
+
+  .chip.lnk { cursor:pointer; }
+  .chip.lnk:hover { color:var(--ink); border-color:var(--accent); }
+  .chip.lnk:focus-visible { outline:1px solid var(--accent); outline-offset:1px; }
+
+  /* ---- repo detail: the drill-down behind a card / the header chips ---- */
+  #repodetail { display:none; flex:1; min-height:0; flex-direction:column; gap:10px;
+                overflow:auto; -webkit-overflow-scrolling:touch;
+                overscroll-behavior:contain; }
+  #repodetail.open { display:flex; }
+  #repos:has(#repodetail.open) #reposbody { display:none; }
+  #repodetail .dh { display:flex; gap:10px; align-items:baseline; flex-wrap:wrap;
+                    font:12px var(--mono); }
+  #repodetail .dh .back { cursor:pointer; color:var(--muted); }
+  #repodetail .dh .back:hover { color:var(--ink); }
+  #repodetail .dh .nm { font-size:14px; font-weight:600; color:var(--ink); }
+  #repodetail .dh .pth { color:var(--muted); font-size:11px; word-break:break-all; }
+  #repodetail a.ext { color:var(--accent); text-decoration:none; }
+  #repodetail a.ext:hover { text-decoration:underline; }
+  #repodetail .grp { border:1px solid var(--border); border-radius:8px;
+                     background:var(--surface); padding:9px 11px 10px; }
+  #repodetail .grp > h3 { font:11px var(--mono); color:var(--muted); font-weight:normal;
+                          letter-spacing:.06em; text-transform:uppercase;
+                          margin-bottom:6px; }
+  #repodetail table { border-collapse:collapse; width:100%; font:11.5px var(--mono); }
+  #repodetail td { padding:3px 8px 3px 0; border-bottom:1px solid var(--border);
+                   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #repodetail tr:last-child td { border-bottom:0; }
+  #repodetail td.w { width:100%; white-space:normal; color:var(--ink2); }
+  #repodetail td.num { text-align:right; }
+  #repodetail .ref { font-size:10px; padding:0 4px; border-radius:8px;
+                     border:1px solid var(--border); color:var(--ink2);
+                     margin-right:3px; }
+  #repodetail .ref.head { color:var(--good); border-color:#20402a; }
+  #repodetail .ref.rem  { color:var(--muted); }
+  #repodetail .mg { color:var(--purple); }
+  #repodetail .st-OPEN { color:var(--good); } #repodetail .st-MERGED { color:var(--purple); }
+  #repodetail .st-CLOSED { color:var(--muted); }
+  #repodetail .ck-pass { color:var(--good); } #repodetail .ck-fail { color:var(--bad); }
+  #repodetail .ck-pending { color:var(--warn); }
 
   /* topic dialog: a centered popover, above everything, own state (not polled) */
   #topicdlg { position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:60;
@@ -1289,6 +1332,7 @@
       <span class="x" onclick="closeRepos()">✕ close (Esc)</span>
     </div>
     <div id="reposbody"><div class="empty">loading…</div></div>
+    <div id="repodetail"></div>
   </div>
 
   <!-- file preview overlay (Files rail tab): fixed inset, quiet header, Esc closes -->
@@ -1481,6 +1525,7 @@ window.addEventListener("popstate", () => {
   if(document.getElementById("fileview").classList.contains("open")) return closeFileView(true);
   if(document.getElementById("mgmtdigest").classList.contains("open")) return closeMgmtDigest(true);
   if(mgmtOpen) return closeMgmt(true);
+  if(document.getElementById("repodetail").classList.contains("open")) return closeRepoDetail(true);
   if(reposOpen) return closeRepos(true);
   if(document.body.classList.contains("rail-open")) return closeRailSheet(true);
   if(document.body.classList.contains("navopen")) return closeNavDrawer(true);
@@ -2337,8 +2382,12 @@ function renderHeader(s){
     ${subhdr}
     <div class="chips">
       <span class="chip sid">${esc(s.session_id)}</span>
-      <span class="chip">📁 <b>${esc(folder)}</b></span>
-      ${s.branch?`<span class="chip br">⎇ ${esc(s.branch)}</span>`:""}
+      <span class="chip lnk" onclick="openRepoFor()" role="button" tabindex="0"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openRepoFor()}"
+            title="Open this repo: every branch, worktree, commit and PR">📁 <b>${esc(folder)}</b></span>
+      ${s.branch?`<span class="chip br lnk" onclick="openRepoFor('${esc(s.branch)}')" role="button" tabindex="0"
+            onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openRepoFor('${esc(s.branch)}')}"
+            title="Open this repo, focused on ${esc(s.branch)}">⎇ ${esc(s.branch)}</span>`:""}
       ${model}${ctx}
       <span class="chip">📖 <b>${s.counts.reads}</b> reads</span>
       <span class="chip">🔍 <b>${s.counts.searches}</b> searches</span>
@@ -4701,12 +4750,15 @@ function openRepos(){ reposOpen = true;
   document.getElementById("repos").classList.add("open"); ovOpen(); refreshRepos(true); }
 function closeRepos(fromPop){
   if(!reposOpen) return;
-  reposOpen = false;
+  reposOpen = false; closeRepoDetail();
   document.getElementById("repos").classList.remove("open");
   if(fromPop !== true) ovDone(); }
 
 document.addEventListener("keydown", e => {
-  if(e.key === "Escape" && reposOpen) closeRepos();
+  if(e.key !== "Escape" || !reposOpen) return;
+  if(document.getElementById("repodetail").classList.contains("open"))
+    closeRepoDetail();
+  else closeRepos();
 });
 
 async function refreshRepos(force){
@@ -4791,7 +4843,9 @@ function repoCard(r){
   const staleWt = (r.worktrees || []).some(w => !w.exists);
   const noisy = r.dirty || r.trunk_ahead || staleWt;
   const head = r.detached ? `detached @ ${esc(r.branch || "?")}` : esc(r.branch || "?");
-  return `<div class="rcard${noisy ? " attn" : ""}">
+  return `<div class="rcard${noisy ? " attn" : ""}" onclick="openRepoDetail('${esc(r.root)}')"
+       role="button" tabindex="0" title="Open ${esc(r.name)} in full"
+       onkeydown="if(event.key==='Enter'){openRepoDetail('${esc(r.root)}')}">
     <div class="rh"><span class="nm">${esc(r.name)}</span>
       <span class="tk">on ${head}</span></div>
     <div class="path">${esc(r.root)}</div>
@@ -4824,6 +4878,139 @@ function renderRepos(){
     + `(“behind” = behind your last fetch)` + (reposBusy ? " · refreshing…" : "");
   body.innerHTML = rs.length ? rs.map(repoCard).join("")
     : `<div class="empty">no repositories discovered</div>`;
+}
+
+/* ---------- repo detail: the drill-down behind a card / the 📁 ⎇ chips -------
+   Addressed by SESSION id from the chat header (the server derives the root
+   from the transcript, so the client never names a path) or by a root the
+   registry already knows, from a card. Everything GitHub can host — commits,
+   branches, PRs — is a real hyperlink when origin is GitHub, and plain text
+   when it is not; a guessed URL is worse than none. */
+let repoDetailRoot = null, repoFocusBranch = null;
+
+async function openRepoFor(branch){
+  if(!curId) return;
+  repoFocusBranch = branch || null;
+  if(!reposOpen){ reposOpen = true;
+    document.getElementById("repos").classList.add("open"); ovOpen();
+    refreshRepos(false); }
+  await loadRepoDetail(`/api/repo?id=${encodeURIComponent(curId)}`);
+}
+
+async function openRepoDetail(root){
+  repoFocusBranch = null;
+  await loadRepoDetail(`/api/repo?root=${encodeURIComponent(root)}`);
+}
+
+async function loadRepoDetail(url){
+  const pane = document.getElementById("repodetail");
+  if(!pane.classList.contains("open")){ pane.classList.add("open"); ovOpen(); }
+  pane.innerHTML = `<div class="empty">loading repo…</div>`;
+  try {
+    const d = await (await fetch(url)).json();
+    repoDetailRoot = d.root || null;
+    renderRepoDetail(d);
+  } catch(e){
+    pane.innerHTML = `<div class="empty">repo unavailable — ${esc(String(e))}</div>`;
+  }
+}
+
+function closeRepoDetail(fromPop){
+  const pane = document.getElementById("repodetail");
+  const wasOpen = pane.classList.contains("open");
+  pane.classList.remove("open");
+  pane.innerHTML = "";
+  repoDetailRoot = null; repoFocusBranch = null;
+  if(wasOpen && fromPop !== true) ovDone();
+}
+
+/* A ref decoration off `log --all`: HEAD and local branches read differently
+   from remote ones, and that difference is the whole "is it pushed" story. */
+function refBadge(r, web){
+  const rem = r.startsWith("origin/") || r.startsWith("upstream/");
+  const head = r.startsWith("HEAD");
+  const name = r.replace(/^HEAD -> /, "");
+  const cls = head ? "ref head" : rem ? "ref rem" : "ref";
+  const txt = head ? "HEAD → " + name : r;
+  if(web && !head && !r.startsWith("tag: "))
+    return `<a class="ext ${cls}" target="_blank" rel="noopener"
+      href="${esc(web)}/tree/${encodeURIComponent(name.replace(/^origin\//,""))}">${esc(txt)}</a>`;
+  return `<span class="${cls}">${esc(txt)}</span>`;
+}
+
+function renderRepoDetail(d){
+  const pane = document.getElementById("repodetail");
+  if(d.error){ pane.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  if(!d.ok){ pane.innerHTML =
+    `<div class="empty">${esc(d.name || d.root || "repo")} — ${esc(d.reason || "unreadable")}</div>`; return; }
+  const web = d.web;
+  const link = (href, txt, cls) => web
+    ? `<a class="ext ${cls||""}" target="_blank" rel="noopener" href="${esc(href)}">${esc(txt)}</a>`
+    : `<span class="${cls||""}">${esc(txt)}</span>`;
+
+  const brows = (d.branches || []).map(b => {
+    const focus = repoFocusBranch && b.name === repoFocusBranch;
+    return `<tr${focus ? ' style="background:var(--surface2)"' : ""}>
+      <td>${link(`${web}/tree/${encodeURIComponent(b.name)}`, b.name)}${b.is_trunk ? ' <span class="ref head">trunk</span>' : ""}</td>
+      <td class="num">${b.ahead === null ? "?" : (b.ahead ? "↑" + b.ahead : "")}</td>
+      <td class="num">${b.behind ? "↓" + b.behind : ""}</td>
+      <td>${b.upstream ? esc(b.upstream) : '<span style="color:var(--warn)">no upstream</span>'}</td>
+      <td class="w" title="${esc(b.subject || "")}">${esc(b.subject || "")}</td>
+      <td style="color:var(--muted)">${esc(repoAgo(b.when))}</td></tr>`;
+  }).join("");
+
+  const wrows = (d.worktrees || []).map(w => `<tr>
+      <td class="${w.exists ? "" : "ck-fail"}" title="${esc(w.path)}">${esc(w.path)}</td>
+      <td>${esc(w.branch || (w.detached ? "detached" : "?"))}</td>
+      <td>${esc(w.hash || "")}</td>
+      <td class="w">${w.exists ? "" : '<span class="ck-fail">folder gone — git worktree prune</span>'}</td>
+      </tr>`).join("");
+
+  const gh = d.gh || {};
+  const prs = gh.prs || [];
+  const prows = prs.map(p => `<tr>
+      <td>${p.url ? `<a class="ext" target="_blank" rel="noopener" href="${esc(p.url)}">#${esc(p.number)}</a>` : "#" + esc(p.number)}</td>
+      <td class="st-${esc(p.state)}">${esc(p.state)}${p.draft ? " (draft)" : ""}</td>
+      <td>${p.checks ? `<span class="ck-${esc(p.checks)}">${esc(p.checks)}</span>` : ""}</td>
+      <td>${esc(p.branch || "")}</td>
+      <td class="w" title="${esc(p.title || "")}">${esc(p.title || "")}</td>
+      <td style="color:var(--muted)">${p.merged_at ? esc(repoAgo(p.merged_at)) : ""}</td>
+      </tr>`).join("");
+  const prNote = gh.available === false
+    ? `<div style="color:var(--muted)">unavailable — ${esc(gh.reason || "?")}</div>` : "";
+
+  const crows = (d.commits || []).map(c => `<tr>
+      <td>${link(`${web}/commit/${encodeURIComponent(c.hash)}`, c.hash)}</td>
+      <td>${c.is_merge ? '<span class="mg" title="a merge commit — two parents">⑂</span>' : ""}</td>
+      <td>${(c.refs || []).map(r => refBadge(r, web)).join("")}</td>
+      <td class="w" title="${esc(c.subject)}">${esc(c.subject)}</td>
+      <td style="color:var(--muted)">${esc(c.author)}</td>
+      <td style="color:var(--muted)">${esc(repoAgo(c.when))}</td>
+      </tr>`).join("");
+
+  const grp = (title, inner) => inner
+    ? `<div class="grp"><h3>${title}</h3><table>${inner}</table></div>` : "";
+
+  pane.innerHTML = `
+    <div class="dh">
+      <span class="back" onclick="closeRepoDetail()">← all repos</span>
+      <span class="nm">${esc(d.name)}</span>
+      ${web ? `<a class="ext" target="_blank" rel="noopener" href="${esc(web)}">${esc(web.replace(/^https:\/\//,""))} ↗</a>`
+            : `<span style="color:var(--muted)">no GitHub remote</span>`}
+      <span>on ${esc(d.detached ? "detached " + (d.branch||"") : d.branch || "?")}</span>
+    </div>
+    <div class="dh"><span class="pth">${esc(d.root)}</span></div>
+    <div class="chips">${repoChips(d)}</div>
+    ${grp(`branches · ${d.branch_total}${d.trunk ? " · ahead/behind " + esc(d.trunk) : ""}`, brows)}
+    ${d.worktree_total ? grp(`worktrees · ${d.worktree_total}`, wrows) : ""}
+    <div class="grp"><h3>pull requests${prs.length ? " · " + prs.length : ""}</h3>
+      ${prows ? `<table>${prows}</table>` : (prNote || '<div style="color:var(--muted)">none</div>')}</div>
+    ${grp(`commits · latest ${(d.commits||[]).length} across all branches`, crows)}
+  `;
+  if(repoFocusBranch){
+    const row = pane.querySelector('tr[style]');
+    if(row) row.scrollIntoView({block:"center"});
+  }
 }
 
 setInterval(() => { if(reposOpen && !document.hidden) refreshRepos(false); }, 30000);

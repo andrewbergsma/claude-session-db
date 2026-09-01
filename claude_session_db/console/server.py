@@ -3959,27 +3959,45 @@ def _web_url(root: str):
 
 
 def _all_commits(root: str, n: int):
-    """Recent commits across ALL refs, with their ref decoration.
+    """Recent commits across ALL refs, decorated, each marked pushed or not.
 
     HEAD's log alone hides exactly what a repo view is for — the other branches
     moving in parallel — so this is `log --all`, and %D carries the branch/tag
     names so a merge is legible as a merge.
+
+    `pushed` is the difference between a commit GitHub can show and one that
+    exists only on this machine. One extra call (`rev-list --all --not
+    --remotes` = everything reachable from NO remote ref) answers it for the
+    whole page, and the UI links only what is actually there — an unpushed hash
+    linked to /commit/<sha> is a 404 wearing a hyperlink.
     """
+    rc_u, unpushed = _git(["rev-list", "--all", "--not", "--remotes"], root)
+    local_only = set(unpushed.split()) if rc_u == 0 else set()
     rc, out = _git(["log", "--all", f"-{n}", "--date-order",
-                    f"--format=%h{_FS}%s{_FS}%cI{_FS}%an{_FS}%D{_FS}%p"], root)
+                    f"--format=%h{_FS}%H{_FS}%s{_FS}%cI{_FS}%an{_FS}%D{_FS}%p"],
+                   root)
     rows = []
     for ln in (out.splitlines() if rc == 0 else []):
         p = ln.split(_FS)
-        if len(p) < 6:
+        if len(p) < 7:
             continue
         # origin/HEAD and upstream/HEAD are SYMBOLIC aliases for the default
         # branch, which is already in the list beside them. Kept, they render as
         # a second badge linking at /tree/HEAD — a URL that means nothing.
-        refs = [r.strip() for r in p[4].split(",") if r.strip()
+        refs = [r.strip() for r in p[5].split(",") if r.strip()
                 and not r.strip().endswith("/HEAD")]
-        rows.append({"hash": p[0], "subject": p[1], "when": p[2], "author": p[3],
-                     "refs": refs, "is_merge": len(p[5].split()) > 1})
+        rows.append({"hash": p[0], "subject": p[2], "when": p[3], "author": p[4],
+                     "refs": refs, "is_merge": len(p[6].split()) > 1,
+                     # rev-list is empty when it fails, which would mark
+                     # everything pushed; unknown must not read as "linkable".
+                     "pushed": (p[1] not in local_only) if rc_u == 0 else None})
     return rows
+
+
+def _remotes(root: str):
+    """Remote names, so the UI can tell a remote-tracking ref from a local one."""
+    rc, out = _git(["remote"], root)
+    return [r for r in out.split()] if rc == 0 else []
 
 
 def repo_detail(root: str) -> dict:
@@ -3998,6 +4016,7 @@ def repo_detail(root: str) -> dict:
         "branches": branches, "branch_total": total, "branch_note": note,
         "worktrees": worktrees, "worktree_total": wt_total,
         "commits": _all_commits(root, REPO_DETAIL_LOG_N),
+        "remotes": _remotes(root),
         "gh": _gh_prs(root, refresh=False),
     })
     # The oid payload is for commit->PR attribution, not for the wire.

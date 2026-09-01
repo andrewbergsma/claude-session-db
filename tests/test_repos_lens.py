@@ -197,13 +197,14 @@ def test_commits_span_all_refs_and_flag_merges(repo):
 
 def test_symbolic_head_refs_are_dropped(repo, monkeypatch):
     """origin/HEAD is an alias for the default branch — a badge for it links nowhere."""
-    calls = {}
+    real = S._git          # captured BEFORE the patch, or the stub calls itself
 
     def fake(args, cwd):
         if args[0] == "log":
-            return 0, S._FS.join(["abc1234", "s", "2026-01-01T00:00:00Z", "a",
+            return 0, S._FS.join(["abc1234", "a" * 40, "s",
+                                  "2026-01-01T00:00:00Z", "a",
                                   "HEAD -> main, origin/main, origin/HEAD", "p1"])
-        return S._git(args, cwd)
+        return real(args, cwd)
     monkeypatch.setattr(S, "_git", fake)
     refs = S._all_commits(str(repo), 1)[0]["refs"]
     assert refs == ["HEAD -> main", "origin/main"]
@@ -230,3 +231,40 @@ def test_detail_lifts_the_card_caps(repo, monkeypatch):
     assert len(card["branches"]) == 1 and card["branch_total"] == 4
     detail, code = S.repo_detail_payload("", str(repo))
     assert code == 200 and len(detail["branches"]) == 4   # detail shows all
+
+
+# ---- what is actually on the remote ----------------------------------------
+def test_unpushed_commits_are_marked(repo):
+    """A hash linked to /commit/<sha> before it is pushed is a 404 in a link."""
+    cs = S._all_commits(str(repo), 5)
+    assert all(c["pushed"] for c in cs)         # the fixture pushed `first`
+
+    (repo / "n.txt").write_text("n\n")
+    git(repo, "add", "-A"); git(repo, "commit", "-qm", "local only")
+    cs = {c["subject"]: c for c in S._all_commits(str(repo), 5)}
+    assert cs["local only"]["pushed"] is False
+    assert cs["first"]["pushed"] is True
+
+
+def test_push_state_unknown_is_not_pushed_true(repo, monkeypatch):
+    """rev-list failing must not read as 'everything is pushed'."""
+    real = S._git
+
+    def fake(args, cwd):
+        if args[0] == "rev-list" and "--remotes" in args:
+            return None, ""                     # timeout / error
+        return real(args, cwd)
+    monkeypatch.setattr(S, "_git", fake)
+    assert all(c["pushed"] is None for c in S._all_commits(str(repo), 5))
+
+
+def test_local_only_branch_has_no_upstream(repo):
+    git(repo, "checkout", "-q", "-b", "feat/with-slash")
+    rows, _, _ = S._branch_inventory(str(repo), "main")
+    by = {b["name"]: b for b in rows}
+    assert by["feat/with-slash"]["upstream"] is None   # UI must not link it
+    assert by["main"]["upstream"] == "origin/main"
+
+
+def test_remotes_listed(repo):
+    assert S._remotes(str(repo)) == ["origin"]

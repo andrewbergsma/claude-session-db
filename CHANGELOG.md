@@ -19,6 +19,31 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.12.1] - 2026-09-01
+
+### Fixed
+- **GitHub links produced 404s.** Two causes, both now gone:
+  - `encodeURIComponent` escaped the separator in a branch name, so
+    `feat/console-repos-lens` became `/tree/feat%2Fconsole-repos-lens` and
+    GitHub errored. A branch name is a *path*, not a path segment; `ghPath()`
+    encodes each segment and keeps the slashes.
+  - Refs and commits were linked whether or not they existed on the remote. A
+    local-only branch has no GitHub page and an unpushed commit has no
+    `/commit/<sha>` — both were 404s wearing a hyperlink.
+- Linking is now evidence-based: a **branch** links only when it tracks a
+  remote (and to the *upstream's* name, which is not always the local one); a
+  **ref badge** links only when it is remote-tracking; a **commit** links only
+  when `rev-list --all --not --remotes` says it is reachable from a remote.
+  Unpushed commits carry a `↑` marker, and unlinked items explain themselves on
+  hover — more useful than a dead link.
+- Group headings link at the repo-level pages (`/branches`, `/commits`,
+  `/pulls`), which are valid regardless of push state.
+- `rev-list` failing degrades push state to **unknown**, never to "pushed" —
+  an errored probe must not license a link.
+- `test_symbolic_head_refs_are_dropped` recursed into its own stub once
+  `_all_commits` gained a second git call; it now captures the real `_git`
+  before patching.
+
 ## [3.12.0] - 2026-09-01
 
 ### Added

@@ -19,6 +19,19 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.15.1] - 2026-09-01
+
+### Fixed
+- **Tool rows expanded to the command, never the result.** A Bash row's
+  caret re-showed the command text; the tool_result — already parsed
+  server-side for its byte count — never reached the client. Now every tool
+  row with a result expands to it: `GET /api/tool_result?id=&tid=` returns
+  one result's text verbatim (no truncation; a result absent from the
+  transcript reports "not recorded", distinct from empty output), fetched
+  lazily on expand and memoized per tool_use id so the polled session payload
+  never carries result bodies. Bash rows show command then result; error
+  results carry a red rail.
+
 ## [3.15.0] - 2026-09-01
 
 ### Changed

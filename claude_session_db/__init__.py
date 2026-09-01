@@ -3,4 +3,4 @@
 # THE canonical version. Everything reads this: pyproject (hatch `dynamic`),
 # `csd --version`, and the console's version chip. Semver — see CHANGELOG.md
 # for the bump discipline (minor = feature batch, patch = fixes).
-__version__ = "3.15.0"
+__version__ = "3.15.1"

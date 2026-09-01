@@ -443,6 +443,14 @@
           border:1px solid var(--border); border-radius:6px; font:11.5px/1.5 var(--mono);
           color:var(--ink); white-space:pre-wrap; word-break:break-word;
           max-height:40vh; overflow:auto; }
+  .tout { margin:2px 0 4px 18px; padding:8px 10px; background:var(--surface2, var(--bg));
+          border:1px solid var(--border); border-left:2px solid var(--muted); border-radius:6px;
+          font:11.5px/1.5 var(--mono); color:var(--ink2, var(--ink)); white-space:pre-wrap;
+          word-break:break-word; max-height:40vh; overflow:auto; }
+  .tout.err { border-left-color:#f85149; }
+  .tout-h { margin:6px 0 0 18px; font:10.5px var(--mono); color:var(--muted);
+            letter-spacing:.04em; text-transform:uppercase; }
+  .tout-meta { color:var(--muted); font-style:italic; }
 
   /* inline kmcp read marker */
   .read { display:flex; align-items:center; gap:8px; padding:4px 10px; cursor:pointer;
@@ -2637,10 +2645,35 @@ const TOOL_GLYPH = {Bash:"$", Write:"✎", Edit:"✎", Read:"📄", Skill:"◆",
 /* Command rows expand to the full command; the expanded set is tracked by
    tool_use id so a 3s stream re-render never collapses an open one. */
 let expandedCmds = new Set();
+/* tool_result bodies are fetched lazily on expand (GET /api/tool_result) and
+   memoized by tool_use id — the polled session payload never carries them. A
+   pending fetch renders as "loading…"; a failed one as its reason, never as
+   empty output (an empty result IS shown as empty, labelled). */
+const toolOut = new Map();   // tid -> {text, chars, is_error, recorded} | {loading} | {error}
 function toggleCmd(id){
   if(!id) return;
-  if(expandedCmds.has(id)) expandedCmds.delete(id); else expandedCmds.add(id);
+  if(expandedCmds.has(id)) expandedCmds.delete(id);
+  else { expandedCmds.add(id); fetchToolOut(id); }
   if(curSession) renderStream(curSession);
+}
+async function fetchToolOut(tid){
+  if(!curSession || toolOut.has(tid)) return;
+  toolOut.set(tid, {loading:true});
+  try{
+    const r = await fetch(`/api/tool_result?id=${encodeURIComponent(curSession)}&tid=${encodeURIComponent(tid)}`);
+    const d = await r.json();
+    toolOut.set(tid, r.ok ? d : {error: d.error || `HTTP ${r.status}`});
+  }catch(e){ toolOut.set(tid, {error: String(e)}); }
+  if(curSession && expandedCmds.has(tid)) renderStream(curSession);
+}
+function toolOutBlock(tid){
+  const o = toolOut.get(tid);
+  if(!o) return "";
+  if(o.loading) return `<div class="tout tout-meta">loading result…</div>`;
+  if(o.error) return `<div class="tout tout-meta">result unavailable — ${esc(o.error)}</div>`;
+  const head = `<div class="tout-h">${o.is_error?"✗ result (error)":"↳ result"} · ${kb(o.chars)}</div>`;
+  if(!o.text) return head + `<div class="tout tout-meta">${o.recorded?"(empty output)":"(not recorded)"}</div>`;
+  return head + `<pre class="tout${o.is_error?" err":""}">${esc(o.text)}</pre>`;
 }
 
 /* Compact elapsed since a turn timestamp (terminal-style "2m24s"). */
@@ -2669,16 +2702,20 @@ function toolRow(t, ts, live){
     else if(!t.pending)
       stat = `<span class="tdone" title="completed">✓</span>`;
   }
-  // Bash rows expand to the full, untruncated command text.
+  // Any tool row with an id expands: Bash rows to the full, untruncated
+  // command text, and every row to its tool_result (fetched on expand).
   const hasCmd = t.name === "Bash" && t.cmd;
-  const open = hasCmd && t.id && expandedCmds.has(t.id);
-  const caret = hasCmd ? `<span class="tcaret" title="${open?"collapse":"show full command"}">${open?"▾":"▸"}</span>` : "";
+  const canOpen = !!t.id && (hasCmd || t.chars != null);
+  const open = canOpen && expandedCmds.has(t.id);
+  const caret = canOpen ? `<span class="tcaret" title="${open?"collapse":(hasCmd?"show command + result":"show result")}">${open?"▾":"▸"}</span>` : "";
   const label = t.child
     ? `<span class="tlabel agentlink" onclick="openSession('${esc(t.child)}')"
          title="open subagent transcript">${esc(t.label||t.name)}${t.status?` · ${esc(t.status)}`:""} ↗</span>`
     : `<span class="tlabel">${esc(t.label||t.name)}</span>`;
-  const click = hasCmd ? ` class="tline cmd" onclick="toggleCmd('${esc(t.id)}')"` : ` class="tline"`;
-  const cmdBlock = open ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "";
+  const click = canOpen ? ` class="tline cmd" onclick="toggleCmd('${esc(t.id)}')"` : ` class="tline"`;
+  const cmdBlock = open
+    ? (hasCmd ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "") + toolOutBlock(t.id)
+    : "";
   const crCtl = t.id ? crc("t:" + t.id) : "";
   return `<div class="trow${t.id ? crCls("t:" + t.id) : ""}"><div${click}>${crCtl}<span class="tg">${glyph}</span>${caret}
     ${label}${stat}${err}${size}</div>${det}${cmdBlock}</div>`;

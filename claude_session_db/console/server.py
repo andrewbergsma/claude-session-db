@@ -3551,6 +3551,273 @@ def _attribute_commits_to_prs(snap: dict, gh: dict):
         last["pr"] = find(last)
 
 
+# ---- commit grouping: which BRANCH each commit is part of -------------------
+# A flat `git log` interleaves every branch that ever landed, so a rail row can
+# say WHAT happened but never *as part of what*. Grouping is deterministic code,
+# never a model: git already records the answer.
+#
+#   1. Trunk is RESOLVED (_trunk_of: origin/HEAD, then a main/master/trunk
+#      probe), never guessed — the same rule the repos lens follows.
+#   2. `log --first-parent` IS a branch's own line. Every commit on it belongs
+#      to the branch it was logged from; that claim wins over every other rule.
+#   3. Each merge M on that line pulled in a side branch, and `rev-list M^1..M^2`
+#      enumerates exactly the commits it carried. The group's NAME comes from
+#      the PR whose oids cover them (preferred — it survives `--delete-branch`),
+#      else from M's subject, else "(merged branch)".
+#   4. A commit still unclaimed but reachable from a live local branch belongs
+#      to that branch (`trunk..branch`); one exclusive to several goes to the
+#      branch whose tip is nearest, listed once, never duplicated.
+#   5. Everything left stays with the current branch.
+#
+# The request path never fans out: the git side is a per-root TOPOLOGY cached on
+# the same TTL as the snapshot, and grouping a commit list against it is pure set
+# arithmetic. Every rev-list is bounded, every call goes through _git()
+# (read-only, --no-optional-locks, timeout), and the whole thing is failure-
+# isolated — an underivable topology returns a `group_note` and the caller falls
+# back to the flat list it already ships. It never raises.
+
+GROUP_FIRST_PARENT_N = 200   # commits of the current branch's own line scanned
+GROUP_REVLIST_CAP = 200      # side commits enumerated per merge / per branch
+GROUP_MERGE_CAP = 20         # merges expanded per topology
+GROUP_BRANCH_CAP = 15        # live local branches probed for orphaned commits
+# A topology is ~2 + one rev-list per merge and per candidate branch — the most
+# expensive read in the rail. It is also the slowest-changing thing in the repo
+# (the working tree moves every keystroke; the branch shape moves when you
+# merge), so it gets its own TTL, well above the snapshot's, and ⟳ busts it.
+TOPO_TTL_S = 90
+
+_TOPO_CACHE: dict[str, tuple] = {}   # repo root -> (expires_at, topology)
+
+_MERGE_PR_RE = re.compile(r"^Merge pull request #\d+ from [^/\s]+/(\S+)")
+_MERGE_BRANCH_RE = re.compile(r"^Merge (?:remote-tracking )?branch '([^']+)'")
+
+
+def _merged_branch_from_subject(subject: str):
+    """The side-branch name a merge commit's subject names, or None.
+
+    Covers both spellings git and gh produce: `Merge pull request #N from
+    owner/branch`, and `Merge branch 'x'` / `Merge remote-tracking branch
+    'origin/x'`. A remote prefix is stripped so `origin/feat/x` and `feat/x`
+    are one group, not two.
+    """
+    s = subject or ""
+    m = _MERGE_PR_RE.match(s)
+    if m:
+        return m.group(1)
+    m = _MERGE_BRANCH_RE.match(s)
+    if m:
+        name = m.group(1)
+        head, _, rest = name.partition("/")
+        return rest if rest and head in ("origin", "upstream") else name
+    return None
+
+
+def _head_branch_of(root: str):
+    rc, br = _git(["rev-parse", "--abbrev-ref", "HEAD"], root)
+    name = br.strip() if rc == 0 else ""
+    return None if not name or name == "HEAD" else name
+
+
+def _git_topology(root: str, head_branch: str | None = None) -> dict:
+    """The branch shape of one repo: the current line, its merges, live branches.
+
+    Uncached and bounded. Partial failure fills `note` rather than raising — a
+    topology that lost its branch list still groups the merges.
+    """
+    trunk, _ = _trunk_of(root)
+    topo = {"trunk": trunk, "head_branch": head_branch, "line": [],
+            "merges": [], "branches": [], "worktrees": {},
+            "remote_names": [], "note": None}
+
+    rc, out = _git(["log", "--first-parent", f"-{GROUP_FIRST_PARENT_N}",
+                    f"--format=%h{_FS}%H{_FS}%p{_FS}%s"], root)
+    if rc != 0:
+        topo["note"] = "the current branch's first-parent line is unreadable"
+        return topo
+    merge_refs = []
+    for ln in out.splitlines():
+        p = ln.split(_FS, 3)
+        if len(p) < 4:
+            continue
+        topo["line"].append(p[0])
+        if len(p[2].split()) > 1:
+            merge_refs.append((p[0], p[1], p[3]))
+
+    # Worktrees and remote refs: one call each, for the group headers. A branch
+    # is linked out to GitHub only when a remote actually has it — a local-only
+    # name linked at /tree/<name> is a 404 wearing a hyperlink.
+    for w in _worktree_inventory(root, cap=10_000)[0]:
+        if w.get("branch"):
+            topo["worktrees"].setdefault(w["branch"], w.get("path"))
+    rc_r, refs = _git(["for-each-ref", "refs/remotes",
+                       "--format=%(refname:short)"], root)
+    if rc_r == 0:
+        topo["remote_names"] = [r for r in refs.split()
+                                if not r.endswith("/HEAD")]
+
+    for mh, mfull, subj in merge_refs[:GROUP_MERGE_CAP]:
+        rc_s, side = _git(["rev-list", f"--max-count={GROUP_REVLIST_CAP}",
+                           f"{mfull}^1..{mfull}^2"], root)
+        if rc_s != 0:
+            continue
+        full = [s for s in side.split() if s]
+        if not full:
+            continue
+        topo["merges"].append({"hash": mh, "subject": subj,
+                               "name": _merged_branch_from_subject(subj),
+                               "side": full})
+
+    if trunk:
+        branches, _, note = _branch_inventory(root, trunk, cap=10_000)
+        if note:
+            topo["note"] = note
+        # Only a branch carrying work the trunk lacks can own an unclaimed
+        # commit; the rest cost a rev-list to learn nothing.
+        cands = [b for b in branches
+                 if not b["is_trunk"] and b["name"] != head_branch
+                 and (b["ahead"] is None or b["ahead"] > 0)][:GROUP_BRANCH_CAP]
+        for b in cands:
+            rc_b, out_b = _git(["rev-list", f"--max-count={GROUP_REVLIST_CAP}",
+                                f"{trunk}..{b['name']}"], root)
+            if rc_b != 0:
+                continue
+            topo["branches"].append({
+                "name": b["name"], "ahead": b["ahead"], "behind": b["behind"],
+                "upstream": b["upstream"],
+                "hashes": [h for h in out_b.split() if h]})
+    return topo
+
+
+def _cached_topology(root: str, refresh: bool) -> dict:
+    now = time.time()
+    with _GIT_LOCK:
+        hit = _TOPO_CACHE.get(root)
+        if hit and not refresh and hit[0] > now:
+            return hit[1]
+    topo = _git_topology(root, _head_branch_of(root))
+    with _GIT_LOCK:
+        _TOPO_CACHE[root] = (now + TOPO_TTL_S, topo)
+    return topo
+
+
+def _remote_name_for(topo: dict, branch: str | None):
+    """The branch's name ON a remote (so the UI may link it), else None.
+
+    origin wins when several remotes carry the same branch; a branch no remote
+    has returns None and renders as plain text.
+    """
+    if not branch:
+        return None
+    matches = [r.partition("/") for r in (topo.get("remote_names") or [])]
+    for rem, _, rest in matches:
+        if rest == branch and rem == "origin":
+            return rest
+    for _, _, rest in matches:
+        if rest == branch:
+            return rest
+    return None
+
+
+def group_commits(commits, topo: dict, gh: dict | None = None):
+    """(groups, note) — a flat commit list partitioned by its owning branch.
+
+    Pure set arithmetic over a cached topology: no git, no exceptions. Each
+    commit dict is carried BY REFERENCE, so whatever the caller already stamped
+    on it (pr, pushed, refs, is_merge) rides along untouched and the flat list
+    and the groups can never disagree about a commit.
+
+    Groups come back in date order of their newest commit, the current branch's
+    own line always first.
+    """
+    try:
+        return _group_commits(commits, topo, gh)
+    except Exception as exc:                      # never break the rail
+        return [], f"grouping failed: {type(exc).__name__}: {exc}"[:200]
+
+
+def _group_commits(commits, topo, gh):
+    rows = [c for c in (commits or []) if c.get("hash")]
+    if not rows:
+        return [], topo.get("note")
+    head_name = topo.get("head_branch") or topo.get("trunk") or "HEAD"
+
+    # Rule 2: the first-parent line is the current branch's, full stop. Only
+    # what is NOT on it is up for grabs.
+    on_line = set(topo.get("line") or ())
+    pool = {c["hash"] for c in rows if c["hash"] not in on_line}
+    lens = sorted({len(h) for h in pool})
+    best: dict[str, tuple] = {}      # hash -> (priority, distance, group key)
+    meta: dict[str, dict] = {}       # group key -> header fields
+
+    def claim(full_hashes, key, header, priority):
+        """Offer a group's commits to the pool; the nearest owner wins each hash.
+
+        Snapshot hashes are abbreviated (%h) and these are full oids, so the
+        match is a prefix test. `priority` ranks the RULE (a merge's side list
+        is definitive, a branch's reachability is not) and `distance` the
+        position from the branch tip, so a commit on two branches lands under
+        the nearer one — exactly once.
+        """
+        used = False
+        for i, f in enumerate(full_hashes):
+            h = next((f[:n] for n in lens if f[:n] in pool), None)
+            if h is None:
+                continue
+            used = True
+            cur = best.get(h)
+            if cur is None or (priority, i) < cur[:2]:
+                best[h] = (priority, i, key)
+        if used:
+            meta.setdefault(key, header)
+
+    prs = (gh or {}).get("prs") or []
+    for m in topo.get("merges") or ():
+        side = set(m.get("side") or ())
+        pr = next((p for p in prs
+                   if any(o in side for o in (p.get("oids") or ()))), None)
+        # headRefName first: it is the only name that survives --delete-branch.
+        name = ((pr.get("branch") if pr else None) or m.get("name")
+                or "(merged branch)")
+        claim(m.get("side") or [], f"merge:{m['hash']}", {
+            "branch": name, "merged": True, "merge_hash": m["hash"],
+            "pr": _pr_ref(pr) if pr else None,
+            "worktree": (topo.get("worktrees") or {}).get(name),
+            "remote_name": _remote_name_for(topo, name),
+            "ahead": None, "behind": None}, 0)
+
+    for b in topo.get("branches") or ():
+        claim(b.get("hashes") or [], f"branch:{b['name']}", {
+            "branch": b["name"], "merged": False, "merge_hash": None,
+            "pr": None,
+            "worktree": (topo.get("worktrees") or {}).get(b["name"]),
+            "remote_name": (_remote_name_for(topo, b["name"])
+                            or (b["upstream"].partition("/")[2]
+                                if b.get("upstream") else None)),
+            "ahead": b.get("ahead"), "behind": b.get("behind")}, 1)
+
+    head_key = "\x00head"
+    meta[head_key] = {
+        "branch": head_name, "merged": False, "merge_hash": None, "pr": None,
+        "worktree": (topo.get("worktrees") or {}).get(head_name),
+        "remote_name": _remote_name_for(topo, head_name),
+        "ahead": None, "behind": None}
+
+    owner = {h: v[2] for h, v in best.items()}
+    buckets: dict[str, list] = {}
+    for c in rows:                                # input order IS date order
+        buckets.setdefault(owner.get(c["hash"], head_key), []).append(c)
+
+    groups = []
+    for key, items in buckets.items():
+        groups.append({**meta[key], "current": key == head_key,
+                       "count": len(items), "commits": items,
+                       "_newest": _iso_epoch(items[0].get("when")) or 0})
+    groups.sort(key=lambda g: (not g["current"], -g["_newest"]))
+    for g in groups:
+        g.pop("_newest")
+    return groups, topo.get("note")
+
+
 def git_payload(sid: str, refresh: bool = False):
     """(payload, code) for GET /api/git — repo status through the session lens."""
     path = find_session(sid)
@@ -3584,11 +3851,17 @@ def git_payload(sid: str, refresh: bool = False):
     snap["session_window"] = window
 
     if snap.get("repo"):
-        gh = _gh_prs(snap["repo"]["root"], refresh)
+        root = snap["repo"]["root"]
+        gh = _gh_prs(root, refresh)
         # only stamp pr/None on commits when a real listing was fetched —
         # otherwise "no PR" would be indistinguishable from "gh unavailable"
         if gh.get("available") and not gh.get("error"):
             _attribute_commits_to_prs(snap, gh)
+        # Group AFTER attribution: the group carries the very same commit dicts
+        # the flat list does, so the `pr` stamp rides along by reference.
+        window["groups"], window["group_note"] = group_commits(
+            window["commits"], _cached_topology(root, refresh), gh)
+        snap["web"] = _web_url_cached(root)
         # ship the listing without the oid payload; flag the session branch's PR
         branch = snap["repo"].get("branch")
         out = dict(gh)
@@ -3919,6 +4192,21 @@ def _web_url(root: str):
     return f"https://{host}/{path[:-4] if path.endswith('.git') else path}"
 
 
+_WEB_CACHE: dict[str, str | None] = {}
+
+
+def _web_url_cached(root: str):
+    """_web_url memoized for the poll path — a remote URL does not change.
+
+    /api/git is polled; the repo detail is opened. Only the former needs this,
+    and an unbounded dict keyed by repo root is bounded by how many repos the
+    operator has.
+    """
+    if root not in _WEB_CACHE:
+        _WEB_CACHE[root] = _web_url(root)
+    return _WEB_CACHE[root]
+
+
 def _all_commits(root: str, n: int):
     """Recent commits across ALL refs, decorated, each marked pushed or not.
 
@@ -3971,15 +4259,23 @@ def repo_detail(root: str) -> dict:
     # place that shows every branch, so re-read with the cap lifted.
     branches, total, note = _branch_inventory(root, trunk, cap=10_000)
     worktrees, wt_total = _worktree_inventory(root, cap=10_000)
+    commits = _all_commits(root, REPO_DETAIL_LOG_N)
+    gh = _gh_prs(root, refresh=False)
     base.update({
         "detail": True,
         "web": _web_url(root),
         "branches": branches, "branch_total": total, "branch_note": note,
         "worktrees": worktrees, "worktree_total": wt_total,
-        "commits": _all_commits(root, REPO_DETAIL_LOG_N),
+        "commits": commits,
         "remotes": _remotes(root),
-        "gh": _gh_prs(root, refresh=False),
+        "gh": gh,
     })
+    # `log --all` is the most interleaved list in the console — the one place
+    # grouping earns its keep. Same commit dicts, so `commits` and `groups`
+    # can never drift; the flat list stays for a caller that wants it and for
+    # the UI's fallback when `group_note` says the topology was unreadable.
+    base["groups"], base["group_note"] = group_commits(
+        commits, _cached_topology(root, refresh=False), gh)
     # The oid payload is for commit->PR attribution, not for the wire.
     if base["gh"].get("prs"):
         base["gh"] = dict(base["gh"], prs=[

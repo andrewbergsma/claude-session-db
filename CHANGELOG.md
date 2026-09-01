@@ -19,6 +19,57 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.14.2] - 2026-09-01
+
+### Changed
+- **The Git rail groups commits by the branch they are part of.** Both commit
+  lists — the session rail's *commits in session window* and the repo detail's
+  *latest N across all branches* — were flat and interleaved: they said WHAT
+  happened but never *as part of what*, so five commits from three different
+  feature branches read as one undifferentiated run. Each list is now one
+  collapsible group per owning branch, with the same commit rows underneath.
+  - **Derived in code, never by a model** — git already records the answer.
+    Trunk is **resolved** (`origin/HEAD`, then a `main`/`master`/`trunk` probe,
+    the repos lens's rule), `log --first-parent` IS the current branch's own
+    line and every commit on it belongs to that branch, each merge M on the
+    line names a side branch whose commits `rev-list M^1..M^2` enumerates
+    exactly, and an unclaimed commit reachable from a live local branch
+    (`trunk..branch`) belongs to the branch whose tip is nearest — listed once,
+    never duplicated. Everything left stays with the current branch.
+  - A merged group is named from the PR whose `oids` cover its commits when
+    there is one — **headRefName is the only name that survives
+    `--delete-branch`** — then from the merge subject (`Merge branch 'x'`,
+    `Merge pull request #N from owner/x`), then `(merged branch)`.
+  - **The request path never fans out.** The git side is a per-root TOPOLOGY
+    (~25 bounded read-only calls, ~480ms on this repo) cached at `TOPO_TTL_S`
+    = 90s, well above the snapshot's 12s because the branch shape is the
+    slowest-changing thing in a repo; grouping a commit list against it is
+    0.2ms of pure set arithmetic with no git at all. ⟳ refresh busts it.
+  - **Failure isolates.** `group_commits()` cannot raise: an unreadable
+    first-parent line, a missing branch list, a garbage topology all return
+    `[]` plus a `group_note`, and both surfaces fall back to the flat list they
+    always shipped. The commits are never withheld because their grouping
+    failed.
+  - Payload is **additive**: the flat `commits` arrays are unchanged, and
+    `groups: [{branch, merged, merge_hash, pr, worktree, remote_name, ahead,
+    behind, current, count, commits:[…]}]` is new — on `session_window` for
+    `/api/git`, top-level for `/api/repo`, ordered by each group's newest
+    commit with the current branch first. Group commits are the very same dicts
+    the flat list holds, so a `pr` stamp rides along by reference and the two
+    can never disagree.
+  - The header carries the branch name, a `merged ✓ via <hash>` or
+    `unmerged · ahead N` chip, the PR chip when attributed, and a ⌥ glyph when
+    the branch has a worktree. The name links to GitHub **only when a remote
+    actually carries the branch** (`remote_name`) — the 3.12.1 rule; a merged
+    branch is usually deleted, and linking it is a 404 wearing a hyperlink.
+  - Current branch open by default, merged groups collapsed; the choice is
+    remembered per repo in `localStorage` (the rail is polled, and a group that
+    sprang back open every few seconds would be worse than no grouping).
+  - The session window's tooltip keeps its honesty: *timestamp* membership is
+    still best-effort, but the branch a commit is grouped under is not — it
+    comes from git's own first-parent line and merge records.
+  - 19 unit tests over real throwaway repos (`tests/test_commit_groups.py`).
+
 ## [3.14.0] - 2026-09-01
 
 ### Added

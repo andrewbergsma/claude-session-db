@@ -16,3 +16,9 @@ dist/
 .claude/
 data/
 /skills-*.csv
+
+# Runtime logs / test artifacts (console appends answers.log at runtime;
+# playwright + console-serve output is reproducible noise)
+claude_session_db/console/answers.log
+.playwright-mcp/
+console-serve-*.log

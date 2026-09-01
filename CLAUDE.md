@@ -404,6 +404,15 @@ The kmcp reads-rail counts the `knowledge-cli call <tool>` Bash shim as a read,
 not just `mcp__*__<tool>` — a session that took the fallback loaded just as much
 context and must not vanish from the rail.
 
+The Context tab lists three kmcp populations, all extracted by code from the
+transcript: **consumed** (get_entry/get_section/get_entries), **surfaced**
+(search-family results, per query, each ref marked opened or not — the
+unopened ones are the signal), and **written** (`WRITE_TOOLS`, seeded from
+`angles._WRITE_TOOLS` so the miner and the console cannot drift). A write's
+created-vs-updated verdict comes from the tool_result, a refusal returned as
+`{"error": …}` without `is_error` is still an error, and a dry-run that was
+never followed by a real write renders as a dry-run, never as a write.
+
 Superseded and REMOVED (2026-07-17): `angles-serve` / `angles_web.py`, a
 read-only LAN dashboard that duplicated the session list and reads-rail beside
 the console. Its watcher lives on as `angles_watch.py`; its gems — the

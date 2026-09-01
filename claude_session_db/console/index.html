@@ -83,6 +83,7 @@
   .navtab:hover { color:var(--ink2); }
   .navtab.on { color:var(--ink); border-bottom-color:var(--accent); }
   .navtab.on b { color:var(--accent); }
+  .navtab .tlive { font:10px var(--mono); font-style:normal; color:var(--accent); margin-left:4px; }
   #nav .top .sub { color:var(--muted); font-size:11px; margin-top:5px; }
   #nav .top .sub .mv { color:var(--warn); font-weight:600; }
   #nav .top .sub .wt { color:var(--warn); opacity:.8; }
@@ -1989,11 +1990,30 @@ function commitTitle(id, val){
 }
 
 /* ---------- tabs / scope / sub / rail ---------- */
+/* ---------- tab partition ----------
+   Projects | Runs | Archive. A "run" is an off-session summary session the
+   console spawned (summary_of set) — it is work ABOUT a session, not a
+   session of yours, so it lives on its own tab and never pads Projects.
+   Archive is the archived set as fetched, runs included. */
+function isRun(s){ return !!s.summary_of; }
+function tabSessions(d){
+  const all = d.sessions||[];
+  if(navTab==="archive") return all;
+  return all.filter(s => isRun(s) === (navTab==="runs"));
+}
 function renderNavTabs(d){
-  const nproj = navTab==="projects" ? new Set((d.sessions||[]).map(s=>s.project_label||s.project)).size : null;
+  const live = navTab==="archive" ? null : (d.sessions||[]);
+  const nproj = live ? new Set(live.filter(s=>!isRun(s)).map(s=>s.project_label||s.project)).size : null;
+  const runs  = live ? live.filter(isRun) : null;
+  const nrun  = runs ? runs.length : null;
+  const nlive = runs ? runs.filter(s=>s.state==="working").length : 0;
   const arch = d.archived_count!=null ? d.archived_count : (navTab==="archive" ? (d.sessions||[]).length : 0);
-  const tab = (id,lbl,n) => `<span class="navtab ${navTab===id?"on":""}" onclick="setNavTab('${id}')">${lbl}${n!=null?` <b>${n}</b>`:""}</span>`;
-  document.getElementById("navtabs").innerHTML = tab("projects","Projects",nproj) + tab("archive","Archive",arch);
+  const tab = (id,lbl,n,extra,tip) => `<span class="navtab ${navTab===id?"on":""}" onclick="setNavTab('${id}')" title="${esc(tip||"")}">${lbl}${n!=null?` <b>${n}</b>`:""}${extra||""}</span>`;
+  document.getElementById("navtabs").innerHTML =
+    tab("projects","Projects",nproj,"","your sessions, grouped by repo pill") +
+    tab("runs","Runs",nrun, nlive?`<i class="tlive" title="${nlive} running now">${nlive}▶</i>`:"",
+        "off-session summary runs the console spawned — each is a session you can open, follow and Stop") +
+    tab("archive","Archive",arch,"","archived sessions — an index entry, nothing on disk moved");
 }
 function renderNavScope(){
   const c = (v,lbl)=>`<span class="sc ${navScope===v?"on":""}" onclick="setNavScope('${v}')">${lbl}</span>`;
@@ -2002,12 +2022,18 @@ function renderNavScope(){
 function setNavSubBar(d){
   const el = document.getElementById("navsub");
   if(navTab==="archive"){ el.textContent = `${(d.sessions||[]).length} archived sessions`; return; }
-  const nproj = new Set((d.sessions||[]).map(s=>s.project_label||s.project)).size;
-  const waiting = (d.sessions||[]).filter(s=>s.state==="waiting").length;
+  const set = tabSessions(d);
+  if(navTab==="runs"){
+    const live = set.filter(s=>s.state==="working").length;
+    el.innerHTML = `${set.length} summary run${set.length===1?"":"s"}${live?` · <span class="mv">${live} running</span>`:""}`;
+    return;
+  }
+  const nproj = new Set(set.map(s=>s.project_label||s.project)).size;
+  const waiting = set.filter(s=>s.state==="waiting").length;
   el.innerHTML = `${nproj} projects${waiting?` · <span class="mv">${waiting} waiting for you</span>`:""}`;
 }
 function renderNavRail(d){
-  const html = groupByProject(d.sessions||[]).map(g=>{
+  const html = groupByProject(tabSessions(d)).map(g=>{
     const n = g.sessions.filter(s=>s.state==="waiting").length;
     return `<div class="railproj ${navOpenProj===g.key?"on":""}" title="${esc(g.label)}${n?` · ${n} waiting for you`:""}" onclick="railOpen('${esc(g.key)}')">${initialsOf(g.label)}${n?`<span class="raildot">${n}</span>`:""}</div>`;
   }).join("");
@@ -2028,7 +2054,7 @@ function navSearched(list){
    choice (it comes back when its sessions do) */
 function activePill(d){
   if(!navOpenProj) return null;
-  return (d.sessions||[]).some(s => projKey(s)===navOpenProj) ? navOpenProj : null;
+  return tabSessions(d).some(s => projKey(s)===navOpenProj) ? navOpenProj : null;
 }
 function selectPill(key){
   navOpenProj = (key && key!==navOpenProj) ? key : null;
@@ -2040,7 +2066,7 @@ function selectPill(key){
    waiting-for-you count; the "all" pill clears the filter */
 function renderNavPills(d){
   const el = document.getElementById("navpills"); if(!el) return;
-  const all = d.sessions||[], hit = navSearched(all), q = navQuery.trim();
+  const all = tabSessions(d), hit = navSearched(all), q = navQuery.trim();
   const sel = activePill(d);
   const groups = groupByProject(all);
   const hits = new Map(); for(const s of hit) hits.set(projKey(s), (hits.get(projKey(s))||0)+1);
@@ -2082,7 +2108,7 @@ function sessRow(s, showProject){
   const segs = [];
   if(busy)
     segs.push(`<span class="agc" title="a summarize run is in flight for this session${s.summary_child?" — tap to open the run":""}"${s.summary_child?` onclick="event.stopPropagation();openSession('${esc(s.summary_child)}')"`:""}>busy${s.summary_child?" →":""}</span>`);
-  if(s.summary_of)
+  if(s.summary_of && navTab!=="runs")
     segs.push(`<span class="brc mshrink" title="off-session summary run — digests session ${esc(s.summary_of.slice(0,8))} from disk; open it to follow the skill turn by turn">⧉ summary run</span>`);
   if(s.worktree)
     segs.push(`<span class="brc mshrink" title="git worktree ${esc(s.worktree)} — a second folder checked out from the same repo, on its own branch">⌥${esc(s.worktree)}</span>`);
@@ -2141,13 +2167,15 @@ function sessionTable(list, showProject){
    project name rides the meta line only while "all" is in effect. */
 function navVisible(d){
   const sel = activePill(d);
-  return navSearched(d.sessions||[]).filter(s => !sel || projKey(s)===sel);
+  return navSearched(tabSessions(d)).filter(s => !sel || projKey(s)===sel);
 }
 function renderSessionList(d){
   const list = navVisible(d), q = navQuery.trim();
   if(list.length) return sessionTable(list, activePill(d)===null);
-  if(q) return `<div class="empty">no ${navTab==="archive"?"archived ":""}sessions match “${esc(navQuery)}”${activePill(d)?" in this repo":""}</div>`;
-  return `<div class="empty">${navTab==="archive" ? "nothing archived — “Summarize + archive” lands sessions here" : "no recent sessions"}</div>`;
+  if(q) return `<div class="empty">no ${navTab==="archive"?"archived ":navTab==="runs"?"summary runs":""}sessions match “${esc(navQuery)}”${activePill(d)?" in this repo":""}</div>`;
+  return `<div class="empty">${navTab==="archive" ? "nothing archived — “Summarize + archive” lands sessions here"
+                              : navTab==="runs" ? "no summary runs yet — Summarize on a session spawns one, and it lands here"
+                              : "no recent sessions"}</div>`;
 }
 /* global sort control (sidebar toolbar) — replaces the per-project column
    headers. One key + direction, shared by the accordion tables, flat mode

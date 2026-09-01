@@ -19,6 +19,43 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.11.0] - 2026-09-01
+
+### Added
+- **Repos overlay — the cross-repo lens.** `⎇ repos` beside `⊞ threads`: the
+  same inventory shape on the other axis. Threads answers *which sessions are
+  still open*; this answers *which repos are*. One card per repository — trunk
+  and how it resolved, unpushed/behind, dirty/untracked/stashed, unmerged
+  branches with ahead/behind, live worktrees (stale registrations flagged), and
+  the last commit.
+- Console `GET /api/repos` — cached-first and **never a fan-out on the request
+  path**. One repo snapshot is ~9 git invocations, so a 20-repo grid on a 30s
+  poll would be ~180 subprocesses a tick; a single background walker
+  (`_repos_refresher`, `CSD_REPOS_REFRESH_S`, default 90s, serial + staggered)
+  keeps `$CSD_STATE_DIR/console/repos.json` warm and the endpoint reads it off
+  disk. Same seam as tldr/timeline.
+- Console `POST /api/repos/refresh` — the ⟳ button; the only forced walk, and
+  it re-discovers the registry so a new repo needs no console restart.
+- Registry **discovery**: distinct `sessions.cwd` from the archive
+  (`CSD_REPOS_WINDOW_DAYS`, 30) resolved through `rev-parse --show-toplevel`,
+  with `CSD_REPOS` for pinned roots. No database degrades to the transcript-tail
+  cwd derivation the nav already uses, so the lens works DB-free.
+- `tests/test_repos_lens.py` — 13 tests over real temp repositories (a git
+  reader stubbed out of git tests nothing): worktree folding, `master` trunk
+  probing, ahead/behind, stale worktree registrations, per-row degradation, and
+  a payload test that asserts `repos_payload()` never invokes git.
+
+### Notes
+- **Read-only, and never a fetch.** Every call goes through `_git()`
+  (`--no-optional-locks`); ahead/behind is measured against the refs already on
+  disk, and the header says so rather than implying live remote truth.
+- A linked **worktree folds into its parent** repo rather than standing as its
+  own row — un-folded, `controltech` and its `receive-packing-slip-cli` worktree
+  both claimed the same 22 branches.
+- The **attention band is narrow by design**: tracked modifications, an unpushed
+  trunk, or a worktree whose folder is gone. Banding on untracked files and old
+  unmerged branches too put 16 of 17 rows in the band.
+
 ## [3.10.0] - 2026-08-28
 
 ### Added

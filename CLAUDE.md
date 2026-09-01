@@ -256,6 +256,44 @@ when two runs share a project dir, and blind between spawn and first write.
   (`summary dispatched ✓` / `archived ✓`), and a summarize already running for
   the session disables both summarize buttons with the reason in the title.
 
+### Repos overlay — the cross-REPO lens (`/api/repos`)
+
+The other axis to the threads overlay: threads answers *which sessions are still
+open*, this answers *which repos are*. `⎇ repos` beside `⊞ threads`; one card per
+repository with trunk, unpushed/behind, working tree, unmerged branches and live
+worktrees.
+
+**The registry is discovered, not configured.** Distinct `sessions.cwd` from the
+archive (30d, `CSD_REPOS_WINDOW_DAYS`), each resolved through `rev-parse
+--show-toplevel`; a cwd that is not a repo never appears. A linked worktree
+folds into its PARENT (`--git-common-dir`) — a worktree is a second checkout,
+not a second repository, and un-folded it stands as its own row carrying the
+parent's branch and worktree counts. `CSD_REPOS` pins extra roots; the archive
+being unreachable degrades to the transcript-tail cwd derivation the nav already
+uses, so the lens works with no database at all.
+
+**Cached-first, and the request path NEVER fans out.** One repo snapshot is ~9
+git invocations; 20 repos on a 30s poll would be ~180 subprocesses a tick.
+A single background walker (`_repos_refresher`, `CSD_REPOS_REFRESH_S`, default
+90s, staggered and serial) writes `$CSD_STATE_DIR/console/repos.json`; `GET
+/api/repos` is a disk read. Same seam as tldr/timeline — the endpoint reads, the
+worker writes. `POST /api/repos/refresh` is the only forced walk (the ⟳ button),
+and it re-discovers the registry so a new repo needs no console restart.
+
+**Read-only, and never a fetch.** Every call goes through `_git()`
+(`--no-optional-locks`), so observing a repo cannot write into it; ahead/behind
+is measured against the remote-tracking refs already on disk. The header says so
+— *"behind" = behind your last fetch* — rather than implying live remote truth.
+Trunk is `origin/HEAD`, then a `main`/`master`/`trunk` probe: guessing `main` is
+how a lens reports every branch in an older repo as unmerged.
+
+**The attention band is deliberately narrow**: uncommitted *tracked* edits, an
+unpushed trunk, or a worktree whose folder is gone. Untracked files and
+months-old unmerged branches are a working repo's normal resting state — banding
+on them put 16 of 17 rows in the band, which is the same as having no band.
+Failure isolates per ROW (a deleted directory, a git timeout, an
+`ahead-behind` atom an older git lacks); the lens never raises.
+
 ### Side-session permission envelope (`spawn_claude` as resolver/translator)
 
 Pilot of `claude_session_db:design/task-driven-side-sessions`. Side-sessions used

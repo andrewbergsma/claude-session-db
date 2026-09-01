@@ -4924,18 +4924,28 @@ function closeRepoDetail(fromPop){
   if(wasOpen && fromPop !== true) ovDone();
 }
 
-/* A ref decoration off `log --all`: HEAD and local branches read differently
-   from remote ones, and that difference is the whole "is it pushed" story. */
-function refBadge(r, web){
-  const rem = r.startsWith("origin/") || r.startsWith("upstream/");
+/* A branch name is a PATH, not a path segment: encodeURIComponent turns the
+   slash in `feat/console-repos-lens` into %2F and GitHub errors on it. Encode
+   each segment, keep the separators. */
+function ghPath(name){
+  return String(name).split("/").map(encodeURIComponent).join("/");
+}
+
+/* A ref decoration off `log --all`. Only REMOTE-tracking refs are linked:
+   a local-only branch has no page on GitHub, and linking it produces the 404
+   this rule exists to stop. Local refs still render — as plain badges saying
+   so, which is the more useful fact anyway. */
+function refBadge(r, web, remotes){
   const head = r.startsWith("HEAD");
   const name = r.replace(/^HEAD -> /, "");
+  const rem = (remotes || []).find(rm => name.startsWith(rm + "/"));
   const cls = head ? "ref head" : rem ? "ref rem" : "ref";
   const txt = head ? "HEAD → " + name : r;
-  if(web && !head && !r.startsWith("tag: "))
+  if(web && rem && !head)
     return `<a class="ext ${cls}" target="_blank" rel="noopener"
-      href="${esc(web)}/tree/${encodeURIComponent(name.replace(/^origin\//,""))}">${esc(txt)}</a>`;
-  return `<span class="${cls}">${esc(txt)}</span>`;
+      href="${esc(web)}/tree/${ghPath(name.slice(rem.length + 1))}"
+      >${esc(txt)}</a>`;
+  return `<span class="${cls}"${rem || head ? "" : ' title="local only — not on GitHub"'}>${esc(txt)}</span>`;
 }
 
 function renderRepoDetail(d){
@@ -4950,8 +4960,16 @@ function renderRepoDetail(d){
 
   const brows = (d.branches || []).map(b => {
     const focus = repoFocusBranch && b.name === repoFocusBranch;
+    // Linked only when the branch actually tracks a remote — and to the
+    // UPSTREAM's name, which is not always the local one. No upstream means
+    // no GitHub page; the "no upstream" cell beside it already says why.
+    const upName = b.upstream ? b.upstream.replace(/^[^/]+\//, "") : null;
+    const bcell = (web && upName)
+      ? `<a class="ext" target="_blank" rel="noopener"
+           href="${esc(web)}/tree/${ghPath(upName)}">${esc(b.name)}</a>`
+      : `<span title="${b.upstream ? "" : "local only — not pushed to GitHub"}">${esc(b.name)}</span>`;
     return `<tr${focus ? ' style="background:var(--surface2)"' : ""}>
-      <td>${link(`${web}/tree/${encodeURIComponent(b.name)}`, b.name)}${b.is_trunk ? ' <span class="ref head">trunk</span>' : ""}</td>
+      <td>${bcell}${b.is_trunk ? ' <span class="ref head">trunk</span>' : ""}</td>
       <td class="num">${b.ahead === null ? "?" : (b.ahead ? "↑" + b.ahead : "")}</td>
       <td class="num">${b.behind ? "↓" + b.behind : ""}</td>
       <td>${b.upstream ? esc(b.upstream) : '<span style="color:var(--warn)">no upstream</span>'}</td>
@@ -4980,16 +4998,22 @@ function renderRepoDetail(d){
     ? `<div style="color:var(--muted)">unavailable — ${esc(gh.reason || "?")}</div>` : "";
 
   const crows = (d.commits || []).map(c => `<tr>
-      <td>${link(`${web}/commit/${encodeURIComponent(c.hash)}`, c.hash)}</td>
+      <td>${(web && c.pushed)
+        ? `<a class="ext" target="_blank" rel="noopener" href="${esc(web)}/commit/${ghPath(c.hash)}">${esc(c.hash)}</a>`
+        : `<span title="${c.pushed === false ? "not pushed — no GitHub page yet" : "push state unknown"}">${esc(c.hash)}${c.pushed === false ? " ↑" : ""}</span>`}</td>
       <td>${c.is_merge ? '<span class="mg" title="a merge commit — two parents">⑂</span>' : ""}</td>
-      <td>${(c.refs || []).map(r => refBadge(r, web)).join("")}</td>
+      <td>${(c.refs || []).map(r => refBadge(r, web, d.remotes)).join("")}</td>
       <td class="w" title="${esc(c.subject)}">${esc(c.subject)}</td>
       <td style="color:var(--muted)">${esc(c.author)}</td>
       <td style="color:var(--muted)">${esc(repoAgo(c.when))}</td>
       </tr>`).join("");
 
-  const grp = (title, inner) => inner
-    ? `<div class="grp"><h3>${title}</h3><table>${inner}</table></div>` : "";
+  // Group headers link at the repo-level pages — /branches, /commits, /pulls —
+  // which exist regardless of what is pushed, unlike a per-ref URL.
+  const ghLink = (path, txt) => web
+    ? ` <a class="ext" target="_blank" rel="noopener" href="${esc(web)}${path}">${esc(txt)} ↗</a>` : "";
+  const grp = (title, inner, path, ltxt) => inner
+    ? `<div class="grp"><h3>${title}${path ? ghLink(path, ltxt) : ""}</h3><table>${inner}</table></div>` : "";
 
   pane.innerHTML = `
     <div class="dh">
@@ -5001,11 +5025,13 @@ function renderRepoDetail(d){
     </div>
     <div class="dh"><span class="pth">${esc(d.root)}</span></div>
     <div class="chips">${repoChips(d)}</div>
-    ${grp(`branches · ${d.branch_total}${d.trunk ? " · ahead/behind " + esc(d.trunk) : ""}`, brows)}
+    ${grp(`branches · ${d.branch_total}${d.trunk ? " · ahead/behind " + esc(d.trunk) : ""}`,
+          brows, "/branches", "all branches")}
     ${d.worktree_total ? grp(`worktrees · ${d.worktree_total}`, wrows) : ""}
-    <div class="grp"><h3>pull requests${prs.length ? " · " + prs.length : ""}</h3>
+    <div class="grp"><h3>pull requests${prs.length ? " · " + prs.length : ""}${ghLink("/pulls", "all PRs")}</h3>
       ${prows ? `<table>${prows}</table>` : (prNote || '<div style="color:var(--muted)">none</div>')}</div>
-    ${grp(`commits · latest ${(d.commits||[]).length} across all branches`, crows)}
+    ${grp(`commits · latest ${(d.commits||[]).length} across all branches`,
+          crows, "/commits", "all commits")}
   `;
   if(repoFocusBranch){
     const row = pane.querySelector('tr[style]');

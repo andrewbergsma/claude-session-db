@@ -697,6 +697,36 @@
   .gcommit .gpr-tag.equiv { border-style:dashed; }
   .gwt { color:var(--purple); }
 
+  /* ---- commit groups: one collapsible header per owning branch ---- */
+  .cgrp { margin:5px 0 3px; }
+  .cgrp-h { display:flex; gap:6px; align-items:baseline; min-width:0;
+            font:10.5px var(--mono); color:var(--ink2); cursor:pointer;
+            border-left:2px solid var(--border); padding:3px 0 3px 7px; }
+  .cgrp-h:hover { border-left-color:var(--accent); }
+  .cgrp.cur > .cgrp-h, .cgrp-h.cur { border-left-color:var(--accent); }
+  .cx { flex:0 0 auto; color:var(--muted); width:9px; }
+  .cb { font-weight:700; color:var(--ink); min-width:0; white-space:nowrap;
+        overflow:hidden; text-overflow:ellipsis; text-decoration:none; }
+  a.cb:hover { text-decoration:underline; color:var(--accent); }
+  .cn { flex:0 0 auto; color:var(--muted); margin-left:auto; padding-left:6px; }
+  .cgrp-c { margin-left:9px; padding-left:8px; border-left:1px solid var(--border); }
+  .cgrp.closed > .cgrp-c { display:none; }
+  .cchip { flex:0 0 auto; font:9px var(--mono); font-weight:700; white-space:nowrap;
+           border:1px solid var(--border); border-radius:4px; padding:0 4px;
+           color:var(--muted); text-decoration:none; }
+  .cchip.mgd { color:var(--purple); border-color:var(--purple); }
+  .cchip.un  { color:var(--warn); border-color:var(--warn); }
+  .cchip.wt  { color:var(--purple); border-color:var(--purple); }
+  .cchip.open { color:var(--good); border-color:var(--good); }
+  .cchip.merged { color:var(--purple); border-color:var(--purple); }
+  .cchip.closed { color:var(--bad); border-color:var(--bad); }
+  a.cchip:hover { border-color:var(--accent); color:var(--accent); }
+  /* the repo-detail table wears the same headers as table rows */
+  tr.cgh { cursor:pointer; }
+  tr.cgh > td { padding-top:9px; }
+  tr.cgh .cgrp-h { border-left-width:2px; }
+  tr.cgr[hidden] { display:none; }
+
   /* first-class search rows + rail hit list */
   .read.search .ic { filter:none; }
   .read.search .pth .app { color:var(--purple); }
@@ -3546,6 +3576,96 @@ function gitCommitRow(c){
     <span class="gt" title="how long ago this commit was made">${c.when?rel(c.when):""}</span></div>`;
 }
 
+/* ---------- commit groups: which BRANCH each commit is part of -------------
+   A flat log interleaves every branch that ever landed, so it says WHAT
+   happened but never *as part of what*. The server derives the grouping in
+   code (git's first-parent line, plus each merge's `rev-list M^1..M^2` side
+   list) and ships `groups` beside the flat `commits` it always shipped; this
+   renders one collapsible header per branch, with the same commit rows under
+   it. When the topology could not be derived the payload says so in
+   `group_note` and both surfaces fall back to the flat list — the commits are
+   never withheld because their grouping failed.
+
+   Open/closed is remembered per repo in localStorage: the rail is polled, and
+   a group that sprang back open every few seconds would be worse than no
+   grouping at all. Live lines (the current branch, an unmerged branch) default
+   open; work that already landed defaults folded. */
+const CGRP_KEY = "csd.commitGroups";
+let cgrpState = null;
+
+function cgrpLoad(){
+  if(cgrpState) return cgrpState;
+  try { cgrpState = JSON.parse(localStorage.getItem(CGRP_KEY) || "{}"); }
+  catch(e){ cgrpState = {}; }          // private mode / bad JSON: use defaults
+  return cgrpState;
+}
+function cgrpId(repo, g){ return `${repo||"?"}::${g.branch}::${g.merge_hash||""}`; }
+function cgrpIsOpen(repo, g){
+  const st = cgrpLoad(), id = cgrpId(repo, g);
+  return (id in st) ? !!st[id] : !g.merged;
+}
+function cgrpRemember(id, open){
+  const st = cgrpLoad();
+  st[id] = open;
+  const keys = Object.keys(st);        // a branch per key: bound the store
+  if(keys.length > 400) keys.slice(0, keys.length - 400).forEach(k => delete st[k]);
+  try { localStorage.setItem(CGRP_KEY, JSON.stringify(st)); } catch(e){}
+}
+
+/* The header's contents: branch name, merged/unmerged chip, PR chip, worktree
+   glyph. The name is a GitHub link ONLY when a remote actually carries the
+   branch (`remote_name`) — a merged branch is usually deleted, and a local-only
+   one never existed there, so linking either produces a 404 wearing a
+   hyperlink. Same rule the repo detail's branch cells follow. */
+function cgrpHead(g, web, open){
+  const nm = (web && g.remote_name)
+    ? `<a class="cb" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+         href="${esc(web)}/tree/${ghPath(g.remote_name)}"
+         title="${esc("open " + g.branch + " on GitHub")}">⎇ ${esc(g.branch)}</a>`
+    : `<span class="cb" title="${esc(g.merged
+        ? "no remote carries this branch any more — a merged branch is usually deleted, so there is no GitHub page for it"
+        : "local only — this branch has never been pushed, so GitHub has no page for it")}">⎇ ${esc(g.branch)}</span>`;
+  let chips = "";
+  if(g.merged)
+    chips += `<span class="cchip mgd" title="${esc("already merged into this line by commit " + (g.merge_hash||"?") + " — these commits are part of it now")}">merged ✓ via ${esc(g.merge_hash||"?")}</span>`;
+  else if(g.ahead)
+    chips += `<span class="cchip un" title="${esc("not merged yet — " + g.ahead + " commit(s) this branch has that the trunk does not"
+        + (g.behind ? ", and " + g.behind + " it is missing" : ""))}">unmerged · ahead ${g.ahead}${g.behind?` ↓${g.behind}`:""}</span>`;
+  if(g.pr)
+    chips += `<a class="cchip ${prStateCls(g.pr.state)}" href="${esc(g.pr.url||"#")}"
+       target="_blank" onclick="event.stopPropagation()"
+       title="${esc("shipped as PR #" + g.pr.number + " (" + (g.pr.state||"").toLowerCase()
+         + (g.pr.checks ? ", checks " + g.pr.checks : "") + ")")}">#${g.pr.number}</a>`;
+  if(g.worktree)
+    chips += `<span class="cchip wt" title="${esc("checked out in a worktree: " + g.worktree)}">⌥</span>`;
+  return `<span class="cx">${open ? "▾" : "▸"}</span>${nm}${chips}<span class="cn" title="commits in this group">${g.count}</span>`;
+}
+
+/* The rail's block form: a div per group, commits nested inside it. */
+function gitGroupBlock(g, repo, web){
+  const open = cgrpIsOpen(repo, g);
+  return `<div class="cgrp${g.current?" cur":""}${open?"":" closed"}">
+    <div class="cgrp-h" data-key="${esc(cgrpId(repo, g))}" onclick="cgrpTapRail(this)"
+      title="${esc("the commits below are part of " + g.branch + (g.current ? " — the branch this checkout is on" : ""))}">${cgrpHead(g, web, open)}</div>
+    <div class="cgrp-c">${(g.commits||[]).map(gitCommitRow).join("")}</div></div>`;
+}
+function cgrpTapRail(el){
+  const closed = el.parentElement.classList.toggle("closed");
+  el.querySelector(".cx").textContent = closed ? "▸" : "▾";
+  cgrpRemember(el.dataset.key, !closed);
+}
+/* The repo-detail table's row form: a header <tr>, then its commit <tr>s,
+   collapsed by hiding the rows that carry the same data-g. */
+function cgrpTapTable(el){
+  const gid = el.getAttribute("data-g"), tbl = el.closest("table");
+  const closed = el.classList.toggle("closed");
+  el.querySelector(".cx").textContent = closed ? "▸" : "▾";
+  if(tbl) tbl.querySelectorAll("tr.cgr").forEach(r => {
+    if(r.getAttribute("data-g") === gid) r.hidden = closed;
+  });
+  cgrpRemember(el.dataset.key, !closed);
+}
+
 function renderGit(d){
   const el = document.getElementById("gitinfo");
   const hdr = `<div class="gh3"><h3>Git</h3>
@@ -3606,12 +3726,21 @@ function renderGit(d){
     html += `<div class="kv"><span class="k">last commit</span>
       <span class="v" style="text-align:left">${gitCommitRow(bs.last_commit)}</span></div>`;
 
-  // commits in session window (best-effort attribution by timestamp)
+  // commits in session window (best-effort attribution by timestamp), each
+  // filed under the branch it is part of — which git records exactly, unlike
+  // the timestamp membership above it
   const w = d.session_window || {};
-  html += `<div class="wr-h" title="commits on this branch whose timestamps fall inside the transcript's timespan — attribution is best-effort">commits in session window · ${(w.commits||[]).length}</div>`;
-  html += (w.commits||[]).length
-    ? w.commits.map(gitCommitRow).join("")
-    : `<div class="rl-empty">none in this session's timespan</div>`;
+  const wc = w.commits || [], wg = w.groups || [];
+  html += `<div class="wr-h" title="commits whose timestamps fall inside the transcript's timespan — that membership is best-effort; the branch each one is grouped under is not, it comes from git's own first-parent line and merge records">commits in session window · ${wc.length}${
+    wg.length > 1 ? ` · ${wg.length} branches` : ""}</div>`;
+  if(!wc.length)
+    html += `<div class="rl-empty">none in this session's timespan</div>`;
+  else if(wg.length)
+    html += wg.map(g => gitGroupBlock(g, r.root, d.web)).join("");
+  else
+    html += (w.group_note
+        ? `<div class="gmore" title="every commit is still listed — only the by-branch grouping could not be derived">ungrouped — ${esc(w.group_note)}</div>`
+        : "") + wc.map(gitCommitRow).join("");
 
   // PRs
   const gh = d.gh || {};
@@ -5105,7 +5234,10 @@ function renderRepoDetail(d){
   const prNote = gh.available === false
     ? `<div style="color:var(--muted)">unavailable — ${esc(gh.reason || "?")}</div>` : "";
 
-  const crows = (d.commits || []).map(c => `<tr>
+  // Commits, grouped by the branch they are part of (server-derived). `gid`
+  // ties a commit row to its header row so collapsing hides exactly its own;
+  // an ungrouped payload renders the same rows with no header, unchanged.
+  const cRow = (c, gid, shown) => `<tr class="cgr" data-g="${esc(gid)}"${shown?"":" hidden"}>
       <td>${(web && c.pushed)
         ? `<a class="ext" target="_blank" rel="noopener" title="pushed — a remote has this commit; opens it on GitHub" href="${esc(web)}/commit/${ghPath(c.hash)}">${esc(c.hash)}</a>`
         : `<span title="${c.pushed === false ? "the ↑ means this commit exists only on this machine — push its branch and GitHub will have it" : "push state unknown — git could not tell whether any remote has this commit"}">${esc(c.hash)}${c.pushed === false ? " ↑" : ""}</span>`}</td>
@@ -5114,7 +5246,19 @@ function renderRepoDetail(d){
       <td class="w" title="${esc(c.subject)}">${esc(c.subject)}</td>
       <td style="color:var(--muted)" title="who authored the commit">${esc(c.author)}</td>
       <td style="color:var(--muted)" title="when the commit was made">${esc(repoAgo(c.when))}</td>
-      </tr>`).join("");
+      </tr>`;
+  const cgroups = d.groups || [];
+  const crows = cgroups.length
+    ? cgroups.map((g, i) => {
+        const open = cgrpIsOpen(d.root, g);
+        return `<tr class="cgh${open?"":" closed"}" data-g="g${i}"
+            data-key="${esc(cgrpId(d.root, g))}" onclick="cgrpTapTable(this)"><td colspan="6">
+            <div class="cgrp-h${g.current?" cur":""}" style="cursor:inherit"
+              title="${esc("the commits below are part of " + g.branch + (g.current ? " — the branch this checkout is on" : ""))}">${cgrpHead(g, web, open)}</div>
+            </td></tr>`
+          + (g.commits || []).map(c => cRow(c, `g${i}`, open)).join("");
+      }).join("")
+    : (d.commits || []).map(c => cRow(c, "", true)).join("");
 
   // Group headers link at the repo-level pages — /branches, /commits, /pulls —
   // which exist regardless of what is pushed, unlike a per-ref URL.
@@ -5138,7 +5282,10 @@ function renderRepoDetail(d){
     ${d.worktree_total ? grp(`<span title="extra folders checked out from this repo, each on its own branch">worktrees · ${d.worktree_total}</span>`, wrows) : ""}
     <div class="grp"><h3><span title="a pull request asks to merge one branch into another; until it is merged its commits are not on the trunk">pull requests${prs.length ? " · " + prs.length : ""}</span>${ghLink("/pulls", "all PRs")}</h3>
       ${prows ? `<table>${prows}</table>` : (prNote || '<div style="color:var(--muted)">none</div>')}</div>
-    ${grp(`<span title="every branch's recent commits, not only the one you are on — a hash with ↑ has not been pushed anywhere">commits · latest ${(d.commits||[]).length} across all branches</span>`,
+    ${grp(`<span title="every branch's recent commits, not only the one you are on — a hash with ↑ has not been pushed anywhere. Each is filed under the branch it is part of: git's first-parent line for this checkout, and each merge's own side list for the branches that landed.">commits · latest ${(d.commits||[]).length} across all branches${
+            cgroups.length ? ` · ${cgroups.length} branches` : ""}</span>${
+            (!cgroups.length && d.group_note)
+              ? ` <span style="color:var(--muted)" title="every commit is still listed — only the by-branch grouping could not be derived">· ungrouped (${esc(d.group_note)})</span>` : ""}`,
           crows, "/commits", "all commits")}
   `;
   if(repoFocusBranch){

@@ -8,6 +8,12 @@ session's OWN transcript (~/.claude/projects/<project>/<session>.jsonl):
   - kmcp reads (inline)     from mcp__*__(get_entry|get_section|get_entries)
                             tool_use blocks — app/path/mode/sections from `input`,
                             plus `knowledge-cli call <tool>` invoked through Bash
+  - kmcp surfaced           from the SURFACE_TOOLS tool_result: every ref a
+                            search OFFERED, cross-referenced client-side
+                            against what was actually consumed
+  - kmcp writes             from the WRITE_TOOLS tool_use ⨝ its tool_result —
+                            which entries this session created/updated/patched,
+                            and which passes were only a dry_run
   - response size (rail)    from the matching tool_result block, joined EXACTLY
                             by tool_use_id (no server, no time-match)
   - context detail          latest assistant message.usage (token counts)
@@ -94,7 +100,8 @@ from .. import cr as crlib
 from .. import tldr
 from .. import session_timeline
 from .. import version as vinfo
-from ..angles import ANGLE_SPECS, ANGLE_LABELS
+from ..angles import (ANGLE_SPECS, ANGLE_LABELS,
+                      _WRITE_TOOLS as _ANGLE_WRITE_TOOLS)
 
 ROOT = Path(__file__).parent
 PROJECTS = Path.home() / ".claude" / "projects"
@@ -135,6 +142,29 @@ READ_TOOLS = {"get_entry", "get_section", "get_entries"}
 SURFACE_TOOLS = {"search", "hybrid_search", "traverse_graph", "list_entries",
                  "list_by_tag", "list_children", "get_relationships",
                  "query_view", "list_by_importance"}
+# Writes: the tools that MUTATE the base. Seeded from the angles W extractor's
+# own classification (`angles._WRITE_TOOLS`) rather than a third hand-kept list,
+# so `csd angles` and the console can never drift on what counts as a kmcp
+# write; the console adds the staging/rating tools the headline miner does not
+# headline.
+WRITE_TOOLS = set(_ANGLE_WRITE_TOOLS) | {
+    "rate_entry", "stage_template", "upload_file", "delete_staged",
+    "create_application", "update_application", "add_taxonomy_node",
+}
+# base tool -> the operation chip the Context tab shows. A `dry_run` overrides
+# this to "dry-run" at render time: a validation pass that was never followed by
+# a real write must not read as a write.
+WRITE_OPS = {
+    "create_entry": "created", "import_entries": "created",
+    "import_lessons": "created", "stage_template": "staged",
+    "update_entry": "updated", "update_application": "updated",
+    "create_application": "created", "patch_content": "patched",
+    "create_relationship": "related", "delete_relationship": "unrelated",
+    "rename_entry": "renamed", "move_entry": "moved",
+    "delete_entry": "deleted", "delete_staged": "deleted",
+    "add_entry_tag": "tagged", "add_taxonomy_node": "tagged",
+    "rate_entry": "rated", "upload_file": "uploaded",
+}
 
 SKIP_USER_PREFIXES = ("<bash-", "<task-notification>", "<command-", "<local-command")
 
@@ -641,26 +671,116 @@ def _tool_summary(name, inp):
     return (short, peek)
 
 
+SEARCH_HIT_CAP = 40          # per search; the Context tab lists every hit kept
+
+# Result containers across the SURFACE_TOOLS: search/hybrid_search return
+# `results`, list_* return `entries`/`items`, traverse_graph returns `nodes`,
+# get_relationships returns `relationships`. A bare list is also accepted.
+_HIT_KEYS = ("results", "entries", "hits", "nodes", "items", "matches",
+             "relationships", "children", "paths")
+
+
+def _hit_ref(e):
+    """One surfaced ref out of a result element, or None.
+
+    Shapes differ per tool (a relationship names its far end `target_path`, a
+    graph node may carry only `path`), so every alias is tried and a shape we
+    cannot read yields None instead of raising — a lens never crashes on a
+    result payload it has not seen before.
+    """
+    if isinstance(e, str):
+        return {"app": None, "path": e, "title": None, "score": None,
+                "etype": _etype_hint(e)}
+    if not isinstance(e, dict):
+        return None
+    path = (e.get("path") or e.get("target_path") or e.get("to_path")
+            or e.get("entry_path") or e.get("source_path"))
+    if not path:
+        return None
+    app = (e.get("application") or e.get("app") or e.get("target_application")
+           or e.get("source_application"))
+    return {"app": app, "path": path,
+            "title": e.get("title") or e.get("name"),
+            "score": e.get("score") or e.get("similarity") or e.get("weight"),
+            "etype": (e.get("entity_type") or e.get("type")
+                      or _etype_hint(path))}
+
+
+# The compact TEXT rendering kmcp returns at detail=minimal:
+#
+#   <query> · 1935 hits · app=controltech_code
+#   types: 845 event · 447 task · …
+#
+#     process  process/agent-delivery                     Agent Delivery Loop…
+#     lesson   knowledge_mcp_code:lesson/git/squash-…     Squash-merged branc…
+#
+#     +1930 more — …
+#
+# It is NOT JSON, so every such search used to surface zero refs. The path
+# column carries `app:path` when the search spanned applications and a bare
+# path when it was app-filtered (the header's `app=` then names the app).
+_TXT_HEAD_RE = re.compile(r"·\s*([\d,]+)\s+hits")
+_TXT_APP_RE = re.compile(r"\bapp=([\w.\-]+)")
+_TXT_TYPES_RE = re.compile(r"^types:\s*(.+)$", re.M)
+_TXT_HIT_RE = re.compile(r"^ {2,}([a-z_]+)\s{2,}(\S+)(?:\s{2,}(.*?))?\s*$", re.M)
+
+
+def _parse_search_text(text):
+    """Surfaced refs out of the compact TEXT search rendering, or None."""
+    head = text.split("\n", 1)[0]
+    m = _TXT_HEAD_RE.search(head)
+    if not m:
+        return None
+    am = _TXT_APP_RE.search(head)
+    app = am.group(1) if am else None
+    counts = {}
+    tm = _TXT_TYPES_RE.search(text)
+    if tm:
+        for n, t in re.findall(r"(\d+)\s+([\w\-]+)", tm.group(1)):
+            counts[t] = int(n)
+    hits = []
+    for etype, ref, title in _TXT_HIT_RE.findall(text):
+        if ref.startswith("+"):        # the "+N more" footer
+            continue
+        a, _, p = ref.partition(":") if ":" in ref else ("", "", ref)
+        hits.append({"app": a or app, "path": p, "score": None,
+                     "title": (title or "").strip() or None,
+                     "etype": etype or _etype_hint(p)})
+    return {"total": int(m.group(1).replace(",", "")), "type_counts": counts,
+            "returned": len(hits), "shown": len(hits[:SEARCH_HIT_CAP]),
+            "hits": hits[:SEARCH_HIT_CAP]}
+
+
 def _parse_search_result(text):
-    """Pull (total, type_counts, top hits) out of a search tool_result — the
-    surfacing telemetry: what the base OFFERED the session for this query."""
+    """Pull (total, type_counts, hits) out of a search tool_result — the
+    surfacing telemetry: what the base OFFERED the session for this query.
+
+    `shown` says how many of the returned hits survived SEARCH_HIT_CAP, so the
+    Context tab can say "12 of 60" rather than silently under-reporting.
+    """
     if not text:
         return None
     try:
         d = json.loads(text)
     except (json.JSONDecodeError, ValueError):
-        return None
+        try:
+            return _parse_search_text(text)
+        except Exception:            # a lens never dies on a result payload
+            return None
+    if isinstance(d, list):
+        d = {"results": d}
     if not isinstance(d, dict):
         return None
-    res = d.get("results") or d.get("entries") or d.get("hits") or []
-    hits = []
-    for e in res[:12]:
-        if isinstance(e, dict):
-            hits.append({"app": e.get("application"), "path": e.get("path"),
-                         "title": e.get("title"), "score": e.get("score"),
-                         "etype": e.get("entity_type")})
+    res = None
+    for k in _HIT_KEYS:
+        v = d.get(k)
+        if isinstance(v, list):
+            res = v
+            break
+    res = res or []
+    hits = [h for h in (_hit_ref(e) for e in res[:SEARCH_HIT_CAP]) if h]
     return {"total": d.get("total"), "type_counts": d.get("type_counts"),
-            "hits": hits}
+            "returned": len(res), "shown": len(hits), "hits": hits}
 
 
 def _parse_choice_questions(inp):
@@ -699,6 +819,201 @@ def _read_meta(base, inp):
     if secs:
         return "sections", secs
     return "full", None
+
+
+def _import_docs(inp):
+    """Entry refs declared by an import_entries / import_lessons input.
+
+    The document travels as `content` — a YAML or JSON string, possibly
+    multi-document — or as a structured `entries`/`documents` list. Every form
+    is parsed best-effort: an unreadable payload yields NO refs rather than an
+    exception, so the write still gets a row identified by its tool.
+    """
+    inp = inp or {}
+    docs = []
+    # `content` is the documented carrier, but callers also pass `entries` /
+    # `documents` — and pass them as a JSON *string* as often as a list.
+    for key in ("content", "entries", "documents", "lessons"):
+        raw = inp.get(key)
+        if isinstance(raw, dict):
+            docs.append(raw)
+            continue
+        if isinstance(raw, list):
+            docs += [d for d in raw if isinstance(d, dict)]
+            continue
+        if not isinstance(raw, str):
+            continue
+        try:
+            obj = json.loads(raw)
+        except (json.JSONDecodeError, ValueError):
+            obj = None
+        if isinstance(obj, dict):
+            docs.append(obj)
+        elif isinstance(obj, list):
+            docs += [d for d in obj if isinstance(d, dict)]
+        else:
+            # YAML (the documented form): scrape only the scalars a row needs.
+            # No YAML parser is imported for this — a lens must not fail
+            # because a document body confuses a full loader.
+            app = re.search(r'^\s*-?\s*"?application"?\s*:\s*"?([\w.\-]+)',
+                            raw, re.M)
+            et = dict(re.findall(
+                r'^\s*-?\s*"?(path|entity_type)"?\s*:\s*"?([^"\'\n,}]+)',
+                raw, re.M))
+            for m in re.finditer(r'^\s*-?\s*"?path"?\s*:\s*"?([^"\'\n,}]+)',
+                                 raw, re.M):
+                docs.append({"application": app.group(1) if app else None,
+                             "path": m.group(1).strip(),
+                             "entity_type": et.get("entity_type")})
+    out, seen = [], set()
+    for d in docs:
+        p = d.get("path")
+        if not isinstance(p, str) or not p.strip():
+            continue
+        p = p.strip()
+        app = d.get("application")
+        if (app, p) in seen:
+            continue
+        seen.add((app, p))
+        out.append({"app": app, "path": p,
+                    "etype": d.get("entity_type") or _etype_hint(p),
+                    "title": d.get("title")})
+    return out
+
+
+def _parse_write_result(text):
+    """created/updated/skipped/errors out of an import-shaped tool_result.
+
+    This is the authority on whether a ref was CREATED or UPDATED — the input
+    document cannot know, and a dry_run's `would_create`/`would_update` say the
+    same thing about a write that has not happened yet.
+    """
+    if not text:
+        return None
+    try:
+        d = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    if not any(k in d for k in ("created", "updated", "skipped", "errors",
+                                "summary", "dry_run", "error")):
+        return None
+
+    def refs(key):
+        # Keys collide across tools: an update_entry result carries
+        # `updated: true` (a bool), not a list of refs. Anything that is not a
+        # list contributes nothing rather than raising.
+        v = d.get(key)
+        out = []
+        for e in (v if isinstance(v, list) else []):
+            if isinstance(e, str):
+                out.append({"path": e, "app": None, "etype": None,
+                            "updated": key == "updated"})
+            elif isinstance(e, dict) and e.get("path"):
+                out.append({"path": e["path"],
+                            "app": e.get("application"),
+                            "etype": e.get("entity_type"),
+                            "updated": bool(e.get("updated")
+                                            or e.get("would_update")
+                                            or key == "updated")})
+        return out
+
+    errs = []
+    _e = d.get("errors")
+    for e in (_e if isinstance(_e, list) else ([_e] if isinstance(_e, str) else [])):
+        errs.append(e if isinstance(e, str) else json.dumps(e, default=str)[:300])
+    # A REFUSED write ("Missing input", "Import path not allowed") comes back
+    # as {error, message} with is_error unset — the tool answered, it just did
+    # not write. Without this it read as a successful create.
+    if d.get("error"):
+        errs.append(" — ".join(str(d[k]) for k in ("error", "message")
+                               if d.get(k))[:300])
+    return {"created": refs("created"), "updated": refs("updated"),
+            "skipped": refs("skipped"), "errors": errs,
+            "dry_run": bool(d.get("dry_run")), "summary": d.get("summary")}
+
+
+def _write_meta(base, inp, wres):
+    """(op, refs, note) for one kmcp write tool_use.
+
+    `refs` is the list of entries the call aims at — [{app, path, etype, op}] —
+    so a multi-document import lands as several rows while a patch lands as one.
+    Every branch degrades: a call with no readable path still returns one ref
+    with `path=None`, which renders as a row rather than vanishing.
+    """
+    inp = inp or {}
+    op = WRITE_OPS.get(base, "wrote")
+    note = None
+    refs = []
+
+    if base in ("import_entries", "import_lessons"):
+        declared = _import_docs(inp)
+        by_path = {d["path"]: d for d in declared}
+        landed = []
+        if wres:
+            for r in wres["created"] + wres["updated"]:
+                d = by_path.get(r["path"], {})
+                landed.append({"app": r.get("app") or d.get("app"),
+                               "path": r["path"],
+                               "etype": r.get("etype") or d.get("etype"),
+                               "op": "updated" if r.get("updated") else "created"})
+        seen = {r["path"] for r in landed}
+        for d in declared:
+            if d["path"] not in seen:
+                landed.append({**{k: d[k] for k in ("app", "path", "etype")},
+                               "op": op})
+        # A staged-file import declares no refs at all — the row identifies as
+        # the file, and `path` stays None so it never links into /browse as if
+        # a filesystem path were an entry path.
+        refs = landed or [{"app": None, "path": None, "etype": None, "op": op}]
+        if inp.get("file_path"):
+            note = f"file: {inp['file_path']}"
+        if wres and wres["skipped"]:
+            note = f"{len(wres['skipped'])} skipped" + (f" · {note}" if note else "")
+    elif base == "create_relationship":
+        src_app = (inp.get("source_application") or inp.get("application")
+                   or inp.get("source_app") or inp.get("from_application"))
+        tgt_app = (inp.get("target_application") or inp.get("target_app")
+                   or inp.get("to_application") or src_app)
+        refs = [{"app": src_app, "path": inp.get("source_path"),
+                 "etype": _etype_hint(inp.get("source_path")), "op": op}]
+        if inp.get("target_path"):
+            note = (f"{inp.get('relationship_type') or 'related'} → "
+                    f"{tgt_app or '?'}:{inp['target_path']}")
+    elif base in ("rename_entry", "move_entry"):
+        old_app = inp.get("application") or inp.get("old_application")
+        refs = [{"app": old_app, "path": inp.get("old_path"),
+                 "etype": inp.get("entity_type") or _etype_hint(inp.get("old_path")),
+                 "op": op}]
+        new_app = inp.get("new_application") or old_app
+        if inp.get("new_path"):
+            note = f"→ {new_app or '?'}:{inp['new_path']}"
+    else:
+        path = inp.get("path") or inp.get("entry_path")
+        refs = [{"app": inp.get("application"), "path": path,
+                 "etype": inp.get("entity_type") or _etype_hint(path),
+                 "op": op}]
+        if base == "patch_content":
+            secs = [p.get("section") or p.get("path")
+                    for p in (inp.get("patches") or []) if isinstance(p, dict)]
+            secs = [s for s in secs if s] or (
+                [inp["section"]] if inp.get("section") else [])
+            verb = inp.get("operation") or inp.get("op")
+            note = (inp.get("change_summary")
+                    or ((verb + " " if verb else "") + ", ".join(secs)).strip()
+                    or None)
+        elif base == "update_entry":
+            secs = list((inp.get("content") or {}).keys()) \
+                if isinstance(inp.get("content"), dict) else []
+            note = inp.get("change_summary") or (", ".join(secs) or None)
+        elif base == "add_entry_tag":
+            note = inp.get("tag")
+        elif base == "rate_entry":
+            note = str(inp.get("rating")) if inp.get("rating") is not None else None
+        elif base == "upload_file":
+            note = inp.get("filename") or inp.get("file_path")
+    return op, refs, note
 
 
 _CLI_CALL_RE = re.compile(r"knowledge-cli\s+call\s+([a-z_]+)")
@@ -749,7 +1064,8 @@ def _bash_kmcp(inp):
     if not m:
         return None
     base = m.group(1)
-    if base not in READ_TOOLS and base not in SURFACE_TOOLS:
+    if base not in READ_TOOLS and base not in SURFACE_TOOLS \
+            and base not in WRITE_TOOLS:
         return None
     # JSON positional argument (the documented form) carries the same shape as
     # the MCP input — application/path/query/entries all come through intact.
@@ -761,6 +1077,8 @@ def _bash_kmcp(inp):
     shim = {"application": args.get("application"), "path": args.get("path")}
     if args.get("query"):
         shim["query"] = args["query"]
+    if re.search(r"--dry[-_]run\b", cmd):
+        shim["dry_run"] = True
     return base, shim
 
 
@@ -1453,7 +1771,7 @@ def build_session(sid: str):
     cwd = branch = model = None
     usage = None
     title = None
-    n_reads = n_searches = 0
+    n_reads = n_searches = n_writes = 0
 
     for r in records:
         t = r.get("type")
@@ -1535,6 +1853,37 @@ def build_session(sid: str):
                             "result": _parse_search_result(
                                 (rmap.get(tid) or {}).get("text")),
                         })
+                    elif base in WRITE_TOOLS:
+                        # Writes used to fall through every branch and be
+                        # DROPPED: `base` is set (so the generic-tool branch,
+                        # gated on `base is None`, never saw them) but no
+                        # branch claimed them. The Context tab's written list
+                        # is the first thing to render them.
+                        n_writes += 1
+                        res = rmap.get(tid) or {}
+                        wres = _parse_write_result(res.get("text"))
+                        op, wrefs, note = _write_meta(base, inp, wres)
+                        dry = bool(inp.get("dry_run")) or bool(
+                            (wres or {}).get("dry_run"))
+                        err = bool(res.get("is_error")) or bool(
+                            (wres or {}).get("errors"))
+                        events.append({
+                            "kind": "write", "ts": ts, "uuid": uid, "sub": sub,
+                            "tid": tid, "tool": base, "via": via,
+                            "op": op, "dry_run": dry,
+                            "app": wrefs[0]["app"] if wrefs else None,
+                            "path": wrefs[0]["path"] if wrefs else None,
+                            "etype": wrefs[0]["etype"] if wrefs else None,
+                            "refs": wrefs, "note": note,
+                            "chars": res.get("chars"),
+                            "is_error": err,
+                            "error": (("; ".join((wres or {}).get("errors") or [])
+                                       or (res.get("text") or "")[:300]
+                                       or "the tool returned an error")
+                                      if err else None),
+                            "result": wres,
+                            "pending": tid in pend_ids,
+                        })
                     elif name == "AskUserQuestion":
                         qs = _parse_choice_questions(inp)
                         ansmap = _parse_choice_answer(
@@ -1609,7 +1958,7 @@ def build_session(sid: str):
         "mtime_age_s": round(mtime_age),
         "truncated": truncated,
         "counts": {"reads": n_reads, "searches": n_searches,
-                   "events": len(events)},
+                   "writes": n_writes, "events": len(events)},
         "claudemd": _claudemd_files(cwd),
         # deployed/served URLs mined from deploy/serve-shaped tool events
         # (Artifact publishes, deploy CLI output, server launches, PRs) —

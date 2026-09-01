@@ -685,6 +685,44 @@
   .hit-p { display:block; font:10.5px var(--mono); color:var(--muted); white-space:nowrap;
            overflow:hidden; text-overflow:ellipsis; }
 
+  /* ---- Context tab: surfaced (offered by a search) + written lists ---- */
+  .srf-q { display:flex; align-items:baseline; gap:6px; cursor:pointer;
+           padding:5px 7px; border:1px solid var(--border); border-radius:6px;
+           margin-bottom:5px; background:var(--surface2); font-size:11.5px; }
+  .srf-q:hover { border-color:var(--purple); }
+  .srf-q.open { border-color:var(--purple); margin-bottom:0;
+                border-bottom-left-radius:0; border-bottom-right-radius:0; }
+  .srf-tw { color:var(--muted); font:10px var(--mono); flex:none; }
+  .srf-tool { color:var(--purple); font:10px var(--mono); flex:none; }
+  .srf-qt { color:var(--ink); flex:1 1 auto; white-space:nowrap;
+            overflow:hidden; text-overflow:ellipsis; }
+  .srf-c { color:var(--muted); font:10px var(--mono); flex:none; }
+  .srf-b { border:1px solid var(--purple); border-top:none; border-radius:0 0 6px 6px;
+           padding:6px 6px 1px; margin-bottom:7px; }
+  .srf-b .hit { margin-bottom:5px; }
+  .srf-none { color:var(--muted); font:10.5px var(--mono); padding:2px 4px 7px; }
+  .srf-m { display:inline-block; width:13px; font:10px var(--mono); font-weight:700;
+           color:var(--muted); }
+  .srf-h.done .srf-m { color:var(--good); }
+  .srf-h.done .hit-t { color:var(--ink2); }
+  .srf-e { color:var(--ink2); }
+  .wfail { color:var(--bad); }
+  .wop { display:inline-block; font:9.5px var(--mono); font-weight:700;
+         text-transform:uppercase; letter-spacing:.4px; padding:0 5px;
+         border:1px solid currentColor; border-radius:9px; margin-right:6px;
+         vertical-align:1px; }
+  .wop.ok  { color:var(--good); }
+  .wop.rel { color:var(--purple); }
+  .wop.mv  { color:var(--warn); }
+  .wop.bad { color:var(--bad); }
+  .wop.dry { color:var(--muted); border-style:dashed; }
+  .wrt .hit-t { color:var(--ink); }
+  .wrt:hover { border-color:var(--good); }
+  .wr-x { font:10.5px var(--mono); color:var(--ink2); cursor:pointer;
+          margin-top:14px; padding:6px 8px; border:1px dashed var(--border);
+          border-radius:6px; }
+  .wr-x:hover { border-color:var(--accent); color:var(--accent); }
+
   .empty { color:var(--muted); padding:24px; font-size:13px; text-align:center; }
 
   /* ---- subagent navigation (agent chips, child header, nav badges) ---- */
@@ -3362,13 +3400,13 @@ async function showClaudeMd(n){
     <pre class="ang-detail">${esc(d.content||"(empty)")}</pre>`;
 }
 
-/* Writes tab: the files/kmcp angle groups + every write-shaped tool call
-   pulled from the event stream itself. */
+/* Writes tab: the files angle groups + every FILE write pulled from the event
+   stream itself. kmcp writes used to be filtered out of `e.tools` here — but
+   the server never emitted them in that list (a kmcp tool_use carries a
+   resolved base, so it never reached the generic-tool branch), so the filter
+   matched nothing. They are their own event kind now and belong to the
+   Context tab, which can show operation, dry-run and error per entry. */
 const FILE_WRITE_TOOLS = new Set(["Write", "Edit", "NotebookEdit"]);
-const KMCP_WRITE_BASES = new Set(["create_entry", "update_entry", "patch_content",
-  "import_entries", "import_lessons", "add_entry_tag", "create_relationship",
-  "delete_relationship", "move_entry", "rename_entry", "delete_entry",
-  "upload_file", "stage_template", "update_application", "create_application"]);
 
 /* The absolute path behind a file-write row. The server's _tool_summary()
    renders these labels as "<Tool> <file_path>" (Write/Edit/NotebookEdit), so
@@ -3405,15 +3443,17 @@ function copyRowPath(ev, el){
 function renderWrites(s){
   const el = document.getElementById("writes");
   const gs = (s.rail?.angles || []).filter(g => WRITE_ANGLES.has(g.angle));
-  const fileWr = [], kmcpWr = [];
+  const fileWr = [];
   for(const e of s.events || []){
     for(const t of e.tools || []){
       if(typeof t !== "object" || !t.name) continue;
       if(FILE_WRITE_TOOLS.has(t.name)) fileWr.push(t);
-      else if(t.name.startsWith("mcp__") &&
-              KMCP_WRITE_BASES.has(t.name.replace(/^mcp__.+__/,""))) kmcpWr.push(t);
     }
   }
+  // kmcp writes are their own event kind (server-side WRITE_TOOLS) and are
+  // listed with their operation, errors and dry-runs on the Context tab —
+  // this tab stays the FILE ledger and just points at them.
+  const nKmcp = (s.events || []).filter(e => e.kind === "write").length;
   const wrRows = ws => ws.map(t=>{
     const p = wrPath(t), g = t.is_error ? "✗" : "✎";
     // On a file write the glyph column doubles as a copy-path button; kmcp
@@ -3431,7 +3471,8 @@ function renderWrites(s){
   const parts = [];
   if(gs.length) parts.push(angGroups(gs));
   if(fileWr.length) parts.push(`<div class="wr-h" title="Write / Edit / NotebookEdit calls seen in this transcript — every file this session changed">file writes · ${fileWr.length}</div>${wrRows(fileWr)}`);
-  if(kmcpWr.length) parts.push(`<div class="wr-h" title="kmcp write tools called in this transcript (create / update / patch / import / …)">kmcp writes · ${kmcpWr.length}</div>${wrRows(kmcpWr)}`);
+  if(nKmcp) parts.push(`<div class="wr-x" onclick="setRailTab('context')"
+    title="kmcp entries this session created, updated or patched — listed with their operation on the Context tab">${nKmcp} kmcp write${nKmcp>1?"s":""} → Context tab</div>`);
   el.innerHTML = `<h3>Writes</h3>` +
     (parts.length ? parts.join("")
                   : `<div class="rl-empty">no file or kmcp writes seen in this
@@ -3931,15 +3972,191 @@ async function curateConfirm(itemId, action){
   box.innerHTML = `<div class="cur-ok">written + verified → <code>${esc(p)}</code></div>`;
 }
 
+/* ---------- Context tab: the three kmcp lists ----------------------------
+   CONSUMED — the entries this session actually opened.
+   SURFACED — the entries its searches OFFERED it, each marked consumed ✓ or
+              not: the useful signal is the results it never opened.
+   WRITTEN  — the entries it put back, with the operation, errors, and a
+              dry_run that was never followed by a real write shown AS a
+              dry-run rather than as a write.
+   All three are pure transcript derivations, extracted server-side (kind
+   read / search / write on /api/session). No model, no service, no state. */
+
+function refKey(app, path){
+  return `${(app||"").toLowerCase()}:${(path||"").toLowerCase()}`;
+}
+
+/* What the session consumed, as two lookups: exact app:path, plus a
+   path-only fallback used ONLY for reads that carried no application (a
+   malformed input must not silently mark a surfaced ref unopened). */
+function consumedIndex(reads){
+  const byRef = new Set(), byPath = new Set();
+  reads.forEach(e=>{
+    (e.targets||[]).forEach(t=>{
+      const [a, p] = splitRef(t);
+      byRef.add(refKey(a, p));
+      if(!a && p) byPath.add(p.toLowerCase());
+    });
+    if(e.path){
+      byRef.add(refKey(e.app, e.path));
+      if(!e.app) byPath.add(e.path.toLowerCase());
+    }
+  });
+  return {byRef, byPath};
+}
+function isConsumed(ix, h){
+  return ix.byRef.has(refKey(h.app, h.path))
+      || ix.byPath.has((h.path||"").toLowerCase());
+}
+
+/* Expanded surfaced-query groups. State lives OUT here (the console's
+   popover-state idiom) so the 3s poll re-render cannot collapse them. */
+const srfOpen = new Set();
+let srfKeys = [];
+function toggleSrf(i){
+  const k = srfKeys[i];
+  if(k == null) return;
+  if(srfOpen.has(k)) srfOpen.delete(k); else srfOpen.add(k);
+  if(curSession) renderSummary(curSession);
+}
+
+/* One group per distinct (tool, query); refs deduped within a group, and
+   counted globally so a ref several searches surfaced reads ×N. */
+function surfacedGroups(searches){
+  const groups = [], byKey = new Map(), globalN = new Map();
+  searches.forEach(e=>{
+    const hits = (e.result && e.result.hits) || [];
+    const key = `${e.tool}|${e.query||""}`;
+    let g = byKey.get(key);
+    if(!g){
+      g = {key, tool:e.tool, query:e.query, total:null, n:0, refs:new Map()};
+      byKey.set(key, g); groups.push(g);
+    }
+    g.n++;
+    if(e.result && e.result.total!=null) g.total = e.result.total;
+    hits.forEach(h=>{
+      const k = refKey(h.app, h.path);
+      globalN.set(k, (globalN.get(k)||0) + 1);
+      if(!g.refs.has(k)) g.refs.set(k, h);
+    });
+  });
+  return {groups, globalN};
+}
+
+function surfacedList(reads, searches){
+  const {groups, globalN} = surfacedGroups(searches);
+  srfKeys = groups.map(g=>g.key);
+  const ix = consumedIndex(reads);
+  const all = new Map();
+  groups.forEach(g=>g.refs.forEach((h,k)=>{ if(!all.has(k)) all.set(k,h); }));
+  const nRefs = all.size;
+  let nCons = 0; all.forEach(h=>{ if(isConsumed(ix,h)) nCons++; });
+  if(!groups.length) return {html:"", nRefs:0, nCons:0};
+  const body = groups.map((g,i)=>{
+    const open = srfOpen.has(g.key);
+    const refs = [...g.refs.values()];
+    const un = refs.filter(h=>!isConsumed(ix,h)).length;
+    const head = `<div class="srf-q${open?" open":""}" onclick="toggleSrf(${i})"
+      title="${esc(g.query||"")}">
+      <span class="srf-tw">${open?"▾":"▸"}</span>
+      <span class="srf-tool">${esc(g.tool||"?")}</span>
+      <span class="srf-qt">${esc(g.query||"(no query)")}</span>
+      <span class="srf-c" title="${refs.length} refs came back${
+        g.total!=null?` out of ${g.total.toLocaleString()} matches the base reported`:""}${
+        un?`; ${un} of them this session never opened`:""}${
+        g.n>1?`; this query ran ${g.n} times`:""}">${refs.length}${
+        g.total!=null?" of "+g.total.toLocaleString():""}${
+        un?` · ${un} unopened`:""}${g.n>1?" · ×"+g.n:""}</span></div>`;
+    if(!open) return head;
+    const rows = refs.map(h=>{
+      const done = isConsumed(ix, h);
+      const rep = globalN.get(refKey(h.app, h.path)) || 1;
+      const href = BROWSE_BASE + encodeURIComponent(h.app||"") + "/" + (h.path||"");
+      return `<a class="hit srf-h${done?" done":""}" href="${esc(href)}" target="_blank"
+        title="${done?"this session opened this entry":"offered by the search, never opened"}">
+        <span class="hit-t"><span class="srf-m">${done?"✓":"○"}</span>${esc(h.title||h.path||"?")}</span>
+        <span class="hit-p"><span class="rl-app">${esc(h.app||"?")}</span> · ${esc(h.path||"?")}${h.etype?` · <span class="srf-e">${esc(h.etype)}</span>`:""}${rep>1?" · ×"+rep:""}</span></a>`;
+    }).join("");
+    return head + `<div class="srf-b">${rows
+      || `<div class="srf-none">no refs could be read out of this result</div>`}</div>`;
+  }).join("");
+  return {nRefs, nCons, html:
+    `<div class="rl-hits"><div class="rl-hits-h"
+       title="every entry a search offered this session, grouped by the query that surfaced it">surfaced entries — offered by a search · ${nCons}/${nRefs} opened</div>${body}</div>`};
+}
+
+const WOP_CLS = {created:"ok", updated:"ok", patched:"ok", staged:"ok",
+                 related:"rel", unrelated:"rel", tagged:"rel", rated:"rel",
+                 renamed:"mv", moved:"mv", uploaded:"ok",
+                 deleted:"bad", "dry-run":"dry", wrote:"ok"};
+
+function writtenList(writes){
+  if(!writes.length) return "";
+  const seen = new Map();
+  writes.forEach(e=>{
+    const refs = (e.refs && e.refs.length) ? e.refs
+               : [{app:e.app, path:e.path, etype:e.etype, op:e.op}];
+    refs.forEach(r=>{
+      const op = r.op || e.op || "wrote";
+      // A pathless row (a staged-file import) is keyed by tool+note so two
+      // different staged files do not collapse into one row.
+      const k = refKey(r.app, r.path) + "|" + op
+              + (r.path ? "" : "|" + e.tool + "|" + (e.note||""));
+      const g = seen.get(k) || {app:r.app, path:r.path, etype:r.etype, op,
+                                tool:e.tool, via:e.via, note:e.note,
+                                n:0, dry:0, real:0, err:0, error:null};
+      g.n++;
+      if(e.dry_run) g.dry++; else g.real++;
+      if(e.is_error){ g.err++; if(!g.error) g.error = e.error; }
+      if(!g.note && e.note) g.note = e.note;
+      seen.set(k, g);
+    });
+  });
+  const rows = [...seen.values()].map(g=>{
+    // A dry_run never followed by a real write is a dry-run, not a write.
+    const dryOnly = g.dry > 0 && g.real === 0;
+    const op = dryOnly ? "dry-run" : g.op;
+    const tip = [`${g.tool} · via ${g.via||"mcp"}`,
+                 g.dry?`${g.dry} dry-run pass${g.dry>1?"es":""}`:"",
+                 g.real?`${g.real} write${g.real>1?"s":""}`:"",
+                 g.err?`${g.err} failed`:""].filter(Boolean).join(" · ");
+    const chip = `<span class="wop ${WOP_CLS[op]||"ok"}">${esc(op)}</span>`;
+    // The error chip means THIS ENTRY never landed. An entry that failed twice
+    // and then succeeded did land — the failures ride in the meta line and the
+    // tooltip instead, or the chip would libel every retried write.
+    const err = (g.err && g.err === g.n)
+      ? `<span class="wop bad" title="${esc(g.error||"the tool returned an error")}">error</span>` : "";
+    // ×N counts the REAL writes; a dry-run pass that preceded them is its own
+    // note, so "×2" never means "written twice" when one pass only validated.
+    const nShown = dryOnly ? g.n : g.real;
+    const meta = `<span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span>${
+        g.etype?` · <span class="srf-e">${esc(g.etype)}</span>`:""}${
+        nShown>1?" · ×"+nShown:""}${(!dryOnly && g.dry)?` · ${g.dry} dry-run`:""}${
+        (g.err && !err)?` · <span class="wfail">${g.err} failed</span>`:""}${
+        g.note?" · "+esc(g.note):""}</span>`;
+    const label = `<span class="hit-t">${chip}${err}${esc(g.path||"("+g.tool+")")}</span>`;
+    if(!g.path)   // a staged-file import or a malformed input still gets a row
+      return `<div class="hit wrt" style="cursor:default" title="${esc(tip)}">${label}${meta}</div>`;
+    const href = BROWSE_BASE + encodeURIComponent(g.app||"") + "/" + g.path;
+    return `<a class="hit wrt" href="${esc(href)}" target="_blank"
+      title="${esc(tip)}">${label}${meta}</a>`;
+  }).join("");
+  return `<div class="rl-hits"><div class="rl-hits-h"
+    title="kmcp entries this session created, updated, patched or related — the writes side of the same ledger">written / modified entries</div>${rows}</div>`;
+}
+
 function renderSummary(s){
   const reads = s.events.filter(e=>e.kind==="read");
   const searches = s.events.filter(e=>e.kind==="search");
+  const writes = s.events.filter(e=>e.kind==="write");
   const byMode = {}; let total = 0;
   reads.forEach(e=>{ byMode[e.mode]=(byMode[e.mode]||0)+1; total += e.chars||0; });
   const srfBytes = searches.reduce((a,e)=>a+(e.chars||0),0);
+  const wErr = writes.filter(e=>e.is_error).length;
+  const wDry = writes.filter(e=>e.dry_run && !e.is_error).length;
   const modes = Object.entries(byMode).map(([m,n])=>`<span class="badge ${m}">${m} ${n}</span>`).join(" ");
   const el = document.getElementById("summary");
-  if(!reads.length && !searches.length){ el.innerHTML=""; return; }
+  if(!reads.length && !searches.length && !writes.length){ el.innerHTML=""; return; }
   // Roll the consumed reads up to unique entries so each one is a link into
   // /browse — the aggregate counts say how much context was loaded, this says
   // *which* entries (a re-read of the same entry folds in as ×n).
@@ -3976,13 +4193,19 @@ function renderSummary(s){
       <span class="hit-t">${esc(g.tool)} · batch</span>
       <span class="hit-p"><span class="rl-app">${esc(g.app||"?")}</span> · ${sub}</span></div>`;
   }).join("");
+  const srf = surfacedList(reads, searches);
   el.innerHTML = `
     <h3>Session kmcp usage</h3>
     <div class="kv"><span class="k">📖 consumed</span><span class="v">${reads.length} · ${kb(total)}</span></div>
-    <div class="kv"><span class="k">🔍 surfaced</span><span class="v">${searches.length} · ${kb(srfBytes)}</span></div>
+    <div class="kv"><span class="k">🔍 surfaced</span><span class="v">${searches.length} · ${kb(srfBytes)}${
+      srf.nRefs?` · ${srf.nRefs} refs`:""}</span></div>
+    <div class="kv"><span class="k">✍ written</span><span class="v">${writes.length}${
+      wDry?` · ${wDry} dry-run`:""}${wErr?` · <span class="wfail">${wErr} failed</span>`:""}</span></div>
     <div class="kv"><span class="k">≈ tokens read</span><span class="v">≈${Math.round(total/4/1000)}k</span></div>
     ${modes?`<div style="margin-top:8px">${modes}</div>`:""}
-    ${entries?`<div class="rl-hits"><div class="rl-hits-h">consumed entries — linked into /browse</div>${entries}</div>`:""}`;
+    ${entries?`<div class="rl-hits"><div class="rl-hits-h">consumed entries — linked into /browse</div>${entries}</div>`:""}
+    ${srf.html}
+    ${writtenList(writes)}`;
 }
 
 /* ---------- CR: context-reduction fork (fork with curation) ----------------

@@ -19,6 +19,59 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.15.0] - 2026-09-01
+
+### Added
+- **Console Context tab — SURFACED and WRITTEN, beside CONSUMED.** The tab
+  answered only *what did this session open*. It now answers the other two
+  thirds of the same ledger:
+  - **Surfaced entries** — every ref a search OFFERED the session, grouped
+    under the query that surfaced it (collapsible, labelled with the tool:
+    `search` / `hybrid_search` / `traverse_graph` / `list_by_tag` …), deduped
+    per query, counted `×N` across queries, and each marked **consumed ✓** or
+    **○ not** by cross-referencing the read events. The useful signal is the
+    hits the session never opened; the group header carries `n unopened` and
+    the section header `k/n opened`.
+  - **Written / modified entries** — the kmcp writes, with an operation chip
+    (created / updated / patched / related / renamed / moved / deleted /
+    tagged / **dry-run**), an error chip carrying the failure text, `×N` for
+    repeated writes to one entry, and a link into `/browse`. A `dry_run` that
+    was never followed by a real write renders **as a dry-run**, not as a
+    write.
+  - A `✍ written` counter joins consumed/surfaced, with `n dry-run` /
+    `n failed` breakdowns.
+
+### Fixed
+- **kmcp writes were being DROPPED from `/api/session` entirely.** The
+  extraction loop's generic-tool branch is gated on `base is None`, which a
+  resolved kmcp base never is — so every `import_entries`, `create_entry`,
+  `update_entry`, `patch_content`, `create_relationship`, `rename_entry`,
+  `move_entry`, `add_entry_tag`, `delete_entry`, `import_lessons`,
+  `stage_template` and `upload_file` a session ever made fell through every
+  branch and vanished. They are now a first-class `kind: "write"` event
+  (`WRITE_TOOLS`, seeded from the angles `W` extractor's own `_WRITE_TOOLS` so
+  `csd angles` and the console cannot drift), carrying tool / op / app / path /
+  refs / `dry_run` / `via` / error, with the tool_result's `created[]` /
+  `updated[]` as the authority on created-vs-updated. The Writes tab's
+  `KMCP_WRITE_BASES` filter had been matching that never-emitted list — it is
+  replaced by a one-line cross-link to the Context tab, and the tab stays the
+  FILE ledger.
+- **A refused write read as a successful one.** `import_entries` answers a
+  refusal as `{"error": …, "message": …}` with `is_error` unset — "Missing
+  input", "Import path not allowed", "Import failed". Those now surface as
+  errors. On one real session this turned 9 silent successes into 9 visible
+  failures.
+- **Text-rendered search results surfaced nothing.** kmcp returns the compact
+  `<query> · N hits · app=…` / `types: …` / indented `etype  app:path  title`
+  form at `detail=minimal`, which is not JSON — `_parse_search_result` gave up
+  on it. It is parsed now (`_parse_search_text`), so those searches carry refs
+  like the JSON ones. `_parse_search_result` also accepts a bare list and the
+  `entries` / `nodes` / `items` / `relationships` containers the other
+  SURFACE_TOOLS return, and reports `returned` / `shown` against a 40-hit cap
+  rather than silently truncating at 12.
+- The knowledge-cli **Bash shim** is admitted for writes as it already was for
+  reads (`via: "cli"`), including `--dry-run`.
+
 ## [3.14.0] - 2026-09-01
 
 ### Added

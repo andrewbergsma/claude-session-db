@@ -2828,10 +2828,12 @@ function toggleCmd(id){
   if(curSession) renderStream(curSession);
 }
 async function fetchToolOut(tid){
-  if(!curSession || toolOut.has(tid)) return;
+  // curId is the session ID; curSession is the rendered PAYLOAD object —
+  // stringifying that asked the server for "[object Object]".
+  if(!curId || toolOut.has(tid)) return;
   toolOut.set(tid, {loading:true});
   try{
-    const r = await fetch(`/api/tool_result?id=${encodeURIComponent(curSession)}&tid=${encodeURIComponent(tid)}`);
+    const r = await fetch(`/api/tool_result?id=${encodeURIComponent(curId)}&tid=${encodeURIComponent(tid)}`);
     const d = await r.json();
     toolOut.set(tid, r.ok ? d : {error: d.error || `HTTP ${r.status}`});
   }catch(e){ toolOut.set(tid, {error: String(e)}); }

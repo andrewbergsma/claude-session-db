@@ -19,6 +19,21 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.18.1] - 2026-09-02
+
+### Fixed
+- **Comments are tinted inside fenced code blocks.** A code fence in a chat
+  turn rendered as one flat run of `--ink`, so the `# why` beside each line
+  read as more code. `mdCode` now wraps comments in a muted italic span
+  (`--md-comment`), comments ONLY — a full highlighter is a library, and
+  mdLite has none by design. The fence's language tag picks the grammar
+  (`#`, `//` + `/* */`, `--`, `<!-- -->`, `;`); an untagged fence gets the
+  `#` grammar since shell and python are what lands untagged. `#` counts only
+  at line start or after whitespace and never inside a quoted string, so
+  `$#`, `url#frag` and `"#1"` stay code; a string resets at end of line so
+  one stray apostrophe cannot swallow the block. An unterminated fence (a
+  turn cut mid-stream) now keeps its `data-lang` label too.
+
 ## [3.18.0] - 2026-09-01
 
 ### Added

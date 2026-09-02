@@ -23,7 +23,7 @@
        Restrained on purpose: hue carries the block TYPE, never emphasis. */
     --md-head:#79c0ff; --md-subhead:#39c5cf; --md-code:#ffa657;
     --md-quote:#bc8cff; --md-strong:#f0f6fc; --md-marker:#5a7fb8;
-    --md-thead:#1f2937; --md-zebra:rgba(255,255,255,.022);
+    --md-thead:#1f2937; --md-zebra:rgba(255,255,255,.022); --md-comment:#8b949e;
     --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
     --rail-w:320px; --nav-w:440px;
   }
@@ -383,6 +383,7 @@
   .txt.md pre > code { display:block; white-space:pre; word-break:normal;
       font:12px/1.45 var(--mono); background:none; border:0; padding:0;
       color:var(--ink); }
+  .txt.md pre > code .c { color:var(--md-comment); font-style:italic; }
   .txt.md pre[data-lang]::before { content:attr(data-lang); display:block;
       font:9.5px var(--mono); text-transform:uppercase; letter-spacing:.6px;
       color:var(--md-subhead); margin-bottom:5px; }
@@ -5739,6 +5740,59 @@ function mdTable(head, aligns, rows){
    chat turns (a prompt's own line structure is meaningful and used to survive
    the old pre-wrap), OFF for CHANGELOG.md, which is hard-wrapped prose that
    must re-flow. */
+/* Comment tinting inside fenced code. Comments ONLY — a full highlighter is a
+   library, and the point of mdLite is that there is none. The fence's language
+   tag picks the comment grammar; an UNTAGGED fence gets the `#` grammar (shell
+   and python are what lands in a chat untagged). `#` counts only when it opens
+   the line or follows whitespace and never inside a quoted string, so `$#`,
+   `url#frag` and `"#1"` stay code. Strings reset at end of line: one stray
+   apostrophe must not swallow the rest of the block. */
+const MD_C_HASH  = /^(sh|bash|zsh|fish|shell|console|shell-session|python|py|python3|yaml|yml|toml|ruby|rb|perl|pl|r|make|makefile|dockerfile|ini|conf|cfg|env|dotenv|ps1|powershell|nix|elixir|ex|exs|tcl|awk|gitignore|properties|text|txt|plaintext)$/i;
+const MD_C_SLASH = /^(js|javascript|ts|typescript|jsx|tsx|mjs|cjs|java|c|h|cpp|cc|hpp|cs|csharp|go|golang|rust|rs|swift|kotlin|kt|scala|php|dart|json5|jsonc|proto|zig|groovy|gradle)$/i;
+const MD_C_CSS   = /^(css|scss|less)$/i;
+const MD_C_DASH  = /^(sql|psql|plpgsql|mysql|sqlite|lua|haskell|hs|ada|vhdl)$/i;
+const MD_C_XML   = /^(html|xml|svg|xhtml|markdown|md|vue)$/i;
+const MD_C_SEMI  = /^(lisp|clojure|clj|scheme|racket|el|asm|nasm)$/i;
+function mdCommentGrammar(lang){
+  const l = (lang || "").toLowerCase();
+  if(!l || MD_C_HASH.test(l)) return { line:["#"], block:[], hashWs:true };
+  if(MD_C_SLASH.test(l)) return { line:["//"], block:[["/*","*/"]] };
+  if(MD_C_CSS.test(l))   return { line:[],     block:[["/*","*/"]] };
+  if(MD_C_DASH.test(l))  return { line:["--"], block:[["/*","*/"]] };
+  if(MD_C_XML.test(l))   return { line:[],     block:[["<!--","-->"]] };
+  if(MD_C_SEMI.test(l))  return { line:[";"],  block:[] };
+  return null;
+}
+function mdCode(text, lang){
+  const g = mdCommentGrammar(lang);
+  if(!g) return esc(text);
+  const out = [], n = text.length;
+  let i = 0, seg = 0, q = null;
+  const emit = to => { if(to > seg) out.push(esc(text.slice(seg, to))); seg = to; };
+  const ws = ch => ch === undefined || ch === " " || ch === "\t" || ch === "\n";
+  while(i < n){
+    const ch = text[i];
+    if(q){                                   // inside a string: only its closer matters
+      if(ch === "\\"){ i += 2; continue; }
+      if(ch === q || ch === "\n") q = null;
+      i++; continue;
+    }
+    if(ch === '"' || ch === "'" || ch === "`"){ q = ch; i++; continue; }
+    let end = null;
+    for(const [o, c] of g.block){
+      if(text.startsWith(o, i)){ const e = text.indexOf(c, i + o.length);
+                                 end = e < 0 ? n : e + c.length; break; } }
+    if(end === null) for(const o of g.line){
+      if(!text.startsWith(o, i)) continue;
+      if(g.hashWs && !ws(text[i - 1])) break;
+      const e = text.indexOf("\n", i); end = e < 0 ? n : e; break; }
+    if(end !== null){ emit(i); out.push(`<span class="c">${esc(text.slice(i, end))}</span>`);
+                      i = seg = end; continue; }
+    i++;
+  }
+  emit(n);
+  return out.join("");
+}
 function mdLite(src, breaks){
   const out = [], para = [], quote = [];
   let list = null, listTag = "ul", fence = null, fenceLang = "", code = null;
@@ -5757,7 +5811,7 @@ function mdLite(src, breaks){
     if(fence !== null){
       if(f && f[1][0] === fence[0] && f[1].length >= fence.length && !f[2]){
         out.push(`<pre${fenceLang ? ` data-lang="${esc(fenceLang)}"` : ""}>`
-                 + `<code>${esc(code.join("\n"))}</code></pre>`);
+                 + `<code>${mdCode(code.join("\n"), fenceLang)}</code></pre>`);
         fence = null; code = null; continue;
       }
       code.push(raw); continue;
@@ -5812,7 +5866,8 @@ function mdLite(src, breaks){
     para.push(raw.trim());
   }
   // an unterminated fence (a turn cut mid-stream) still renders what it has
-  if(fence !== null && code) out.push(`<pre><code>${esc(code.join("\n"))}</code></pre>`);
+  if(fence !== null && code) out.push(`<pre${fenceLang ? ` data-lang="${esc(fenceLang)}"` : ""}>`
+                                      + `<code>${mdCode(code.join("\n"), fenceLang)}</code></pre>`);
   flush();
   return out.join("");
 }

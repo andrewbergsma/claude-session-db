@@ -368,8 +368,12 @@ _TOPICS_LOCK = threading.Lock()
 # summary_of / summary_child: the two ends of the off-session summary link —
 # the child run's overlay names the session it digests, the parent's names the
 # latest run that digested it. Durable (meta.json), unlike SUMMARIZING.
+# summary_pass / summary_kind ride along on the CHILD's overlay entry so the
+# Summary tab can reconstruct a session's whole run history across a console
+# restart — meta.json is the only durable record of a console-minted run
+# (SUMMARY_RUNS is in-process, and an events-only run never touches the ledger).
 META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed",
-               "summary_of", "summary_child")
+               "summary_of", "summary_child", "summary_pass", "summary_kind")
 MAX_TITLE_LEN = 200
 MAX_TOPIC_LEN = 80
 
@@ -3409,7 +3413,8 @@ def _await_summary(sid: str, proc, log_path: Path, base_size: int,
 
 
 def summarize_session(sid: str, cwd: str, archive: bool = True,
-                      delta: str = "auto", dry_run: bool = False) -> dict:
+                      delta: str = "auto", dry_run: bool = False,
+                      events_only: bool = False) -> dict:
     """Dispatch the off-session summary. archive=True (the default, and the
     only behaviour until the digest-reader actions) also archives the session
     the moment the summary is dispatched; archive=False leaves the session in
@@ -3419,16 +3424,29 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
     a session already captured once is summarized only over the tail its prior
     pass never saw, and the window travels to the child through the envelope's
     appended system prompt. dry_run resolves the scope and returns it WITHOUT
-    claiming, spawning or archiving anything — the testable seam."""
+    claiming, spawning or archiving anything — the testable seam.
+
+    `events_only` is the Summary tab's "Capture events" button: the SAME
+    off-session dispatch through the SAME envelope, with the skill's own
+    declared `--events` override appended to the prompt (Step 1 CLI overrides →
+    Step 3's thin-changelog path: changelog events only, Steps 5–8 skipped, so
+    no session entry, no lessons, no tasks). Because it writes no session
+    entry, it deliberately does NOT claim or open a `summary_passes` row — the
+    ledger counts capture passes, and an events run must not advance the pass
+    number or imply a watermark the reconcile gate would later stamp. It never
+    archives either: it is a partial capture, not a close-out."""
     if delta not in DELTA_MODES:
         delta = "auto"
     if SUMMARIZING.get(sid) == "running":
         return {"ok": False, "error": "a summary is already running"}
+    if events_only:
+        archive, delta = False, "off"
 
     scope = resolve_summary_scope(sid, delta)
     idle = _idle_warning(sid)
     src = find_session(sid)
-    base = {"action": "summarize", "session": sid,
+    base = {"action": "events" if events_only else "summarize", "session": sid,
+            "events_only": events_only,
             "pass": scope["pass"], "since": scope["since"],
             "delta_mode": "delta" if scope["delta"] else "full",
             "prior": scope["prior"], "scope_note": scope["note"],
@@ -3441,7 +3459,8 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
     # One dispatch per session, console AND launchd: the claim is an advisory
     # lock held for the whole pass. A lost claim REFUSES (two passes over one
     # tail would write two entries); an unreachable ledger does not.
-    claim = _claim_pass(sid, scope["pass"])
+    claim = {"conn": None, "refused": None, "note": None} if events_only \
+        else _claim_pass(sid, scope["pass"])
     if claim["refused"]:
         return {"ok": False, "error": claim["refused"], **base}
 
@@ -3475,8 +3494,9 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
         except OSError:
             ptitle = None
     ptitle = (ptitle or sid[:8]).strip()
+    prompt = f"{SUMMARIZE_PROMPT} {sid}" + (" --events" if events_only else "")
     try:
-        proc = spawn_claude(["-p", f"{SUMMARIZE_PROMPT} {sid}",
+        proc = spawn_claude(["-p", prompt,
                              "--session-id", child], cwd, child,
                             log_path=log_path, action="summarize",
                             envelope_ctx=ctx)
@@ -3491,9 +3511,12 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
     SUMMARIZING[sid] = "running"
     SUMMARY_RUNS[sid] = {"child": child, "pass": scope["pass"],
                          "started": time.time(), "ended": None, "rc": None,
+                         "kind": "events" if events_only else "summary",
                          "log": str(log_path)}
-    set_title(child, f"Summary of {ptitle} (pass {scope['pass']})")
-    _update_meta(child, summary_of=sid)
+    set_title(child, f"Events of {ptitle}" if events_only
+              else f"Summary of {ptitle} (pass {scope['pass']})")
+    _update_meta(child, summary_of=sid, summary_pass=scope["pass"],
+                 summary_kind="events" if events_only else "summary")
     _update_meta(sid, summary_child=child)
     if archive:
         set_archived(sid, True, reason="session-summary")
@@ -3504,13 +3527,326 @@ def summarize_session(sid: str, cwd: str, archive: bool = True,
             "child_session": child,
             "envelope": getattr(proc, "envelope_note", None),
             "ledger": claim.get("note"),
-            "note": ("independent off-session summary dispatched"
-                     + (f" — pass {scope['pass']}, NEW work since "
-                        f"{(scope['since'] or '')[:16]}" if scope["delta"]
-                        else " — full session scope")
+            "note": (("independent off-session EVENTS capture dispatched — "
+                      "changelog events only (no session entry, no lessons, "
+                      "no tasks); not recorded as a summary pass"
+                      if events_only else
+                      "independent off-session summary dispatched"
+                      + (f" — pass {scope['pass']}, NEW work since "
+                         f"{(scope['since'] or '')[:16]}" if scope["delta"]
+                         else " — full session scope"))
                      + "; "
                      + ("session archived" if archive else "session not archived")),
             **base}
+
+
+# ----------------------------------------------------------------------------
+# Summary tab (/api/summaries) — the runs, and what they WROTE
+#
+# The rail's answer to "has this session been captured, by what, and what landed
+# in the corpus". Three merged run sources and two entry sources, none of them a
+# new query engine:
+#
+#   runs    — the `summary_passes` ledger (the durable record every dispatcher
+#             settles into, launchd's local-Ollama passes included), the
+#             in-process SUMMARY_RUNS tracker (rc/started/ended for the run this
+#             console spawned), and the console-minted CHILD runs recorded on
+#             meta.json (`summary_of` on the child). A ledger row with no child
+#             is a phase-4 run; a child with no ledger row is an events capture
+#             (which deliberately takes no pass number).
+#   entries — the knowledge DB, ONE query: session entries carrying this sid
+#             plus whatever refs the ledger names; and every kmcp WRITE seen in
+#             this session's own transcript and in each child run's transcript,
+#             pulled through build_session — the very extractor the Context tab
+#             renders, so the two can never disagree about a verdict.
+#
+# ON-DEMAND ONLY. resolve_summary_scope classifies the transcript tail and
+# build_session re-parses whole JSONL files; this must never ride the nav poll.
+#
+# DOCTRINE, as everywhere else on this seam: it never raises and never 500s for
+# a degraded source. An unreachable archive or knowledge DB costs the parts that
+# needed it and lands in `warnings`; the transcript-derived half still renders.
+# ----------------------------------------------------------------------------
+_LEDGER_SQL = """
+    SELECT pass, status, detail, application, path, created_at, updated_at
+    FROM summary_passes WHERE session_id = %s ORDER BY pass
+"""
+# One query, both populations: the session entries a capture produced (matched
+# on content.session_id, the same join session_mgmt uses for its watermark of
+# last resort) and any ref the pass ledger already names. entity_type is pinned
+# on the session_id arm so the jsonb arm stays selective.
+_SUMMARY_ENTRIES_SQL = """
+    SELECT application, path, entity_type, title, description,
+           created_at, updated_at, version
+    FROM entries
+    WHERE NOT deleted
+      AND ((entity_type = 'session'
+            AND lower(content->>'session_id') = %(sid)s)
+           OR (application || ':' || path) = ANY(%(refs)s))
+"""
+_PASS_IN_TITLE = re.compile(r"\(pass (\d+)\)")
+MAX_ENTRY_REFS = 400       # bound on the ANY() array of the one corpus query
+
+
+def _verdict_rank(v) -> int:
+    """A dry-run never outranks the write it rehearsed (the Context tab's rule,
+    kept here): a ref whose only evidence is a dry-run renders as a dry-run,
+    but a real write later in the transcript always wins."""
+    return -1 if v is None else 0 if v == "dry-run" else 1
+
+
+def _ledger_passes(sid: str) -> list:
+    """Every recorded pass for one session. RAISES (the caller degrades)."""
+    if not CSD_DSN:
+        raise RuntimeError("no archive DSN configured")
+    import psycopg
+    from psycopg.rows import dict_row
+    with psycopg.connect(CSD_DSN, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        if conn.execute("SELECT to_regclass('public.summary_passes') AS t"
+                        ).fetchone()["t"] is None:
+            return []
+        return [dict(r) for r in conn.execute(_LEDGER_SQL, (sid,)).fetchall()]
+
+
+def _kmcp_entries(sid: str, refs: list) -> list:
+    """The corpus side of the entry list. ONE query. RAISES."""
+    if not KMCP_DSN:
+        raise RuntimeError("no knowledge DSN configured")
+    import psycopg
+    from psycopg.rows import dict_row
+    with psycopg.connect(KMCP_DSN, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        rows = conn.execute(_SUMMARY_ENTRIES_SQL,
+                            {"sid": sid.lower(), "refs": refs}).fetchall()
+    return [dict(r) for r in rows]
+
+
+def _child_runs_of(sid: str) -> list:
+    """Console-minted runs that digested `sid`, off meta.json (durable across a
+    restart, unlike SUMMARY_RUNS). Newest first by dispatch stamp."""
+    out = []
+    for csid, m in (_read_meta_overlay() or {}).items():
+        if not isinstance(m, dict) or m.get("summary_of") != sid:
+            continue
+        title = m.get("title") or ""
+        pass_no = m.get("summary_pass")
+        if not pass_no:
+            hit = _PASS_IN_TITLE.search(title)
+            pass_no = int(hit.group(1)) if hit else None
+        out.append({"child": csid, "pass": pass_no, "title": title or None,
+                    "kind": m.get("summary_kind") or "summary",
+                    "dispatched_at": m.get("set_at")})
+    out.sort(key=lambda r: r.get("dispatched_at") or "", reverse=True)
+    return out
+
+
+def _run_writes(sid: str, warnings: list) -> list:
+    """kmcp writes seen in ONE transcript, via the Context tab's own extractor
+    (build_session → the `write` events). A transcript that does not exist yet
+    (a run dispatched seconds ago) is not a failure — it contributes nothing."""
+    try:
+        s = build_session(sid)
+    except Exception as exc:  # noqa: BLE001 — one unreadable run, not the tab
+        warnings.append(f"transcript of {sid[:8]} unreadable "
+                        f"({type(exc).__name__}: {exc})")
+        return []
+    if not s:
+        return []
+    out = []
+    for e in s.get("events") or []:
+        if e.get("kind") != "write":
+            continue
+        refs = e.get("refs") or [{"app": e.get("app"), "path": e.get("path"),
+                                  "etype": e.get("etype"), "op": "wrote"}]
+        for r in refs:
+            if not r.get("path"):
+                continue          # a staged-file import names no entry
+            verdict = ("error" if e.get("is_error") else
+                       "dry-run" if e.get("dry_run") else
+                       r.get("op") or "wrote")
+            out.append({"app": r.get("app"), "path": r["path"],
+                        "etype": r.get("etype") or _etype_hint(r.get("path")),
+                        "verdict": verdict, "tool": e.get("tool"),
+                        "note": e.get("note"), "error": e.get("error"),
+                        "ts": e.get("ts"), "by": sid})
+    return out
+
+
+def _merge_entries(writes: list, corpus: list, run_labels: dict) -> list:
+    """Dedupe by app:path. The LATEST real write wins the verdict; a dry-run
+    never overrides the write it rehearsed. The corpus row supplies title,
+    entity type and the created/updated timestamps a transcript cannot know."""
+    rows: dict = {}
+    for w in sorted(writes, key=lambda x: x.get("ts") or ""):
+        key = f"{w['app'] or '?'}:{w['path']}"
+        cur = rows.get(key)
+        if cur is None:
+            cur = rows[key] = {"key": key, "app": w["app"], "path": w["path"],
+                               "etype": w["etype"], "title": None,
+                               "verdict": None, "note": w.get("note"),
+                               "error": w.get("error"), "tool": w.get("tool"),
+                               "ts": w.get("ts"), "by": [], "in_kmcp": False}
+        if w["by"] not in cur["by"]:
+            cur["by"].append(w["by"])
+        cur["etype"] = cur["etype"] or w["etype"]
+        cur["ts"] = w.get("ts") or cur["ts"]
+        if _verdict_rank(w["verdict"]) >= _verdict_rank(cur["verdict"]):
+            cur.update(verdict=w["verdict"], tool=w.get("tool"),
+                       note=w.get("note"), error=w.get("error"))
+    for c in corpus:
+        key = f"{c['application']}:{c['path']}"
+        cur = rows.get(key)
+        if cur is None:
+            cur = rows[key] = {"key": key, "app": c["application"],
+                               "path": c["path"], "etype": c["entity_type"],
+                               "title": None, "verdict": None, "note": None,
+                               "error": None, "tool": None, "ts": None,
+                               "by": [], "in_kmcp": False}
+        cur["in_kmcp"] = True
+        cur["title"] = c.get("title") or cur["title"]
+        cur["etype"] = c.get("entity_type") or cur["etype"]
+        cur["version"] = c.get("version")
+        cur["created_at"] = _isoz(c.get("created_at"))
+        cur["updated_at"] = _isoz(c.get("updated_at"))
+        cur["ts"] = cur["ts"] or cur["updated_at"] or cur["created_at"]
+        if cur["verdict"] is None:
+            # No write in any transcript we can see — the corpus row is the
+            # only evidence, and its version says which way it landed.
+            cur["verdict"] = "updated" if (c.get("version") or 1) > 1 else "created"
+    for r in rows.values():
+        r["by_labels"] = [run_labels.get(b, b[:8]) for b in r["by"]]
+    return sorted(rows.values(), key=lambda r: r.get("ts") or "", reverse=True)
+
+
+def _isoz(dt):
+    try:
+        return dt.isoformat() if dt is not None else None
+    except Exception:  # noqa: BLE001
+        return str(dt) if dt is not None else None
+
+
+def summaries_payload(sid: str):
+    """(payload, code) for GET /api/summaries. Never raises."""
+    if ":" in sid:
+        return {"error": "child (subagent) sessions are not summarized on "
+                         "their own — ask for the parent session id",
+                "parent": sid.split(":", 1)[0]}, 400
+    warnings: list = []
+
+    # --- the grade, in the words the buttons use --------------------------
+    scope = resolve_summary_scope(sid, "auto")
+    kind = "delta" if scope["delta"] else ("none" if scope["warning"] else "full")
+    from .. import summarize as ph4
+    grade = {
+        "scope": kind, "pass": scope["pass"], "since": scope["since"],
+        "source": scope["source"],
+        "source_label": ph4.WATERMARK_SOURCES.get(scope["source"], scope["source"]),
+        "prior": scope["prior"], "records": scope["records"],
+        "note": scope["note"], "warning": scope["warning"],
+        "summarized": bool(scope["prior"] or scope["pass"] > 1),
+        "running": SUMMARIZING.get(sid) == "running",
+        "state": SUMMARIZING.get(sid),
+        "idle_warning": _idle_warning(sid),
+    }
+    if scope["note"] and "unresolved" in scope["note"]:
+        warnings.append(scope["note"])
+
+    # --- runs: ledger ⨝ meta children ⨝ the in-process tracker -------------
+    ledger = []
+    try:
+        ledger = _ledger_passes(sid)
+    except Exception as exc:  # noqa: BLE001
+        warnings.append(f"pass ledger unavailable ({type(exc).__name__}: {exc})"
+                        " — only console-minted runs are listed")
+    runs, by_pass = [], {}
+    for r in ledger:
+        app, path = r.get("application"), r.get("path")
+        row = {"pass": r["pass"], "status": r["status"], "detail": r.get("detail"),
+               "ref": f"{app}:{path}" if app and path else None,
+               "app": app, "path": path, "child": None, "child_title": None,
+               "kind": "summary", "origin": "phase-4",
+               "created_at": _isoz(r.get("created_at")),
+               "updated_at": _isoz(r.get("updated_at")),
+               "rc": None, "in_ledger": True}
+        runs.append(row)
+        by_pass[r["pass"]] = row
+    for c in _child_runs_of(sid):
+        row = by_pass.get(c["pass"]) if c["kind"] != "events" else None
+        if row is None:
+            row = {"pass": c["pass"], "status": None, "detail": None,
+                   "ref": None, "app": None, "path": None,
+                   "kind": c["kind"], "origin": "console",
+                   "created_at": c["dispatched_at"], "updated_at": None,
+                   "rc": None, "in_ledger": False}
+            runs.append(row)
+        row.update(child=c["child"], child_title=c["title"],
+                   kind=c["kind"], origin="console")
+        row["created_at"] = row["created_at"] or c["dispatched_at"]
+        row["dispatched_at"] = c["dispatched_at"]
+    live = SUMMARY_RUNS.get(sid)
+    if live:
+        row = next((r for r in runs if r.get("child") == live.get("child")), None)
+        if row is None:
+            row = {"pass": live.get("pass"), "status": None, "detail": None,
+                   "ref": None, "app": None, "path": None,
+                   "child": live.get("child"), "child_title": None,
+                   "kind": live.get("kind") or "summary", "origin": "console",
+                   "created_at": None, "updated_at": None, "in_ledger": False}
+            runs.append(row)
+        row["rc"] = live.get("rc")
+        row["started"] = live.get("started")
+        row["ended"] = live.get("ended")
+        if live.get("ended") is None:
+            row["status"] = "in_flight"
+        elif not row["in_ledger"]:
+            row["status"] = "written" if live.get("rc") == 0 else "failed"
+            row["detail"] = row["detail"] or (
+                None if live.get("rc") == 0 else f"child rc={live.get('rc')}")
+    for r in runs:
+        r["status"] = r["status"] or "unknown"
+        r["running"] = r["status"] == "in_flight"
+    runs.sort(key=lambda r: (r.get("dispatched_at") or r.get("updated_at")
+                             or r.get("created_at") or "",
+                             r.get("pass") or 0), reverse=True)
+
+    # --- entries: this session's writes + every child run's + the corpus ---
+    labels = {sid: "this session"}
+    writes = _run_writes(sid, warnings)
+    for r in runs:
+        if not r.get("child"):
+            continue
+        labels[r["child"]] = ("events run" if r["kind"] == "events"
+                              else f"pass {r['pass']} run" if r.get("pass")
+                              else "summary run")
+        writes += _run_writes(r["child"], warnings)
+    # The refs arm of the ONE knowledge query covers what the ledger names AND
+    # what the transcripts wrote — otherwise every non-session write (a patched
+    # owner, a lesson) reports "not in corpus" purely because it was never
+    # looked up. Capped so a write-heavy session cannot grow the array unbounded.
+    refs = sorted({r["ref"] for r in runs if r.get("ref")}
+                  | {f"{w['app']}:{w['path']}" for w in writes if w.get("app")})
+    corpus, corpus_ok = [], True
+    try:
+        corpus = _kmcp_entries(sid, refs[:MAX_ENTRY_REFS])
+    except Exception as exc:  # noqa: BLE001
+        corpus_ok = False
+        warnings.append(f"knowledge DB unavailable ({type(exc).__name__}: {exc})"
+                        " — entries are transcript-derived only, and none can "
+                        "be confirmed present in the corpus")
+    if len(refs) > MAX_ENTRY_REFS:
+        warnings.append(f"{len(refs) - MAX_ENTRY_REFS} written refs beyond the "
+                        f"{MAX_ENTRY_REFS}-ref lookup cap are listed unconfirmed")
+    entries = _merge_entries(writes, corpus, labels)
+
+    return {"session_id": sid, "grade": grade, "runs": runs,
+            "entries": entries, "warnings": warnings, "corpus_ok": corpus_ok,
+            "sources": ["summary_passes ledger (archive DB)",
+                        "console run index (meta.json) + in-process tracker",
+                        "kmcp writes extracted from this transcript and each "
+                        "run's transcript",
+                        "knowledge DB entries (session_id + ledger refs)"],
+            "generated_at": time.time()}, 200
 
 
 # ----------------------------------------------------------------------------
@@ -5862,6 +6198,18 @@ class Handler(SimpleHTTPRequestHandler):
             if p is None:
                 return self._json({"error": "not found"}, 404)
             return self._json({"timeline": session_timeline.payload(sid, p)})
+        if u.path == "/api/summaries":
+            # The Summary rail tab: runs + what they wrote. ON DEMAND ONLY —
+            # it grades the transcript tail and re-parses each run's JSONL, so
+            # it must never be folded into the nav poll.
+            sid = (parse_qs(u.query).get("id") or [""])[0]
+            if not sid:
+                return self._json({"error": "id required"}, 400)
+            try:
+                payload, code = summaries_payload(sid)
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
         if u.path == "/api/summary-scope":
             # The Summarize label's data for ONE session (the reader overlay
             # can be open on a session the detail pane isn't showing).
@@ -6057,9 +6405,12 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json(
                     {"error": f"delta must be one of {', '.join(DELTA_MODES)}"},
                     400)
+            # body.events=true → the skill's own --events override: changelog
+            # events only, no session entry, no ledger pass, never archives.
             r = summarize_session(sid, cwd,
                                   archive=body.get("archive", True) is not False,
-                                  delta=mode, dry_run=bool(body.get("dry_run")))
+                                  delta=mode, dry_run=bool(body.get("dry_run")),
+                                  events_only=bool(body.get("events")))
             return self._json(r, 200 if r["ok"] else 409)
 
         if route == "/api/angles/mine":

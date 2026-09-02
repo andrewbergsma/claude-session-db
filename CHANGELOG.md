@@ -19,6 +19,50 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.22.0] - 2026-09-02
+
+### Added
+- **Summary rail tab** (`GET /api/summaries`). A seventh right-rail tab that
+  answers, for one session: *has this been captured, by what, and what landed
+  in the corpus* — plus the controls to do it. Three bands.
+  - **Controls** — **Summarize** (auto scope; the pass-aware label the chat
+    header already uses: "Summarize NEW work since ‹date› (pass N)", disabled
+    with the reason when the grade is `none`), **Full re-capture**
+    (`delta:"off"`, always available), **Capture events**, and ⟳. Buttons
+    disable with their reason while a run is in flight. The current grade is
+    stated in words underneath (watermark, source, pass, prior entry).
+  - **Runs** — one row per summary run, newest first, merged from three
+    independent sources: the `summary_passes` ledger (the only one that sees
+    launchd's phase-4 local-Ollama passes, marked `phase-4`), the console-minted
+    child runs on `meta.json` (durable across a restart), and the in-process
+    `SUMMARY_RUNS` tracker (rc + in-flight). A row links into the child run's
+    own transcript, exactly as the summarizing chip does.
+  - **Entries written** — grouped by entity type, each `app:path` a **link into
+    /browse**. Deduped across the session's own transcript and every run's,
+    extracted by the *Context tab's own* write extractor (so the two can never
+    disagree about a created/updated/dry-run/error verdict), and joined to the
+    knowledge DB in ONE query so a written ref is confirmed present in the
+    corpus — or flagged `not in corpus` when it is not.
+  On-demand only (it grades the transcript tail and re-parses each run's
+  JSONL); it re-polls only while a run is in flight, never on the nav poll.
+- **Capture events** — the same off-session dispatch through the same
+  `spawn_claude(action="summarize")` permission envelope, with the
+  /session-summary skill's **own** `--events` override appended (Step 1 CLI
+  overrides → Step 3's thin-changelog path: changelog `event` entries only,
+  Steps 5–8 skipped, so no session entry, no lessons, no tasks). It writes no
+  session entry, so it deliberately takes **no `summary_passes` claim** — a
+  ledger row would advance the pass number and imply a watermark the reconcile
+  gate would later stamp — and it never archives. `POST /api/summarize` takes
+  `events: true`.
+- `summary_pass` / `summary_kind` on a child run's `meta.json` overlay, so a
+  session's whole run history survives a console restart.
+
+### Notes
+- Degrade doctrine unchanged: `/api/summaries` never raises and never 500s for
+  a degraded source. An unreachable archive or knowledge DB costs only the part
+  that needed it and lands in `warnings[]`; the transcript-derived half still
+  renders. A child (`parent:agent`) key is refused 400, pointing at the parent.
+
 ## [3.21.0] - 2026-09-02
 
 ### Added

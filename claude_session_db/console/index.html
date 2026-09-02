@@ -1104,6 +1104,60 @@
   .tlrow.pending .sm { color:var(--muted); font-style:italic; }
   .tlfoot { color:var(--muted); font:10.5px var(--mono); margin-top:10px;
            padding-top:8px; border-top:1px solid var(--border); }
+  /* ---- Summary rail tab: controls · runs · entries written ----
+     One column, three bands. The entry rows are links OUT (into /browse), the
+     run rows are links IN (the child run's own transcript in this console). */
+  #pane-summary h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
+           margin-left:auto; flex:0 0 auto; }
+  #pane-summary h3 .re:hover { color:var(--accent); }
+  .sm-acts { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:9px; }
+  .sm-grade { font:10.5px/1.6 var(--mono); color:var(--muted);
+           border-left:2px solid var(--border); padding:2px 0 2px 8px;
+           margin-bottom:6px; }
+  .sm-grade b { color:var(--ink); font-weight:600; }
+  .sm-grade .w { color:var(--warn); }
+  .sm-actmsg { font:10.5px var(--mono); color:var(--good); min-height:14px;
+           display:block; margin-bottom:10px; word-break:break-word; }
+  .sm-actmsg.bad { color:var(--bad); }
+  .sm-sec { font:10px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.6px; color:var(--muted); margin:14px 0 7px;
+           padding-bottom:4px; border-bottom:1px solid var(--border); }
+  .sm-run { display:flex; flex-wrap:wrap; align-items:baseline; gap:6px;
+           padding:6px 0; border-bottom:1px solid var(--border);
+           font-size:12px; }
+  .sm-run .p { font:10px var(--mono); font-weight:700; color:var(--ink);
+           flex:none; }
+  .sm-run .ag { font:10px var(--mono); color:var(--muted); margin-left:auto;
+           flex:none; }
+  .sm-run .dt { flex-basis:100%; font:10.5px var(--mono); color:var(--muted);
+           word-break:break-word; }
+  .sm-run .dt.bad { color:var(--bad); }
+  .sm-open { font:10px var(--mono); color:var(--accent); cursor:pointer; }
+  .sm-open:hover { text-decoration:underline; }
+  .sm-st { font:9.5px var(--mono); font-weight:700; text-transform:uppercase;
+           letter-spacing:.5px; padding:1px 5px; border-radius:4px;
+           border:1px solid var(--border); color:var(--muted); flex:none; }
+  .sm-st.written { color:var(--good); border-color:var(--good); }
+  .sm-st.failed  { color:var(--bad); border-color:var(--bad); }
+  .sm-st.in_flight { color:var(--accent); border-color:var(--accent);
+           animation:tpulse 1.4s ease-in-out infinite; }
+  .sm-tag { font:9.5px var(--mono); color:var(--muted); border:1px solid var(--border);
+           border-radius:4px; padding:0 4px; flex:none; }
+  .sm-e { display:block; text-decoration:none; padding:6px 8px;
+           border:1px solid var(--border); border-radius:6px; margin-bottom:5px;
+           background:var(--surface2); }
+  .sm-e:hover { border-color:var(--purple); }
+  .sm-e .t { display:block; font-size:12px; color:var(--ink);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sm-e .r { display:block; font:10.5px var(--mono); color:var(--purple);
+           white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .sm-e .m { display:block; font:10px var(--mono); color:var(--muted); }
+  .sm-e .m .created { color:var(--good); }
+  .sm-e .m .updated { color:var(--accent); }
+  .sm-e .m .dry { color:var(--warn); }
+  .sm-e .m .err { color:var(--bad); }
+  .sm-warn { font:10.5px/1.5 var(--mono); color:var(--warn); margin:8px 0;
+           border:1px solid var(--warn); border-radius:6px; padding:5px 8px; }
   #pane-timeline .tlgen { margin-top:12px; }
   #pane-timeline h3 .re { cursor:pointer; color:var(--muted); font:12px var(--mono);
            margin-left:auto; flex:0 0 auto; }
@@ -1460,6 +1514,8 @@
             title="Read-only browser rooted at the session's repo (or its cwd)">Files</span>
       <span class="rtab" data-t="timeline" onclick="setRailTab('timeline')"
             title="Whole-session catch-up, one line per turn — served from cache; ⟳ generates">Timeline</span>
+      <span class="rtab" data-t="summary" onclick="setRailTab('summary')"
+            title="Session summaries: the runs (ledger + console + phase-4) and the kmcp entries they wrote, each a link into /browse. Controls to run a summary or capture events.">Summary</span>
     </div>
     <div id="pane-angles" class="rtabpane"><div id="angles"></div></div>
     <div id="pane-context" class="rtabpane"><div id="ctxinfo"></div><div id="summary"></div></div>
@@ -1467,6 +1523,7 @@
     <div id="pane-git" class="rtabpane"><div id="gitinfo"></div></div>
     <div id="pane-files" class="rtabpane"><div id="filesinfo"></div></div>
     <div id="pane-timeline" class="rtabpane"><div id="tlinfo"></div></div>
+    <div id="pane-summary" class="rtabpane"><div id="suminfo"></div></div>
     <!-- CR cart: replaces the tab panes while CR mode is active (body.crmode) -->
     <div id="crcart"></div>
   </aside>
@@ -2521,6 +2578,7 @@ async function refreshSession(scrollBottom, force){
   // tab is showing needs a fresh root listing.
   if(railTab === "files" && filesFor !== curId) maybeLoadFiles(false);
   if(railTab === "timeline") loadTimeline();   // refresh cached rows for the new session
+  if(railTab === "summary" && sumTabFor !== curId) loadSumTab(true);
   if(scrollBottom){
     const st = document.getElementById("stream");
     st.scrollTop = st.scrollHeight; pinnedBottom = true;
@@ -3452,11 +3510,12 @@ function setRailTab(t){
   if(t === "git") maybeLoadGit(false);   // lazy: only computed when the tab opens
   if(t === "files") maybeLoadFiles(false); // lazy: root listing on first open
   if(t === "timeline") loadTimeline();   // lazy: serve cached (never auto-mines)
+  if(t === "summary") loadSumTab(true);  // lazy: on-demand only, never on the poll
 }
 function applyRailTab(){
   document.querySelectorAll("#railtabs .rtab").forEach(el =>
     el.classList.toggle("on", el.dataset.t === railTab));
-  for(const t of ["angles","context","writes","git","files","timeline"])
+  for(const t of ["angles","context","writes","git","files","timeline","summary"])
     document.getElementById("pane-" + t).classList.toggle("on", t === railTab);
 }
 applyRailTab();
@@ -5280,6 +5339,200 @@ function renderTimeline(tl){
   el.innerHTML = `<h3>Timeline ${regen}</h3><div class="tlrows">${tlRowsHtml(tl)}</div>` +
                  `<div class="tlfoot">${tlFootTxt(tl)}</div>`;
   if(tl.generating){ clearTimeout(tlTimer); tlTimer = setTimeout(loadTimeline, 1500); }
+}
+
+/* ---------- Summary rail tab: the runs, and what they WROTE -----------------
+   The operator's answer to "has this session been captured, by what, and what
+   landed in the corpus" — plus the controls to do it. One fetch of
+   /api/summaries, ON DEMAND (opening the tab, switching session, ⟳, or right
+   after a dispatch); it re-polls only while a run is in flight, because the
+   server side grades the transcript tail and re-parses each run's JSONL.
+   Entry rows link OUT into /browse; run rows link IN to the child run's own
+   transcript in this console (the same navigation the summarizing chip uses). */
+let sumTabData = null, sumTabFor = null, sumTabLoading = false, sumTabTimer = null;
+let sumTabMsg = "", sumTabBad = false, sumTabBusy = false;
+
+async function loadSumTab(reset){
+  if(railTab !== "summary" || !curId) { renderSumTab(); return; }
+  if(reset && sumTabFor !== curId){
+    sumTabData = null; sumTabMsg = ""; sumTabBad = false; sumTabBusy = false;
+  }
+  const wanted = curId;
+  if(sumTabLoading) return;
+  sumTabLoading = true;
+  if(!sumTabData) renderSumTab();            // "loading…" while the first fetch runs
+  let d = null;
+  try { d = await (await fetch("/api/summaries?id=" + encodeURIComponent(wanted))).json(); }
+  catch(e){ d = {error: "console unreachable"}; }
+  sumTabLoading = false;
+  if(curId !== wanted) return;               // operator switched mid-flight
+  sumTabData = d; sumTabFor = wanted;
+  renderSumTab();
+  clearTimeout(sumTabTimer);
+  if((d.runs || []).some(r => r.running) || (d.grade && d.grade.running))
+    sumTabTimer = setTimeout(() => loadSumTab(false), 5000);
+}
+
+function sumTabAct(kind){
+  const s = curSession, id = sumTabFor;
+  if(!id || sumTabBusy) return;
+  sumTabBusy = true; sumTabBad = false;
+  sumTabMsg = kind === "events" ? "dispatching events capture…" : "dispatching…";
+  renderSumTab();
+  const body = {session_id: id, cwd: (s && s.cwd) || "", archive: false};
+  if(kind === "events") body.events = true;
+  if(kind === "full") body.delta = "off";
+  post("/api/summarize", body).then(([ok, d]) => {
+    sumTabBusy = false;
+    if(!ok || (d && d.error)){
+      sumTabMsg = (d && d.error) || "failed"; sumTabBad = true; renderSumTab(); return;
+    }
+    sumTabMsg = (kind === "events"
+      ? "events capture dispatched ✓ — changelog events only, no session entry"
+      : d.delta_mode === "delta"
+        ? `pass ${d.pass} dispatched ✓ — NEW work only, since ${String(d.since||"").slice(0,16)}`
+        : "summary dispatched ✓ (full session scope)")
+      + (d.warning ? "  ⚠ " + d.warning : "");
+    sumTabBad = !!d.warning;
+    loadSumTab(false); loadNav();
+  });
+}
+
+function sumGradeHtml(g){
+  if(!g) return "";
+  const bits = [];
+  if(!g.summarized) bits.push("<b>never summarized</b> — the next pass covers the whole session");
+  else if(g.scope === "delta")
+    bits.push(`captured through <b>${esc(String(g.since||"").slice(0,16))}</b> ` +
+              `(watermark: ${esc(g.source_label||g.source||"?")}) — ` +
+              `pass <b>${g.pass}</b> would cover only the tail since` +
+              (g.records != null ? ` (${g.records} records)` : ""));
+  else if(g.scope === "none")
+    bits.push(`captured — nothing substantive since the last pass; ` +
+              `<b>Full re-capture</b> is the only honest lever`);
+  else bits.push(`captured, but no watermark resolves — pass <b>${g.pass}</b> ` +
+                 `would restate the FULL session`);
+  if(g.prior) bits.push(`prior: ${esc(g.prior)}`);
+  if(g.warning) bits.push(`<span class="w">⚠ ${esc(g.warning)}</span>`);
+  if(g.idle_warning) bits.push(`<span class="w">⚠ ${esc(g.idle_warning)}</span>`);
+  return `<div class="sm-grade">${bits.join("<br>")}</div>`;
+}
+
+function sumRunHtml(r){
+  const st = esc(r.status || "unknown");
+  const label = r.pass ? `pass ${r.pass}` : (r.kind === "events" ? "events" : "run");
+  const open = r.child
+    ? `<span class="sm-open" onclick="openSession('${esc(r.child)}')"
+         title="open this run's own transcript — ${esc(r.child_title || r.child)}">open run ↗</span>`
+    : "";
+  const origin = r.origin === "console"
+    ? `<span class="sm-tag" title="a run this console spawned: a separate claude session under an id the console minted">console</span>`
+    : `<span class="sm-tag" title="a pass recorded in the ledger with no console-minted child — the launchd phase-4 timer's local-Ollama run">phase-4</span>`;
+  const when = r.dispatched_at || r.updated_at || r.created_at;
+  const detail = r.detail
+    ? `<span class="dt${r.status === "failed" ? " bad" : ""}">${esc(r.detail)}</span>` : "";
+  const ref = r.ref
+    ? `<a class="sm-open" href="${BROWSE_BASE + encodeURIComponent(r.app||"") + "/" + (r.path||"")}"
+         target="_blank" title="the entry this pass recorded">${esc(r.ref)}</a>` : "";
+  return `<div class="sm-run">
+    <span class="p">${esc(label)}</span>
+    <span class="sm-st ${st}" ${r.detail ? `title="${esc(r.detail)}"` : ""}>${st.replace("_"," ")}</span>
+    ${r.kind === "events" ? `<span class="sm-tag" title="an --events capture: changelog events only, deliberately not a summary pass">events</span>` : ""}
+    ${origin}${ref}${open}
+    <span class="ag" title="${esc(when||"")}">${when ? rel(when) : ""}</span>
+    ${detail}</div>`;
+}
+
+const SUM_ETYPE_ORDER = ["session", "event", "lesson"];
+function sumEntryHtml(e, corpusOk){
+  const href = BROWSE_BASE + encodeURIComponent(e.app || "") + "/" + (e.path || "");
+  const cls = e.verdict === "created" ? "created"
+            : e.verdict === "updated" ? "updated"
+            : e.verdict === "dry-run" ? "dry"
+            : e.verdict === "error" ? "err" : "";
+  const meta = [`<span class="${cls}">${esc(e.verdict || "wrote")}</span>`];
+  // Only claimable when the corpus was actually queried — with the knowledge DB
+  // down every row would wear "not in corpus", which is an accusation, not a fact.
+  if(corpusOk && !e.in_kmcp)
+    meta.push(`<span class="err" title="this ref was written (or attempted) in a transcript but no such entry is in the knowledge DB — the write was refused, or the entry was later renamed/removed">not in corpus</span>`);
+  if(e.by_labels && e.by_labels.length) meta.push("by " + esc(e.by_labels.join(", ")));
+  if(e.note) meta.push(esc(e.note));
+  return `<a class="sm-e" href="${esc(href)}" target="_blank"
+    title="open ${esc(e.key)} in /browse${e.error ? " · " + esc(e.error) : ""}">
+    <span class="t">${esc(e.title || e.path || "")}</span>
+    <span class="r">${esc(e.key)}</span>
+    <span class="m">${meta.join(" · ")}</span></a>`;
+}
+
+function renderSumTab(){
+  if(railTab !== "summary") return;
+  const el = document.getElementById("suminfo");
+  if(!el) return;
+  const regen = `<span class="re" onclick="loadSumTab(false)" title="re-read the ledger, the runs and the corpus">⟳</span>`;
+  if(!curId){
+    el.innerHTML = `<h3>Summary</h3><div class="rl-empty">Open a session to see its summary runs.</div>`;
+    return;
+  }
+  if(curId.includes(":")){
+    el.innerHTML = `<h3>Summary</h3><div class="rl-empty">Child (subagent) sessions are
+      summarized through their parent — open the parent session.</div>`;
+    return;
+  }
+  const d = sumTabData;
+  if(!d){ el.innerHTML = `<h3>Summary ${regen}</h3><div class="rl-empty">loading…</div>`; return; }
+  if(d.error){ el.innerHTML = `<h3>Summary ${regen}</h3><div class="rl-empty">unavailable — ${esc(d.error)}</div>`; return; }
+
+  const g = d.grade || {};
+  const running = !!g.running || (d.runs || []).some(r => r.running);
+  const why = running ? "a summary run is already in flight for this session"
+            : sumTabBusy ? "working…" : "";
+  const dis = running || sumTabBusy;
+  const noneScope = g.scope === "none";
+  const btn = (label, fn, disabled, title) =>
+    `<button class="act sm" ${disabled ? "disabled" : ""} onclick="sumTabAct('${fn}')"
+       title="${esc(title)}">${label}</button>`;
+  const acts = `<div class="sm-acts">
+    ${btn(g.scope === "delta" ? `✎ Summarize NEW work since ${shortDate(g.since)} (pass ${g.pass})`
+          : noneScope ? "✎ Summarize" : `✎ Summarize (pass ${g.pass || 1})`,
+      "summarize", dis || noneScope,
+      why || (noneScope
+        ? (g.warning || "already captured — nothing substantive since the last pass; use Full re-capture")
+        : sumTitle(g.scope === "delta" ? g : null, false)))}
+    ${btn("↺ Full re-capture", "full", dis,
+      why || "Summarize the WHOLE session again (delta:off) — a standalone " +
+             "pass-1-shaped capture, never labelled a continuation. The session is not archived.")}
+    ${btn("◆ Capture events", "events", dis,
+      why || "Run /session-summary --events off-session: the skill's own thin-changelog " +
+             "path — changelog event entries only, no session entry, no lessons, no tasks. " +
+             "Not recorded as a summary pass, and it never archives.")}
+    ${regen}
+  </div>`;
+
+  const runs = (d.runs || []).length
+    ? (d.runs || []).map(sumRunHtml).join("")
+    : `<div class="rl-empty">${g.summarized
+        ? "captured, but no run is on record — the pass predates the ledger."
+        : "never summarized — the Summarize button runs pass 1 off-session (a separate claude run that digests this transcript from disk and never touches it)."}</div>`;
+
+  const byType = {};
+  for(const e of d.entries || []) (byType[e.etype || "other"] ||= []).push(e);
+  const order = [...SUM_ETYPE_ORDER.filter(t => byType[t]),
+                 ...Object.keys(byType).filter(t => !SUM_ETYPE_ORDER.includes(t)).sort()];
+  const entries = order.length
+    ? order.map(t => `<div class="sm-sec">${esc(t)} · ${byType[t].length}</div>` +
+                     byType[t].map(e => sumEntryHtml(e, d.corpus_ok !== false)).join("")).join("")
+    : `<div class="rl-empty">nothing written yet — no kmcp entry names this session,
+        and no run's transcript shows a write.</div>`;
+
+  const warns = (d.warnings || []).length
+    ? `<div class="sm-warn">${(d.warnings || []).map(w => "⚠ " + esc(w)).join("<br>")}</div>` : "";
+
+  el.innerHTML = `<h3>Summary</h3>${acts}${sumGradeHtml(g)}` +
+    `<span class="sm-actmsg${sumTabBad ? " bad" : ""}">${esc(sumTabMsg)}</span>` +
+    warns +
+    `<div class="sm-sec">runs · ${(d.runs || []).length}</div>${runs}` +
+    `<div class="sm-sec" style="margin-top:16px">entries written · ${(d.entries || []).length}</div>${entries}` +
+    `<div class="tlfoot">sources: ${esc((d.sources || []).join(" · "))}</div>`;
 }
 
 /* ---------- digest reader popover ------------------------------------------

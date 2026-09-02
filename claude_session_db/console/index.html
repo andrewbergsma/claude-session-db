@@ -1022,6 +1022,27 @@
                 padding:0 6px; color:var(--muted); flex:none; }
   .cr-grp .gb:hover { color:var(--ink); }
   .cr-grp .gb.on { color:var(--accent); border-color:var(--accent); }
+  .cr-grp { cursor:pointer; }
+  .cr-grp .gc { color:var(--muted); flex:none; width:9px; }
+  .cr-math { color:var(--ink2); font:10.5px/1.5 var(--mono); margin:0 0 6px; }
+  /* itemized sources under a group — one line per row, heaviest first */
+  .cr-items { margin:0 0 6px; border-bottom:1px solid var(--border); }
+  .cr-it { display:flex; gap:5px; align-items:baseline; min-width:0;
+           font:10.5px var(--mono); padding:2px 0 2px 9px; }
+  .cr-it.stub, .cr-it.ref { opacity:.55; }
+  .cr-it .itn { color:var(--ink2); flex:none; width:26px; }
+  .cr-it .il { color:var(--ink); min-width:0; overflow:hidden;
+               text-overflow:ellipsis; white-space:nowrap; }
+  .cr-it .idup { color:var(--purple); flex:none; }
+  .cr-it .isz { color:var(--muted); margin-left:auto; padding-left:6px;
+                flex:none; white-space:nowrap; }
+  .cr-it .ib { cursor:pointer; border:1px solid var(--border); border-radius:4px;
+               padding:0 4px; color:var(--muted); flex:none; }
+  .cr-it .ib:hover { color:var(--ink); }
+  .cr-it .ib.on { color:var(--accent); border-color:var(--accent); }
+  .cr-it .ilock { color:var(--ink2); flex:none; }
+  .cr-more { cursor:pointer; color:var(--accent); font:10.5px var(--mono);
+             padding:3px 0 4px 9px; }
   .cr-sec { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
             color:var(--ink2); margin:14px 0 6px; }
   .cr-in { width:100%; box-sizing:border-box; background:var(--bg);
@@ -1346,6 +1367,8 @@
     /* CR mode on a phone: fat verb chips + tap-friendly cart controls */
     .crc{ min-height:28px; min-width:44px; justify-content:center; }
     .cr-grp .gb{ min-height:26px; display:inline-flex; align-items:center; }
+    .cr-it .ib{ min-height:24px; min-width:24px; display:inline-flex;
+                align-items:center; justify-content:center; }
     .cr-hit .add, .cr-ref .rm{ min-height:28px; min-width:36px;
       display:inline-flex; align-items:center; justify-content:center; }
     .rd-tabs .rtb{ min-height:32px; display:inline-flex; align-items:center; }
@@ -2889,7 +2912,7 @@ function toolRow(t, ts, live){
   const cmdBlock = open
     ? (hasCmd ? `<pre class="tcmd">${esc(t.cmd)}</pre>` : "") + toolOutBlock(t.id)
     : "";
-  const crCtl = t.id ? crc("t:" + t.id) : "";
+  const crCtl = t.id ? (crc("x:" + t.id, "in") + crc("t:" + t.id)) : "";
   return `<div class="trow${t.id ? crCls("t:" + t.id) : ""}"><div${click}>${crCtl}<span class="tg">${glyph}</span>${caret}
     ${label}${stat}${err}${size}</div>${det}${cmdBlock}</div>`;
 }
@@ -4554,10 +4577,31 @@ let crMode = false, crManifest = null, crActions = {}, crCart = [], crHits = nul
 const CR_STUB_TOK = 10;              // ≈ tokens a breadcrumb costs
 const CR_REF_TOK_CAP = 2500 / 4;     // preamble caps entry bodies at 2500 chars
 const CR_GLYPH = {keep: "☑ keep", stub: "☐ stub", ref: "◫ ref"};
+const CR_MINI  = {keep: "☑", stub: "☐", ref: "◫"};
 const CR_KINDS = [                   // group rows for the cart summary
   ["prompt", "user prompts"], ["narration", "assistant narration"],
-  ["result", "tool results"], ["kmcp", "kmcp reads"],
-  ["injection", "skill injections"], ["thinking", "thinking (locked)"]];
+  ["result", "tool results"], ["tool_use", "tool inputs"],
+  ["kmcp", "kmcp reads"], ["image", "images"],
+  ["injection", "skill injections"], ["thinking", "thinking (locked)"],
+  ["other", "other blocks (locked)"]];
+const CR_ITEM_CAP = 40;              // initial itemized render per group
+const CRG_KEY = "csd.crGroupsOpen";  // which groups are expanded (per browser)
+let crShowAll = {};                  // kind -> render past the cap
+let crGrpState = null;
+function crGrpLoad(){
+  if(crGrpState) return crGrpState;
+  try { crGrpState = JSON.parse(localStorage.getItem(CRG_KEY) || "{}"); }
+  catch(e){ crGrpState = {}; }
+  return crGrpState;
+}
+function crGrpOpen(k){ return !!crGrpLoad()[k]; }
+function crGrpToggle(k){
+  const st = crGrpLoad();
+  st[k] = !st[k];
+  try { localStorage.setItem(CRG_KEY, JSON.stringify(st)); } catch(e){}
+  renderCrCart();
+}
+function crShowAllToggle(k){ crShowAll[k] = !crShowAll[k]; renderCrCart(); }
 
 function crKey(){ return "csd.cr." + curId; }
 function crSave(){
@@ -4569,16 +4613,20 @@ function crAct(id){
   if(!r) return null;
   return r.locked ? "keep" : (crActions[id] || r.default);
 }
-/* the verb chip a stream row grows in CR mode ("" outside it) */
-function crc(id){
+/* the verb chip a stream row grows in CR mode ("" outside it). `tag` renders
+   the compact variant (a tool row carries two chips: its INPUT and its
+   RESULT, which are separately priced and separately controllable). */
+function crc(id, tag){
   const a = crMode ? crAct(id) : null;
   if(!a) return "";
   const r = crManifest.byId[id];
   const cyc = r.locked ? "thinking blocks always travel (signatures must survive)"
     : r.kind === "kmcp" ? "tap: keep → stub → ref (ref stubs the body AND adds its app:path to the cart)"
     : "tap: keep ↔ stub";
-  return `<span class="crc ${a}" title="${esc(cyc)}${r.dup ? " · sha1-duplicate of an earlier result" : ""}"
-    onclick="event.stopPropagation();crCycle('${esc(id)}')">${CR_GLYPH[a]}</span>`;
+  const size = `≈${Math.max(1, Math.round(r.est_tokens/100)/10)}K`;
+  const body = tag ? `${esc(tag)} ${CR_MINI[a]}` : CR_GLYPH[a];
+  return `<span class="crc ${a}" title="${esc((tag ? tag + " — " : "") + cyc + " · " + size)}${r.dup ? " · sha1-duplicate" : ""}"
+    onclick="event.stopPropagation();crCycle('${esc(id)}')">${body}</span>`;
 }
 function crCls(id){
   const a = crMode ? crAct(id) : null;
@@ -4589,6 +4637,15 @@ function crCycle(id){
   if(!r || r.locked) return;
   const order = r.kind === "kmcp" ? ["keep", "stub", "ref"] : ["keep", "stub"];
   crActions[id] = order[(order.indexOf(crAct(id)) + 1) % order.length];
+  crSave(); renderStream(curSession); renderCrCart();
+}
+/* the per-ITEM verb — the same state the group buttons and the stream chips
+   write, so the three surfaces can never disagree about one row. */
+function crSetAct(id, action){
+  const r = crManifest?.byId?.[id];
+  if(!r || r.locked) return;
+  if(action === "ref" && r.kind !== "kmcp") return;
+  crActions[id] = action;
   crSave(); renderStream(curSession); renderCrCart();
 }
 function crGroupSet(kind, action){
@@ -4615,15 +4672,26 @@ function crAllRefs(){
   for(const c of crCart) if(!out.includes(c.ref)) out.push(c.ref);
   return out;
 }
+/* AFTER is computed from the SAME per-row state the groups display — kept
+   rows at full weight, everything else at the breadcrumb weight, plus the
+   cart. Every addend is shown in the panel; nothing is folded into a bucket
+   (the residual line exists only so a drift would be visible, not absorbed). */
 function crTotals(){
   const m = crManifest;
-  let after = m.fixed_tokens;
-  for(const r of m.rows)
-    after += crAct(r.id) === "keep" ? r.est_tokens : CR_STUB_TOK;
-  for(const _ of crAllRefs())
-    after += CR_REF_TOK_CAP;         // preamble weight, capped per entry
-  return {before: m.totals.est_tokens, after: Math.round(after)};
+  let kept = 0, stubs = 0;
+  for(const r of m.rows){
+    if(crAct(r.id) === "keep") kept += r.est_tokens;
+    else stubs++;
+  }
+  const refs = crAllRefs().length;
+  const stubTok = stubs * CR_STUB_TOK;
+  const cartTok = Math.round(refs * CR_REF_TOK_CAP);
+  const residual = m.residual_tokens || 0;
+  return {before: m.totals.est_tokens,
+          after: Math.round(kept + stubTok + cartTok + residual),
+          kept, stubs, stubTok, refs, cartTok, residual};
 }
+function crK(n){ return `≈${(n/1000).toFixed(n < 9950 ? 1 : 0)}K`; }
 function crPayload(){
   const keep = [], stub = [];
   for(const r of crManifest.rows)
@@ -4670,6 +4738,40 @@ function exitCR(){
   actmsg("");
 }
 
+/* ONE LINE PER SOURCE — the answer to "the math doesn't check out, I want to
+   see every source and add / remove it". Sorted heaviest-first (the rows that
+   move the number are the ones worth a decision), capped so a 190-row group
+   cannot blow up the rail, and wired to the same crAct state as everything
+   else. Locked rows render without buttons: they are counted, never hidden. */
+function crItems(kind, rows){
+  const sorted = rows.slice().sort((a, b) => b.est_tokens - a.est_tokens);
+  const all = !!crShowAll[kind];
+  const shown = all ? sorted : sorted.slice(0, CR_ITEM_CAP);
+  const lines = shown.map(r => {
+    const a = crAct(r.id);
+    const ib = (v, txt) => `<span class="ib ${a === v ? "on" : ""}"
+        title="${esc(v === "keep" ? "keep this source in full" :
+                     v === "stub" ? "replace this source with a breadcrumb" :
+                     "stub the body and send its app:path in the preamble")}"
+        onclick="crSetAct('${esc(r.id)}','${v}')">${txt}</span>`;
+    const btns = r.locked ? `<span class="ilock" title="counted, never stubbed">locked</span>`
+      : ib("keep", "☑") + ib("stub", "☐") + (r.kind === "kmcp" ? ib("ref", "◫") : "");
+    const nm = r.refs?.length ? r.refs.join(", ")
+      : [r.name, r.hint].filter(Boolean).join(" ") || r.id;
+    return `<div class="cr-it ${a}">
+      <span class="itn" title="turn ${r.turn}${r.recent ? " (recent)" : ""}">t${r.turn}</span>
+      <span class="il" title="${esc(r.id + " — " + nm)}">${esc(nm.slice(0, 90))}</span>
+      ${r.dup ? `<span class="idup" title="sha1-duplicate of ${esc(r.dup_of || "an earlier row")}">⧉</span>` : ""}
+      <span class="isz">${crK(r.est_tokens)}</span>${btns}</div>`;
+  }).join("");
+  const more = sorted.length > CR_ITEM_CAP
+    ? `<div class="cr-more" onclick="crShowAllToggle('${kind}')">${
+        all ? "▴ show top " + CR_ITEM_CAP + " only"
+            : "▾ show all " + sorted.length + " (" + (sorted.length - CR_ITEM_CAP) + " more)"}</div>`
+    : "";
+  return `<div class="cr-items">${lines}${more}</div>`;
+}
+
 function renderCrCart(){
   if(!crMode || !crManifest) return;
   const m = crManifest, t = crTotals();
@@ -4677,18 +4779,24 @@ function renderCrCart(){
   const groups = CR_KINDS.filter(([k]) => m.groups[k]).map(([k, label]) => {
     const g = m.groups[k];
     const rows = m.rows.filter(r => r.kind === k);
-    const kept = rows.filter(r => crAct(r.id) === "keep").length;
+    const locked = rows.length > 0 && rows.every(r => r.locked);
+    const keptRows = rows.filter(r => crAct(r.id) === "keep");
+    const keptTok = keptRows.reduce((a, r) => a + r.est_tokens, 0);
     const btn = (a, txt) => {
       const all = rows.length > 0 && rows.every(r => r.locked || crAct(r.id) === a);
       const tip = a === "keep" ? `keep every ${label} row in the fork, in full`
         : a === "stub" ? `replace every ${label} row with a one-line breadcrumb`
         : "stub every kmcp row AND add its app:path to the cart";
-      return `<span class="gb ${all ? "on" : ""}" title="${esc(tip)}" onclick="crGroupSet('${k}','${a}')">${txt}</span>`;
+      return `<span class="gb ${all ? "on" : ""}" title="${esc(tip)}" onclick="event.stopPropagation();crGroupSet('${k}','${a}')">${txt}</span>`;
     };
-    const btns = k === "thinking" ? "" :
+    const btns = locked ? "" :
       btn("keep", "keep") + btn("stub", "stub") + (k === "kmcp" ? btn("ref", "ref") : "");
-    return `<div class="cr-grp"><span class="gl">${esc(label)}</span>${btns}
-      <span class="n">${kept}/${g.count} · ≈${(g.est_tokens/1000).toFixed(1)}K</span></div>`;
+    const open = crGrpOpen(k);
+    const head = `<div class="cr-grp" title="${esc("click to " + (open ? "fold" : "list every " + label + " source"))}"
+        onclick="crGrpToggle('${k}')">
+      <span class="gc">${open ? "▾" : "▸"}</span><span class="gl">${esc(label)}</span>${btns}
+      <span class="n">${keptRows.length}/${g.count} · ${crK(keptTok)} kept of ${crK(g.est_tokens)}</span></div>`;
+    return head + (open ? crItems(k, rows) : "");
   }).join("");
   const refs = crAllRefs();
   const cartRows = refs.map(ref => {
@@ -4715,8 +4823,20 @@ function renderCrCart(){
     <div class="cr-tot">BEFORE ≈${(t.before/1000).toFixed(0)}K →
       <span class="aft">AFTER ≈${(t.after/1000).toFixed(0)}K</span>
       <span class="pct">(−${pct}%)</span></div>
+    <div class="cr-math" title="AFTER is the sum of exactly these lines — nothing hidden">
+      kept ${crK(t.kept)} + stubs ${t.stubs}·${CR_STUB_TOK} = ${crK(t.stubTok)}
+      + cart ${t.refs} ref${t.refs === 1 ? "" : "s"} ${crK(t.cartTok)}${
+        t.residual ? ` + unattributed residual ${crK(t.residual)}` : ""}
+      = ${crK(t.after)}</div>
+    <div class="cr-floor">BEFORE = Σ of the groups below (${m.rows.length} sources).
+      Text at chars/4, tool inputs at JSON/4, images at (w×h)/750;
+      thinking signatures and JSON envelope excluded (${
+        Math.round((m.excluded?.signature_chars || 0)/1000)}K sig +
+      ${Math.round((m.excluded?.image_payload_chars || 0)/1000)}K image bytes +
+      ${Math.round((m.excluded?.json_envelope_chars || 0)/1000)}K envelope chars
+      are in the file but are not tokens).</div>
     <div class="cr-floor">+ scaffolding floor ≈${(m.floor.low/1000)|0}–${(m.floor.high/1000)|0}K
-      (system prompt, tools, memory — not reducible from here) · chars/4, all numbers ≈</div>
+      (system prompt, tools, memory — not reducible from here) · all numbers ≈</div>
     ${groups}
     <div class="cr-grp"><span class="gl">last ${m.recent_turns} turns</span>
       <span class="gb" title="keep every row from the last ${m.recent_turns} turns in full" onclick="crKeepRecent()">keep all</span>

@@ -19,6 +19,47 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.20.0] - 2026-09-02
+
+### Changed
+- **CR's BEFORE is now an honest token estimate, and the rows close.** The
+  context surface was `len(json.dumps(content))` — the transcript's BYTES, not
+  what the API counts. On a real 12-turn session that read ≈337K against a true
+  ≈157K: one pasted screenshot's base64 counted as ≈119K "tokens" (an image
+  bills at ~1-2K), 88 thinking **signatures** counted as ≈51K (opaque
+  provenance strings, not tokens), and the JSON quoting itself was counted.
+  Each block is now priced the way the API would: text at chars/4, a
+  `tool_use` input at `len(json.dumps(input))/4`, an image at (w×h)/750 capped
+  at 1600 (dimensions sniffed from the decoded PNG/JPEG/GIF/WEBP header, with a
+  documented flat estimate when the format is unreadable — never base64/4).
+  Signatures, image payloads and JSON envelope are **excluded**, and reported
+  as `excluded` so the gap between file size and estimate is stated rather than
+  swallowed. `manifest.totals.est_tokens` is now **defined as Σ rows** — the
+  opaque `fixed_chars` bucket (882K of 1.35M chars on that session, which is
+  why the groups could never add up to BEFORE) is gone, pinned by a test.
+  Preview and fork report the same measure, so the rail, the preview dialog and
+  the forged fork can never disagree.
+
+### Added
+- **Every source is a row, and every row is controllable.** New manifest row
+  kinds: `tool_use` (assistant tool INPUTS — file bodies in a Write, kmcp
+  documents in an import_entries: ≈38K real tokens that were previously
+  invisible), `image` (one row per image block, wherever it sits — user paste
+  or tool_result sub-block), and `other` (any unrecognised block, locked but
+  counted). Both new kinds dedup by digest and default to keep-when-recent.
+  `apply_stubs`/`forge_fork` honour them: a stubbed tool_use keeps its `id` and
+  `name` and swaps only its input for a breadcrumb (so the tool_use/tool_result
+  pair still matches), and a stubbed image becomes
+  `[image removed by CR: WxH, ~N tokens]` — the fork stays a valid transcript.
+- **Per-source control in the CR rail.** Every group header expands (▸/▾,
+  remembered in localStorage) into an itemized list — one line per source,
+  heaviest first, with turn number, breadcrumb, size, a duplicate marker and
+  per-item keep/stub/ref buttons wired to the same state as the group buttons
+  and the stream chips. Capped at 40 with a "show all N" toggle. Group headers
+  now read `26/183 · ≈7.7K kept of ≈66.2K`, and the panel shows AFTER's
+  arithmetic in full (`kept + stubs N·10 + cart R refs = AFTER`), so the number
+  is derivable by eye. Tool rows in the stream grew a second chip for their
+  input (`in ☑`) beside the result chip.
 ## [3.19.1] - 2026-09-02
 
 ### Fixed

@@ -319,6 +319,42 @@ when two runs share a project dir, and blind between spawn and first write.
   It ships as `summary` in the same `/api/sessions` field family as
   `tldr`/`timeline`; every failure degrades to `unknown`, never an error.
 
+### CR — context reduction (`cr.py`, `/api/cr*`)
+
+A fork with curation: the operator picks what survives, CR writes a NEW reduced
+session file (the original is never touched). Two things make the panel
+trustworthy — **an honest measure and no hidden bucket**.
+
+**The accounting model.** BEFORE is what the API would count, not the file's
+bytes: text/prompt/narration/thinking-TEXT/tool_result at chars/4, a `tool_use`
+input at `len(json.dumps(input))/4` (the API receives the input as JSON), an
+image at (w×h)/750 capped at 1600 (dimensions sniffed from the decoded image
+header; an unreadable format degrades to a documented flat estimate, never to
+base64/4). Thinking **signatures**, image base64 payloads and the JSON envelope
+are excluded — they are in the file but they are not tokens — and reported in
+`excluded` so the gap between file size and estimate is stated, never swallowed.
+Byte-counting the JSON read one real session at ≈337K against a true ≈157K: a
+single screenshot was ≈119K of it and 88 signatures another ≈51K.
+
+**`totals.est_tokens` IS Σ rows.** Every token-bearing block is a row —
+including the `tool_use` inputs and images that used to vanish into an opaque
+`fixed_chars` bucket, which is precisely why the group sizes could never add up
+to BEFORE. `residual_tokens` exists only so a future drift would be *shown*
+instead of absorbed. Locked kinds (thinking, unrecognised blocks) are counted
+but never stubbed. Preview, fork and manifest all report this one measure.
+
+**Per-source control.** Each group header expands into an itemized list (one
+line per source, heaviest first, turn number + breadcrumb + size + dup marker),
+with per-item keep/stub/ref buttons writing the same `crAct` state as the group
+buttons and the stream chips — the three surfaces cannot disagree about a row.
+Capped at 40 items with a "show all N" toggle; open/closed remembered in
+localStorage. AFTER is computed client-side from that same per-row state and
+its arithmetic is printed in full (`kept + stubs N·10 + cart R refs`).
+Stubbing stays the validated edit class: a stubbed `tool_use` keeps its `id`
+and `name` and swaps only the input for a breadcrumb (the tool_use/tool_result
+pair must still match), a stubbed image becomes a `[image removed by CR: …]`
+text block, and a stubbed result is swapped in BOTH copies.
+
 ### Repos overlay — the cross-REPO lens (`/api/repos`)
 
 The other axis to the threads overlay: threads answers *which sessions are still

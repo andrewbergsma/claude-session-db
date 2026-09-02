@@ -77,6 +77,36 @@ def test_manifest_payload(env):
     assert payload["floor"]["est"] == 85_000
 
 
+def test_manifest_payload_reconciles_and_ships_the_new_kinds(env):
+    """What the rail renders must add up to what its BEFORE line says."""
+    payload, code = server.cr_manifest_payload(SID)
+    assert code == 200
+    assert payload["totals"]["est_tokens"] == sum(r["est_tokens"]
+                                                  for r in payload["rows"])
+    assert sum(g["est_tokens"] for g in payload["groups"].values()) \
+        == payload["totals"]["est_tokens"]
+    assert payload["residual_tokens"] == 0
+    # additive fields the client needs; old names still parse
+    assert set(payload["excluded"]) == {"signature_chars",
+                                        "image_payload_chars",
+                                        "json_envelope_chars"}
+    assert payload["fixed_tokens"] == 0 and payload["surface_chars"] > 0
+    by = {r["id"]: r for r in payload["rows"]}
+    assert by["x:t1"]["kind"] == "tool_use"        # the kmcp read's INPUT
+    assert by["x:t2"]["hint"] == "pytest -q"
+    for r in payload["rows"]:                      # per-source addressability
+        assert r["turn"] >= 1 and "bidx" in r
+
+
+def test_preview_tokens_use_the_manifest_measure(env, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    man, _ = server.cr_manifest_payload(SID)
+    payload, code = server.cr_apply(SID, [], [], confirm=False)
+    assert code == 200
+    assert payload["before_tokens"] == man["totals"]["est_tokens"]
+    assert payload["after_tokens"] == payload["before_tokens"]   # nothing stubbed
+
+
 def test_manifest_missing_session():
     _, code = server.cr_manifest_payload("00000000-dead-beef-0000-000000000000")
     assert code == 404

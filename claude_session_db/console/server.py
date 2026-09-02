@@ -32,7 +32,9 @@ generation is queued to a single in-process background worker and lands on a
 later poll, so the request path never blocks on a model.
 
 Endpoints
-  GET  /api/sessions               light nav list (project, title, state, mtime)
+  GET  /api/sessions               light nav list (project, title, state, mtime,
+                                   and the tldr / timeline / summary presence
+                                   chips — all three memo reads, no DB, no model)
   GET  /api/session?id=<sid>       full transcript as a chronological event stream
   GET  /api/detail?id=<sid>&item=  the persisted detail behind one angle headline
   GET  /api/git?id=<sid>           repo status for the session's cwd (read-only)
@@ -1381,6 +1383,10 @@ def _nav_row(p: Path, idx: dict, meta: dict):
     # timeline exist, and is it current? Signature-memoized in
     # session_timeline — the poll never re-reads unchanged stores.
     s["timeline"] = session_timeline.presence(p.stem, p)
+    # Third presence chip, same family and the same seam: has this session
+    # been summarized, and is there anything new since the watermark? Served
+    # from the background grader's memo — this call NEVER touches the archive.
+    s["summary"] = summary_presence(p.stem, p)
     # Pending title suggestion (None once accepted/dismissed).
     s["title_proposal"] = _pending_proposal(
         s["tldr"], m.get("title"), m.get("tp_dismissed"))
@@ -2025,6 +2031,9 @@ def build_session(sid: str):
         # TTL-cached — cheap enough to ride this poll; None when nothing was
         # ever captured or the archive is unreachable.
         "summary_scope": None if is_child else summary_scope(sid),
+        # …and the graded state behind the chat header's Σ chip: never /
+        # captured / delta / running / failed / unknown. Memo read, no DB.
+        "summary": None if is_child else summary_presence(sid, path),
         "priority": _m.get("priority"),
         "user_title": _m.get("title"),
         "topic": _m.get("topic"),
@@ -3130,6 +3139,7 @@ def _settle_pass(sid: str, claim, pass_no: int, status: str, detail=None) -> Non
             pass
     with _SCOPE_LOCK:
         _SCOPE_CACHE.pop(sid, None)
+    _invalidate_summary(sid)     # a pass landed — re-grade the Σ chip
 
 
 SUMMARIZE_PROMPT = "/session-summary"
@@ -3140,6 +3150,233 @@ SUMMARIZING: dict[str, str] = {}     # sid -> "running" | "done" | error text
 SUMMARY_RUNS: dict[str, dict] = {}
 SUMMARY_MIN_OUTPUT_BYTES = 40        # child output past the header ⇒ it ran
 _SUMMARY_LOG_DIR = CONSOLE_STATE / "summaries"
+
+
+# ----------------------------------------------------------------------------
+# summarization presence at the session row — the Σ chip
+#
+# The one thing the sidebar could never say: has this session been captured,
+# and is there anything NEW since? Every fact already existed (summary_state,
+# the summary_passes ledger, the delta gate, the attempts backoff) but only
+# ever behind an action — the Summarize button's label, the threads overlay,
+# `csd summary-scope`. A row you have not opened told you nothing.
+#
+# Doctrine, identical to the tldr/timeline presence chips and the repos lens:
+#
+#   - CACHED-FIRST, pull not push. summary_presence() NEVER touches a
+#     database. It reads a memo keyed on the transcript's (mtime_ns, size) —
+#     the same signature tldr/timeline presence memoize on — and registers a
+#     miss as WANTED. ONE background refresher grades the wanted set serially,
+#     so the 3s nav poll costs a stat() per row, not a _delta_gate per row.
+#   - DEGRADE, NEVER BLOCK. No DSN, unreachable archive, a raising grader, a
+#     row not graded yet — all land as state "unknown" with the reason in the
+#     tooltip. The nav is never slow and never 500s because the archive is.
+#   - ONE GRADER. Nothing here classifies a delta. summary_scope_report()
+#     wraps summarize._delta_gate — the same gate the launchd timer queues on
+#     and the Summarize button labels itself from — so the chip, the button,
+#     the timer and the /session-summary skill can never disagree.
+#
+# state ∈ never | captured | delta | running | failed | unknown
+# ----------------------------------------------------------------------------
+SUMMARY_FILE = CONSOLE_STATE / "summary.json"
+SUM_REFRESH_S = int(os.environ.get("CSD_SUMMARY_REFRESH_S", "120"))
+SUM_TTL_S = int(os.environ.get("CSD_SUMMARY_TTL_S", "1800"))
+SUM_STAGGER_S = float(os.environ.get("CSD_SUMMARY_STAGGER_S", "0.25"))
+SUM_MAX_PER_TICK = int(os.environ.get("CSD_SUMMARY_MAX_PER_TICK", "25"))
+SUM_WANTED_MAX = 200                 # bound the wanted set (nav is capped too)
+_SUM_LOCK = threading.Lock()
+_SUM_MEMO: dict[str, dict] = {}      # sid -> graded row (carries its sig)
+_SUM_WANTED: dict[str, list] = {}    # sid -> [mtime_ns, size] the nav asked for
+
+
+def _read_summary_store() -> dict:
+    try:
+        d = json.loads(SUMMARY_FILE.read_text())
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _attempt_note(sid: str):
+    """The summarize_attempts backoff row for one session, or None.
+
+    Phase-4 records per-session failures here and DELETES the row on success,
+    so a surviving row means unresolved failures — the (e) state a chip has to
+    be able to show. Background-only (it opens a connection); never raises."""
+    if not CSD_DSN:
+        return None
+    try:
+        import psycopg
+        from .. import summarize as ph4
+        with psycopg.connect(CSD_DSN, connect_timeout=5) as conn:
+            conn.read_only = True
+            if conn.execute("SELECT to_regclass('public.summarize_attempts') AS t"
+                            ).fetchone()[0] is None:
+                return None
+            row = conn.execute(
+                "SELECT attempts, last_error, "
+                "       extract(epoch FROM now() - last_attempt_at) AS age_s "
+                "FROM summarize_attempts WHERE session_id = %s", (sid,)).fetchone()
+        if not row or not row[0]:
+            return None
+        attempts, err, age = int(row[0]), (row[1] or "")[:200], float(row[2] or 0)
+        backoff = age < ph4.RETRY_BACKOFF_S
+        return {"attempts": attempts, "error": err,
+                "backing_off": backoff, "age_s": int(age)}
+    except Exception:  # noqa: BLE001 — no note is fine; a raised nav is not
+        return None
+
+
+def _grade_summary(sid: str) -> dict:
+    """Grade ONE session through the one grader. BACKGROUND ONLY (hits the DB).
+
+    Never raises: every failure comes back as state "unknown" with a reason.
+    """
+    out = {"state": "unknown", "pass": None, "since": None, "prior": None,
+           "records": None, "source": None, "attempts": None,
+           "reason": None, "checked_at": time.time()}
+    if not CSD_DSN:
+        out["reason"] = "no archive DSN configured — summarization state unknown"
+        return out
+    try:
+        from .. import summarize as ph4
+        rep = ph4.summary_scope_report(sid, CSD_DSN, KMCP_DSN, mode="auto")
+    except Exception as exc:  # noqa: BLE001 — degrade, never block the nav
+        out["reason"] = f"archive unreachable ({type(exc).__name__}: {exc})"[:200]
+        return out
+    out["pass"] = rep.get("pass")
+    out["prior"] = rep.get("prior")
+    out["records"] = rep.get("records")
+    out["source"] = rep.get("source")
+    out["since"] = rep.get("since")
+    out["reason"] = rep.get("reason")
+    scope, captured = rep.get("scope"), bool(rep.get("summarized"))
+    if (rep.get("reason") or "").startswith("prior capture unresolved"):
+        # The grader's own degrade path — the archive answered nothing, so
+        # "never summarized" would be a claim we cannot make.
+        out["state"] = "unknown"
+        return out
+    if scope == "delta":
+        out["state"] = "delta"
+    elif scope == "none":
+        out["state"] = "captured"
+    elif captured:
+        # Captured, but no watermark resolves — the next pass would restate the
+        # whole session. That is re-capture work, not a settled row.
+        out["state"] = "delta"
+    else:
+        out["state"] = "never"
+    note = _attempt_note(sid)
+    if note:
+        out["attempts"] = note
+        if out["state"] != "captured":
+            out["state"] = "failed"
+            out["reason"] = (f"{note['attempts']} failed phase-4 attempt(s)"
+                             + (" — in backoff" if note["backing_off"] else "")
+                             + (f": {note['error']}" if note["error"] else ""))
+    return out
+
+
+def summary_presence(sid: str, path: Path):
+    """The Σ chip's per-row payload. NEVER touches a database, never raises.
+
+    A pure read of the background refresher's memo plus the live in-process
+    run state. A miss (or a transcript that moved since the last grade)
+    registers the row as wanted and serves what it has, marked stale."""
+    if ":" in sid:              # children summarize through their parent
+        return None
+    sig = None
+    try:
+        st = path.stat()
+        sig = [st.st_mtime_ns, st.st_size]
+    except OSError:
+        pass
+    with _SUM_LOCK:
+        if sig is not None:
+            if sid not in _SUM_WANTED and len(_SUM_WANTED) >= SUM_WANTED_MAX:
+                _SUM_WANTED.pop(next(iter(_SUM_WANTED)), None)
+            _SUM_WANTED[sid] = sig
+        hit = _SUM_MEMO.get(sid)
+        out = {k: v for k, v in hit.items() if k != "sig"} if hit else None
+    if out is None:
+        out = {"state": "unknown", "pass": None, "since": None, "prior": None,
+               "records": None, "source": None, "attempts": None,
+               "reason": "not graded yet — the background refresher fills this "
+                         "in within a minute", "checked_at": None}
+        out["pending"] = True
+    else:
+        out["pending"] = False
+        out["stale"] = bool(sig and (hit or {}).get("sig") != sig)
+    # Live in-process run state wins over the graded row: a pass dispatched
+    # seconds ago has not reached summary_state yet.
+    live = SUMMARIZING.get(sid)
+    if live == "running":
+        out["state"] = "running"
+        out["reason"] = "an off-session summary run is in flight"
+    elif live and live != "done":
+        out["state"] = "failed"
+        out["reason"] = live
+    return out
+
+
+def _refresh_summaries() -> int:
+    """One refresher tick: grade the wanted rows whose grade is missing, stale
+    against the transcript, or older than SUM_TTL_S. Serial + staggered, for
+    the same reason the repos walker is: the point is that the REQUEST path
+    never fans out — a burst here would just move the stampede."""
+    now = time.time()
+    with _SUM_LOCK:
+        wanted = dict(_SUM_WANTED)
+        memo = dict(_SUM_MEMO)
+    todo = []
+    for sid, sig in wanted.items():
+        cur = memo.get(sid)
+        if (not cur or cur.get("sig") != sig
+                or now - (cur.get("checked_at") or 0) > SUM_TTL_S):
+            todo.append((sid, sig))
+    # Newest transcript first — the rows the operator is looking at.
+    todo.sort(key=lambda t: t[1][0], reverse=True)
+    done = 0
+    for i, (sid, sig) in enumerate(todo[:SUM_MAX_PER_TICK]):
+        row = _grade_summary(sid)
+        row["sig"] = sig
+        with _SUM_LOCK:
+            _SUM_MEMO[sid] = row
+        done += 1
+        if SUM_STAGGER_S and i + 1 < min(len(todo), SUM_MAX_PER_TICK):
+            time.sleep(SUM_STAGGER_S)
+    if done:
+        with _SUM_LOCK:
+            # Keep only rows the nav still asks about — the memo is a cache,
+            # not a ledger (the ledger is summary_passes, in the archive).
+            for sid in [s for s in _SUM_MEMO if s not in wanted]:
+                _SUM_MEMO.pop(sid, None)
+            store = {"sessions": dict(_SUM_MEMO), "generated_at": time.time()}
+        try:
+            _atomic_write_json(SUMMARY_FILE, store)
+        except OSError:
+            pass                          # the in-memory memo still serves
+    return done
+
+
+def _summary_refresher():
+    """The single background grader. One tick per SUM_REFRESH_S, forever."""
+    with _SUM_LOCK:                       # warm from disk: a restarted console
+        for sid, row in (_read_summary_store().get("sessions") or {}).items():
+            if isinstance(row, dict):     # is not an all-grey sidebar
+                _SUM_MEMO[sid] = row
+    while True:
+        try:
+            _refresh_summaries()
+        except Exception:  # noqa: BLE001 — a thread that dies stops the lens
+            pass
+        time.sleep(SUM_REFRESH_S)
+
+
+def _invalidate_summary(sid: str) -> None:
+    """Drop a session's grade so the next tick re-reads it (a pass landed)."""
+    with _SUM_LOCK:
+        _SUM_MEMO.pop(sid, None)
 
 
 def _await_summary(sid: str, proc, log_path: Path, base_size: int,
@@ -5762,6 +5999,10 @@ def serve(host="127.0.0.1", port=4462, token=None, no_auth=False, kmcp_dsn=None,
     # a disk read and a 30s poll never fans git out over 20 repositories.
     threading.Thread(target=_repos_refresher, daemon=True,
                      name="repos-refresh").start()
+    # Summarization presence: ONE background grader keeps the Σ chip's memo
+    # warm, so /api/sessions never runs the delta gate on the request path.
+    threading.Thread(target=_summary_refresher, daemon=True,
+                     name="summary-grade").start()
     if not no_ambient and os.environ.get("CSD_CONSOLE_AMBIENT", "1") != "0":
         _start_ambient()            # angles/tldr/timeline warm for active sessions
 

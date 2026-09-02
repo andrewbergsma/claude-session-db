@@ -31,7 +31,9 @@ history and dated by their last commit.
   evidence strength: a landed write > a refusal > a dry-run, latest among
   equals. An *already exists* refusal is classified `exists`, not `error` —
   it is proof the entry is there, not a failed write — and the verdict chip
-  carries the refusal text in its tooltip.
+  carries the refusal text in its tooltip. A `create_relationship` link
+  (`related`) proves the entry exists but is not a write of it, so it ranks
+  with `exists` and never outranks the create it decorates.
 
 ## [3.22.0] - 2026-09-02
 

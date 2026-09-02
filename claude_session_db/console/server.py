@@ -3588,7 +3588,7 @@ _PASS_IN_TITLE = re.compile(r"\(pass (\d+)\)")
 MAX_ENTRY_REFS = 400       # bound on the ANY() array of the one corpus query
 
 
-_VERDICT_RANK = {None: -1, "dry-run": 0, "error": 1, "exists": 1}
+_VERDICT_RANK = {None: -1, "dry-run": 0, "error": 1, "exists": 1, "related": 1}
 
 
 def _verdict_rank(v) -> int:
@@ -3598,7 +3598,9 @@ def _verdict_rank(v) -> int:
     path more than once — a create that fails validation, the corrected create
     that lands, a retry that comes back "already exists" — and the entry the
     operator sees in kmcp is the one that LANDED, so that attempt must own the
-    verdict; the latest attempt is often the least informative one."""
+    verdict; the latest attempt is often the least informative one. A
+    relationship link (`related`) proves the entry exists but is not a write
+    of it, so it ranks with `exists`: a link never outranks the create."""
     return _VERDICT_RANK.get(v, 2)
 
 

@@ -422,3 +422,12 @@ def test_already_exists_alone_is_exists_not_error(wired):
     wired.setattr(server, "build_session", _sessions({SID: {"events": [ev]}}))
     e = server.summaries_payload(SID)[0]["entries"][0]
     assert e["verdict"] == "exists"
+
+
+def test_a_relationship_link_never_outranks_the_create_it_decorates(wired):
+    made = _write_event("claudecode", "event/2026-08-21/a", "created",
+                        ts="2026-08-21T10:00:00Z")
+    linked = _write_event("claudecode", "event/2026-08-21/a", "related",
+                          ts="2026-08-21T10:05:00Z")
+    wired.setattr(server, "build_session", _sessions({SID: {"events": [made, linked]}}))
+    assert server.summaries_payload(SID)[0]["entries"][0]["verdict"] == "created"

@@ -24,8 +24,49 @@ Manifest row ids (stable, client-addressable):
     a:<uuid>    assistant narration         (record-level, text blocks)
     s:<uuid>    skill/meta injection        (record-level, user-role text)
     t:<tool_id> tool_result                 (block-level, both copies)
+    x:<tool_id> tool_use INPUT              (block-level, assistant side)
+    i:<uuid>#<b>[.<s>]  image block         (block-level, user msg or result)
     th:<uuid>   thinking                    (LOCKED — never stubbable)
+    o:<uuid>#<b>  unrecognised block        (LOCKED — counted, never hidden)
+
+─── THE ACCOUNTING MODEL (what BEFORE actually measures) ─────────────────────
+CR's BEFORE was once `len(json.dumps(content))` over every main-chain record —
+the transcript's BYTES. That number is not what the API bills, and on a real
+session it was wrong by ~50%: one pasted screenshot's base64 read as ≈119K
+"tokens" (the API bills an image at ~1-2K), 88 thinking SIGNATURES read as
+≈51K (they are opaque provenance strings, not tokens at all), and the JSON
+quoting/keys themselves were counted. Meanwhile the ~36K real tokens of
+tool_use INPUT (file bodies in a Write, kmcp documents in an import_entries)
+were invisible, folded into an opaque `fixed_chars` bucket the UI never showed
+— which is why the group sizes could never add up to BEFORE.
+
+The model now, per block, is what the API would count:
+
+  text / prompt / narration / injection   chars/4  (`est_tokens`, unchanged)
+  thinking                                chars/4 of the THINKING TEXT ONLY
+  tool_result content                     chars/4 (image sub-blocks excluded —
+                                          they become their own image rows)
+  tool_use input                          len(json.dumps(input))/4 — the API
+                                          receives the input AS JSON, so its
+                                          serialisation IS the token surface
+  image                                   (w x h)/750, capped at 1600 (images
+                                          are downscaled to ~1.15MP); the
+                                          dimensions are sniffed from the
+                                          decoded header, and a format we
+                                          cannot read degrades to a documented
+                                          flat estimate — NEVER to base64/4
+  thinking `signature`                    EXCLUDED (not tokens)
+  image base64 payload                    EXCLUDED (the pixels are billed, not
+                                          the transport encoding)
+  JSON envelope (keys, quoting, escapes)  EXCLUDED
+
+**Every source is a row, and the rows close.** `totals.est_tokens` is defined
+as Σ rows — there is no residual bucket to hide in. What the raw bytes carried
+but the count deliberately excludes is reported in `excluded` (signature /
+image-payload / envelope chars) so the gap between the file size and the token
+estimate is stated, never swallowed.
 """
+import base64
 import hashlib
 import json
 import re
@@ -103,6 +144,103 @@ def _digest(content) -> str:
         json.dumps(content, ensure_ascii=False).encode()).hexdigest()
 
 
+# ─── Image accounting ─────────────────────────────────────────────────────────
+# The API bills an image at roughly (width x height)/750 tokens and downscales
+# anything above ~1.15 megapixels, so 1600 is the practical ceiling. Transcript
+# image blocks carry no dimensions — only base64 — so the dimensions are read
+# out of the DECODED HEADER (pure stdlib: PNG/GIF/JPEG/WEBP magic). A format we
+# cannot parse degrades to a flat estimate, which is wrong by a factor of ~2 at
+# worst; counting the base64 instead was wrong by a factor of ~100.
+IMAGE_PX_PER_TOKEN = 750
+IMAGE_MAX_TOKENS = 1600         # ~1.15MP downscale ceiling
+IMAGE_FLAT_TOKENS = 1200        # documented estimate when dims are unreadable
+_SNIFF_B64_CHARS = 65536        # enough base64 to clear an EXIF/ICC preamble
+
+
+def _sniff_dims(data):
+    """(w, h) read from an image header, or None. Never raises."""
+    if not isinstance(data, str) or len(data) < 32:
+        return None
+    try:
+        chunk = data[:_SNIFF_B64_CHARS]
+        raw = base64.b64decode(chunk[:len(chunk) // 4 * 4])
+    except Exception:
+        return None
+    try:
+        if raw[:8] == b"\x89PNG\r\n\x1a\n" and len(raw) >= 24:
+            return (int.from_bytes(raw[16:20], "big"),
+                    int.from_bytes(raw[20:24], "big"))
+        if raw[:6] in (b"GIF87a", b"GIF89a") and len(raw) >= 10:
+            return (int.from_bytes(raw[6:8], "little"),
+                    int.from_bytes(raw[8:10], "little"))
+        if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP":
+            if raw[12:16] == b"VP8X" and len(raw) >= 30:
+                return (int.from_bytes(raw[24:27], "little") + 1,
+                        int.from_bytes(raw[27:30], "little") + 1)
+            if raw[12:16] == b"VP8 " and len(raw) >= 30:
+                return (int.from_bytes(raw[26:28], "little") & 0x3FFF,
+                        int.from_bytes(raw[28:30], "little") & 0x3FFF)
+            return None
+        if raw[:2] == b"\xff\xd8":          # JPEG: walk to the SOF marker
+            i = 2
+            while i + 9 < len(raw):
+                if raw[i] != 0xFF:
+                    i += 1
+                    continue
+                m = raw[i + 1]
+                if m in (0xD8, 0x01) or 0xD0 <= m <= 0xD7:
+                    i += 2
+                    continue
+                seg = int.from_bytes(raw[i + 2:i + 4], "big")
+                if 0xC0 <= m <= 0xCF and m not in (0xC4, 0xC8, 0xCC):
+                    return (int.from_bytes(raw[i + 7:i + 9], "big"),
+                            int.from_bytes(raw[i + 5:i + 7], "big"))
+                if seg < 2:
+                    return None
+                i += 2 + seg
+    except Exception:
+        return None
+    return None
+
+
+def image_tokens(block):
+    """(est_tokens, label, b64_chars) for an image content block."""
+    src = block.get("source") if isinstance(block, dict) else None
+    data = src.get("data") if isinstance(src, dict) else None
+    b64 = len(data) if isinstance(data, str) else 0
+    dims = _sniff_dims(data)
+    if dims and dims[0] > 0 and dims[1] > 0:
+        w, h = dims
+        est = max(1, min(IMAGE_MAX_TOKENS, (w * h) // IMAGE_PX_PER_TOKEN))
+        return est, f"{w}x{h}", b64
+    return IMAGE_FLAT_TOKENS, "dimensions unreadable", b64
+
+
+def _block_text_chars(b) -> int:
+    """Token-bearing chars of one content sub-block (images excluded — they
+    carry their own row; unknown shapes are counted by their JSON, which is
+    the only honest floor we have for them)."""
+    if isinstance(b, str):
+        return len(b)
+    if not isinstance(b, dict):
+        return len(json.dumps(b, ensure_ascii=False))
+    if b.get("type") == "image":
+        return 0
+    if isinstance(b.get("text"), str):
+        return len(b["text"])
+    return len(json.dumps(b, ensure_ascii=False))
+
+
+def _result_text_chars(content) -> int:
+    """Token-bearing chars of a tool_result `content` (string or sub-blocks),
+    excluding any image sub-block."""
+    if isinstance(content, str):
+        return len(content)
+    if isinstance(content, list):
+        return sum(_block_text_chars(b) for b in content)
+    return len(json.dumps(content, ensure_ascii=False))
+
+
 def _kmcp_refs(base: str, inp: dict) -> list:
     """['app:path', ...] a kmcp read tool_use targets (for the → ref verb)."""
     if base == "get_entries":
@@ -155,8 +293,10 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         turn_of.append(n_turns)
     recent_from = max(0, n_turns - RECENT_TURNS)   # turn > recent_from ⇒ recent
 
-    # Pass 3: rows.
+    # Pass 3: rows. EVERY token-bearing block becomes a row — nothing is
+    # folded into a bucket the UI cannot show or the operator cannot act on.
     rows, seen = [], {}
+    sig_chars = img_b64_chars = 0
     for ri, r in enumerate(records):
         t = r.get("type")
         if t not in ("user", "assistant") or r.get("isSidechain"):
@@ -168,7 +308,8 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         turn = turn_of[ri]
 
         def row(rid, kind, chars, *, name=None, hint=None, refs=None,
-                dg=None, locked=False, tid=None):
+                dg=None, locked=False, tid=None, est=None, bidx=None,
+                sub=None, extra=None):
             dup = False
             if dg is not None and chars >= DUP_MIN_CHARS:
                 if dg in seen:
@@ -183,65 +324,118 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 default = "keep"
             elif kind == "kmcp":
                 default = "ref"
-            elif kind in ("result", "injection"):
+            elif kind in ("result", "injection", "tool_use", "image"):
                 default = "stub"
             else:                              # prompt / narration
                 default = "keep"
-            rows.append({
+            rw = {
                 "id": rid, "kind": kind, "uuid": uid, "tid": tid,
                 "name": name, "hint": hint, "refs": refs,
-                "chars": chars, "est_tokens": est_tokens(chars),
+                "chars": chars,
+                "est_tokens": est_tokens(chars) if est is None else int(est),
                 "dup": dup, "dup_of": seen.get(dg) if dup else None,
-                "turn": turn, "recent": recent,
+                "turn": turn, "recent": recent, "bidx": bidx, "sub": sub,
                 "locked": locked, "default": default, "ts": r.get("timestamp"),
-            })
+            }
+            if extra:
+                rw.update(extra)
+            rows.append(rw)
+
+        def image_row(b, bidx, sub=None):
+            """One row per image block, wherever it sits."""
+            nonlocal img_b64_chars
+            est, label, b64 = image_tokens(b)
+            img_b64_chars += b64
+            rid = f"i:{uid}#{bidx}" + (f".{sub}" if sub is not None else "")
+            src = (b.get("source") or {}) if isinstance(b, dict) else {}
+            row(rid, "image", b64, est=est, bidx=bidx, sub=sub,
+                name=src.get("media_type") or "image", hint=label,
+                dg=_digest(src.get("data") or rid),
+                extra={"dims": label, "b64_chars": b64})
 
         if t == "assistant":
             narr = 0
-            for b in content if isinstance(content, list) else []:
+            n_think = 0
+            for bidx, b in enumerate(content if isinstance(content, list)
+                                     else []):
                 if not isinstance(b, dict):
+                    row(f"o:{uid}#{bidx}", "other",
+                        len(json.dumps(b, ensure_ascii=False)), locked=True,
+                        bidx=bidx, name="unrecognised block")
                     continue
                 bt = b.get("type")
                 if bt == "text":
                     narr += len(b.get("text") or "")
                 elif bt == "thinking":
-                    row(f"th:{uid}", "thinking",
-                        len(b.get("thinking") or ""), locked=True)
+                    # TEXT only — the signature is opaque provenance, not
+                    # tokens, and counting it once inflated BEFORE by ~51K.
+                    sig_chars += len(b.get("signature") or "")
+                    rid = f"th:{uid}" if n_think == 0 else f"th:{uid}#{n_think}"
+                    n_think += 1
+                    row(rid, "thinking", len(b.get("thinking") or ""),
+                        locked=True, bidx=bidx, name="thinking")
+                elif bt == "tool_use":
+                    inp = b.get("input")
+                    inp = inp if isinstance(inp, dict) else {}
+                    name = b.get("name") or "?"
+                    row(f"x:{b.get('id')}", "tool_use",
+                        len(json.dumps(inp, ensure_ascii=False)),
+                        tid=b.get("id"), bidx=bidx, name=name,
+                        hint=input_hint(name, inp), dg=_digest([name, inp]))
+                elif bt == "image":
+                    image_row(b, bidx)
+                else:
+                    row(f"o:{uid}#{bidx}", "other",
+                        len(json.dumps(b, ensure_ascii=False)), locked=True,
+                        bidx=bidx, name=str(bt or "block"))
             if isinstance(content, str):
                 narr = len(content)
             if narr:
                 row(f"a:{uid}", "narration", narr)
         else:   # user
-            has_result = isinstance(content, list) and any(
-                isinstance(b, dict) and b.get("type") == "tool_result"
-                for b in content)
-            if has_result:
-                for b in content:
-                    if not (isinstance(b, dict)
-                            and b.get("type") == "tool_result"):
-                        continue
+            txt_chars = 0
+            for bidx, b in enumerate(content if isinstance(content, list)
+                                     else []):
+                if not isinstance(b, dict):
+                    txt_chars += _block_text_chars(b)
+                    continue
+                bt = b.get("type")
+                if bt == "tool_result":
                     tid = b.get("tool_use_id")
                     meta = tool_uses.get(tid) or {}
-                    chars = content_chars(b.get("content", ""))
+                    body = b.get("content", "")
+                    chars = _result_text_chars(body)
                     if meta.get("kmcp"):
-                        row(f"t:{tid}", "kmcp", chars, tid=tid,
+                        row(f"t:{tid}", "kmcp", chars, tid=tid, bidx=bidx,
                             name=meta.get("kmcp"),
                             refs=_kmcp_refs(meta["kmcp"], meta.get("input", {})),
-                            dg=_digest(b.get("content", "")))
+                            dg=_digest(body))
                     else:
-                        row(f"t:{tid}", "result", chars, tid=tid,
+                        row(f"t:{tid}", "result", chars, tid=tid, bidx=bidx,
                             name=meta.get("name", "?"),
                             hint=input_hint(meta.get("name", "?"),
                                             meta.get("input", {})),
-                            dg=_digest(b.get("content", "")))
-            else:
-                txt = _text_of(content)
-                if not txt:
-                    continue
-                if _is_real_prompt(r, txt):
-                    row(f"u:{uid}", "prompt", len(txt))
+                            dg=_digest(body))
+                    for si, sb in enumerate(body if isinstance(body, list)
+                                            else []):
+                        if isinstance(sb, dict) and sb.get("type") == "image":
+                            image_row(sb, bidx, sub=si)
+                elif bt == "image":
+                    image_row(b, bidx)
+                elif isinstance(b.get("text"), str):
+                    txt_chars += len(b["text"])
                 else:
-                    row(f"s:{uid}", "injection", len(txt),
+                    row(f"o:{uid}#{bidx}", "other",
+                        len(json.dumps(b, ensure_ascii=False)), locked=True,
+                        bidx=bidx, name=str(bt or "block"))
+            if isinstance(content, str):
+                txt_chars = len(content)
+            if txt_chars:
+                txt = _text_of(content)
+                if _is_real_prompt(r, txt):
+                    row(f"u:{uid}", "prompt", txt_chars)
+                else:
+                    row(f"s:{uid}", "injection", txt_chars,
                         hint=txt.lstrip()[:60], dg=_digest(txt))
 
     groups: dict = {}
@@ -250,14 +444,17 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                                            "est_tokens": 0})
         g["count"] += 1
         g["chars"] += rw["chars"]
-        g["est_tokens"] += est_tokens(rw["chars"])
-    # fixed = everything in the resumed context surface that no row covers:
-    # tool_use inputs, thinking signatures, block/JSON overhead. Derived from
-    # the SAME measure the preview/fork report (context_surface), so the
-    # manifest's BEFORE and the preview's BEFORE cannot disagree.
+        g["est_tokens"] += rw["est_tokens"]
+
+    # THE INVARIANT: totals IS the sum of the rows. There is no fixed bucket
+    # left to hide in — every source the count knows about is addressable.
+    row_tokens = sum(rw["est_tokens"] for rw in rows)
+    row_chars = sum(rw["chars"] for rw in rows)
+    # What the raw bytes carried that the token count deliberately excludes.
+    # Stated, never swallowed — this is the gap between file size and estimate.
     surface = context_surface(records)
-    fixed_chars = max(0, surface - sum(rw["chars"] for rw in rows))
-    total = surface
+    envelope = max(0, surface - (row_chars - img_b64_chars) - sig_chars
+                   - img_b64_chars)
 
     return {
         "version_ok": not bad,
@@ -266,11 +463,24 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         "groups": groups,
         "turns": n_turns,
         "recent_turns": RECENT_TURNS,
-        "fixed_chars": fixed_chars,
-        "fixed_tokens": est_tokens(fixed_chars),
-        "totals": {"chars": total, "est_tokens": est_tokens(total)},
+        # Residual is 0 by construction; kept as a named line so that if the
+        # arithmetic ever drifts the UI shows it instead of absorbing it.
+        "residual_tokens": 0,
+        "fixed_chars": 0,        # retired bucket — kept so old clients parse
+        "fixed_tokens": 0,
+        "excluded": {"signature_chars": sig_chars,
+                     "image_payload_chars": img_b64_chars,
+                     "json_envelope_chars": envelope},
+        "surface_chars": surface,
+        "totals": {"chars": row_chars, "est_tokens": row_tokens},
         "floor": dict(FLOOR_TOKENS),
     }
+
+
+def surface_tokens(records, bash_kmcp=None) -> int:
+    """The honest BEFORE/AFTER measure — Σ manifest rows, by construction the
+    same number the manifest shows (one accounting model, one answer)."""
+    return build_manifest(records, bash_kmcp=bash_kmcp)["totals"]["est_tokens"]
 
 
 # ─── Redaction (the validated edit class, both copies) ────────────────────────
@@ -282,6 +492,10 @@ def _breadcrumb(row) -> str:
     elif row["kind"] == "result":
         hint = row.get("hint") or ""
         label = f"{row.get('name') or 'tool'}{(' ' + hint) if hint else ''}"
+    elif row["kind"] == "tool_use":
+        hint = row.get("hint") or ""
+        label = f"{row.get('name') or 'tool'} input" + \
+            (f" {hint}" if hint else "")
     elif row["kind"] == "injection":
         label = "injected context"
     elif row["kind"] == "narration":
@@ -289,6 +503,59 @@ def _breadcrumb(row) -> str:
     else:
         label = row["kind"]
     return f"[CR: {label} — {human(row['chars'])} elided]"
+
+
+def _image_crumb(row) -> str:
+    """The text block a stubbed image becomes. Says what was there and what it
+    cost, so the model can ask for it back rather than silently lose it."""
+    return (f"[image removed by CR: {row.get('dims') or 'unknown size'}, "
+            f"~{row.get('est_tokens', 0)} tokens]")
+
+
+def _stub_input(crumb: str) -> dict:
+    """The replacement for an elided tool_use input. The block keeps its `id`
+    and `name`, so the tool_use/tool_result pair still matches — only the
+    input's payload is swapped for a breadcrumb (a tool_use INPUT is a
+    free-form object; extra keys inside it are not the block-level extra keys
+    the API rejects)."""
+    return {"_cr_elided": crumb}
+
+
+def _stub_image(content, rw, crumb) -> bool:
+    """Swap an image block for a text breadcrumb, in the message content or
+    inside a tool_result's sub-block list. Positional first, then a scan, so a
+    manifest built against a slightly different copy still lands."""
+    if not isinstance(content, list):
+        return False
+    bidx, sub = rw.get("bidx"), rw.get("sub")
+    text_block = {"type": "text", "text": crumb}
+
+    def _swap(lst, i):
+        if isinstance(i, int) and 0 <= i < len(lst) \
+                and isinstance(lst[i], dict) and lst[i].get("type") == "image":
+            lst[i] = dict(text_block)
+            return True
+        for j, b in enumerate(lst):
+            if isinstance(b, dict) and b.get("type") == "image":
+                lst[j] = dict(text_block)
+                return True
+        return False
+
+    if sub is None:
+        return _swap(content, bidx)
+    host = content[bidx] if isinstance(bidx, int) and 0 <= bidx < len(content) \
+        else None
+    if not (isinstance(host, dict) and host.get("type") == "tool_result"):
+        host = next((b for b in content if isinstance(b, dict)
+                     and b.get("type") == "tool_result"), None)
+    if host is None:
+        return False
+    body = host.get("content")
+    if not isinstance(body, list):
+        # the parent tool_result was already stubbed — the image is gone with
+        # it; that is the outcome asked for, not a failure.
+        return True
+    return _swap(body, sub)
 
 
 def apply_stubs(records, manifest, stub_ids) -> dict:
@@ -302,7 +569,13 @@ def apply_stubs(records, manifest, stub_ids) -> dict:
             by_uuid.setdefault(u, r)
 
     stubbed, ignored, saved = [], [], 0
-    for rid in stub_ids:
+    # Sub-block kinds first: an image inside a tool_result must be replaced
+    # BEFORE its parent result collapses into a breadcrumb string, or the
+    # locator has nothing left to aim at.
+    ordered = sorted([r for r in stub_ids if isinstance(r, str)],
+                     key=lambda r: 0 if (by_id.get(r) or {}).get("kind")
+                     == "image" else 1)
+    for rid in ordered:
         rw = by_id.get(rid)
         if rw is None or rw.get("locked"):
             ignored.append(rid)
@@ -311,10 +584,18 @@ def apply_stubs(records, manifest, stub_ids) -> dict:
         if rec is None:
             ignored.append(rid)
             continue
-        crumb = _breadcrumb(rw)
+        crumb = _image_crumb(rw) if rw["kind"] == "image" else _breadcrumb(rw)
         content = (rec.get("message") or {}).get("content")
         did = False
-        if rw["kind"] in ("result", "kmcp"):
+        if rw["kind"] == "image":
+            did = _stub_image(content, rw, crumb)
+        elif rw["kind"] == "tool_use":
+            for b in content if isinstance(content, list) else []:
+                if (isinstance(b, dict) and b.get("type") == "tool_use"
+                        and b.get("id") == rw["tid"]):
+                    b["input"] = _stub_input(crumb)     # id + name preserved
+                    did = True
+        elif rw["kind"] in ("result", "kmcp"):
             for b in content if isinstance(content, list) else []:
                 if (isinstance(b, dict) and b.get("type") == "tool_result"
                         and b.get("tool_use_id") == rw["tid"]):
@@ -439,6 +720,7 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
 
     before = context_surface(records)
     manifest = build_manifest(records, bash_kmcp=bash_kmcp)
+    before_tok = manifest["totals"]["est_tokens"]
     stats = apply_stubs(records, manifest, stub_ids)
 
     new_id = new_id or str(uuidlib.uuid4())
@@ -480,11 +762,13 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
         raise ValueError("refusing to overwrite the source session")
     dump(records, dst)
     after = context_surface(records)
+    after_tok = surface_tokens(records, bash_kmcp=bash_kmcp)
     return {
         "new_session": new_id,
         "path": str(dst),
         "before_chars": before, "after_chars": after,
-        "before_tokens": est_tokens(before), "after_tokens": est_tokens(after),
-        "saved_pct": round((before - after) / before * 100, 1) if before else 0,
+        "before_tokens": before_tok, "after_tokens": after_tok,
+        "saved_pct": round((before_tok - after_tok) / before_tok * 100, 1)
+        if before_tok else 0,
         **stats,
     }

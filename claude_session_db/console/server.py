@@ -2935,14 +2935,19 @@ def cr_apply(sid: str, stub, refs, confirm: bool):
     if not confirm:
         manifest = crlib.build_manifest(records, bash_kmcp=_bash_kmcp)
         before = crlib.context_surface(records)
+        before_tok = manifest["totals"]["est_tokens"]
         stats = crlib.apply_stubs(records, manifest, stub)   # in-memory only
         after = crlib.context_surface(records) + len(preamble or "")
+        # Same accounting model as the manifest the operator is looking at —
+        # Σ rows, images at image-token rates, signatures excluded.
+        after_tok = (crlib.surface_tokens(records, bash_kmcp=_bash_kmcp)
+                     + crlib.est_tokens(len(preamble or "")))
         return {"ok": True, "phase": "preview",
                 "before_chars": before, "after_chars": after,
-                "before_tokens": crlib.est_tokens(before),
-                "after_tokens": crlib.est_tokens(after),
-                "saved_pct": round((before - after) / before * 100, 1)
-                if before else 0,
+                "before_tokens": before_tok,
+                "after_tokens": after_tok,
+                "saved_pct": round((before_tok - after_tok) / before_tok * 100,
+                                   1) if before_tok else 0,
                 "floor": dict(crlib.FLOOR_TOKENS),
                 "stubbed": len(stats["stubbed"]), "ignored": stats["ignored"],
                 "preamble": preamble, "refs": refs,

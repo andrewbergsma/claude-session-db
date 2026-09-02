@@ -14,6 +14,7 @@ Semantics under test:
 
 Run:  uv run --extra dev pytest tests/test_cr.py -q
 """
+import base64
 import json
 
 import pytest
@@ -109,8 +110,9 @@ def test_manifest_grouping_and_defaults():
     assert g["prompt"]["count"] == 2 and g["injection"]["count"] == 1
     assert m["turns"] == 2
     assert m["floor"]["low"] == 70_000        # honest-AFTER scaffolding band
-    # tool_use inputs are counted as fixed (non-redactable) overhead
-    assert m["fixed_chars"] > 0
+    # tool_use inputs are ROWS now, never a hidden bucket
+    assert m["fixed_chars"] == 0 and m["residual_tokens"] == 0
+    assert by["x:t1"]["kind"] == "tool_use" and by["x:t1"]["name"] == "Bash"
 
 
 def test_manifest_recency_window_expires():
@@ -289,3 +291,195 @@ def test_forge_no_preamble_no_synthetic_user(tmp_path):
     # no synthetic user record: the tip below the title is the source's own
     # last record (the file-history-snapshot), not a CR-appended user turn
     assert out[-2]["type"] == "file-history-snapshot"
+
+
+# ---- honest accounting: every source is a row, and the rows close -----------
+def _png_b64(w, h, pad=800):
+    """Bytes carrying a valid PNG/IHDR header — enough for the dimension
+    sniffer, with no codec dependency."""
+    raw = (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+           + w.to_bytes(4, "big") + h.to_bytes(4, "big")
+           + b"\x08\x06\x00\x00\x00" + b"\x00" * pad)
+    return base64.b64encode(raw).decode()
+
+
+def _image_block(w=1200, h=900, pad=40000):
+    return {"type": "image",
+            "source": {"type": "base64", "media_type": "image/png",
+                       "data": _png_b64(w, h, pad)}}
+
+
+def _rich_transcript():
+    """The three formerly-invisible populations: a fat tool_use input, pasted
+    images, and a thinking block whose signature dwarfs its text."""
+    return [
+        _user("u1", "here is the screenshot"),
+        {"type": "user", "uuid": "u2", "parentUuid": "u1", "sessionId": "s",
+         "version": VER, "timestamp": "2026-08-14T10:00:00Z",
+         "message": {"role": "user", "content": [
+             _image_block(1200, 900),
+             {"type": "text", "text": "what is wrong with it?"}]}},
+        {"type": "assistant", "uuid": "a1", "parentUuid": "u2",
+         "sessionId": "s", "version": VER,
+         "timestamp": "2026-08-14T10:00:01Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "thinking", "thinking": "short",
+              "signature": "S" * 4000},
+             {"type": "text", "text": "writing the file"},
+             {"type": "tool_use", "id": "t9", "name": "Write",
+              "input": {"file_path": "/tmp/big.py",
+                        "content": "print('x')\n" * 500}}]}},
+        {"type": "user", "uuid": "r10", "parentUuid": "a1", "sessionId": "s",
+         "version": VER, "timestamp": "2026-08-14T10:00:03Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t9", "content": [
+                 {"type": "text", "text": "screenshot attached"},
+                 _image_block(800, 600)]}]}},
+    ]
+
+
+def test_totals_equal_sum_of_rows_exactly():
+    """THE reconciliation invariant — no bucket left to hide in."""
+    for recs in (_transcript(), _rich_transcript()):
+        m = cr.build_manifest(recs)
+        assert m["totals"]["est_tokens"] == sum(r["est_tokens"]
+                                                for r in m["rows"])
+        assert m["totals"]["chars"] == sum(r["chars"] for r in m["rows"])
+        assert m["residual_tokens"] == 0 and m["fixed_tokens"] == 0
+        # the group headers sum to the same number the BEFORE line shows
+        assert sum(g["est_tokens"] for g in m["groups"].values()) \
+            == m["totals"]["est_tokens"]
+        assert cr.surface_tokens(recs) == m["totals"]["est_tokens"]
+
+
+def test_tool_use_rows_are_priced_by_their_json_input():
+    m = cr.build_manifest(_rich_transcript())
+    by = {r["id"]: r for r in m["rows"]}
+    row = by["x:t9"]
+    assert row["kind"] == "tool_use" and row["name"] == "Write"
+    assert row["hint"] == "/tmp/big.py"
+    inp = {"file_path": "/tmp/big.py", "content": "print('x')\n" * 500}
+    assert row["chars"] == len(json.dumps(inp, ensure_ascii=False))
+    assert row["est_tokens"] == row["chars"] // 4
+    assert row["default"] == "keep"          # recent turn
+
+
+def test_images_are_priced_as_images_not_base64():
+    m = cr.build_manifest(_rich_transcript())
+    imgs = [r for r in m["rows"] if r["kind"] == "image"]
+    assert len(imgs) == 2                # user paste + tool_result sub-block
+    by_dims = {r["dims"]: r for r in imgs}
+    assert by_dims["1200x900"]["est_tokens"] == 1200 * 900 // 750
+    assert by_dims["800x600"]["est_tokens"] == 800 * 600 // 750
+    for r in imgs:
+        # the base64 payload is REPORTED (chars) but never billed as tokens
+        assert r["chars"] > 40000
+        assert r["est_tokens"] < r["chars"] // 4
+    assert m["excluded"]["image_payload_chars"] == sum(r["chars"] for r in imgs)
+
+
+def test_huge_image_is_capped_and_unreadable_one_falls_back():
+    big = {"type": "image", "source": {"type": "base64",
+                                       "media_type": "image/png",
+                                       "data": _png_b64(6000, 6000)}}
+    assert cr.image_tokens(big)[0] == cr.IMAGE_MAX_TOKENS
+    junk = {"type": "image", "source": {"type": "base64",
+                                        "media_type": "image/heic",
+                                        "data": "Z" * 400}}
+    est, label, b64 = cr.image_tokens(junk)
+    assert est == cr.IMAGE_FLAT_TOKENS and "unreadable" in label and b64 == 400
+
+
+def test_thinking_signature_is_excluded_entirely():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    by = {r["id"]: r for r in m["rows"]}
+    assert by["th:a1"]["est_tokens"] == len("short") // 4
+    assert m["excluded"]["signature_chars"] == 4000
+    # lengthening the signature must not move a single token
+    for r in recs:
+        if r.get("uuid") == "a1":
+            r["message"]["content"][0]["signature"] = "S" * 40000
+    assert cr.build_manifest(recs)["totals"]["est_tokens"] \
+        == m["totals"]["est_tokens"]
+
+
+def test_other_blocks_are_a_visible_locked_row():
+    recs = [_user("u1", "hi"),
+            {"type": "assistant", "uuid": "a1", "sessionId": "s",
+             "version": VER, "timestamp": "2026-08-14T10:00:01Z",
+             "message": {"role": "assistant", "content": [
+                 {"type": "server_tool_use", "id": "w1", "blob": "z" * 100}]}}]
+    m = cr.build_manifest(recs)
+    other = [r for r in m["rows"] if r["kind"] == "other"]
+    assert len(other) == 1 and other[0]["locked"]
+    assert m["totals"]["est_tokens"] == sum(r["est_tokens"] for r in m["rows"])
+
+
+# ---- stubbing the new kinds -------------------------------------------------
+def test_stub_tool_use_keeps_pairing_and_swaps_input():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    res = cr.apply_stubs(recs, m, ["x:t9"])
+    assert res["stubbed"] == ["x:t9"] and res["saved_chars"] > 0
+    a1 = next(r for r in recs if r.get("uuid") == "a1")
+    blk = a1["message"]["content"][2]
+    assert set(blk) == {"type", "id", "name", "input"}   # pair still matches
+    assert blk["id"] == "t9" and blk["name"] == "Write"
+    assert blk["input"]["_cr_elided"].startswith("[CR: Write input /tmp/big.py")
+
+
+def test_stub_image_becomes_a_text_block():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    ids = [r["id"] for r in m["rows"] if r["kind"] == "image"]
+    res = cr.apply_stubs(recs, m, ids)
+    assert set(res["stubbed"]) == set(ids)
+    u2 = next(r for r in recs if r.get("uuid") == "u2")
+    assert u2["message"]["content"][0] == {
+        "type": "text",
+        "text": "[image removed by CR: 1200x900, ~1440 tokens]"}
+    r10 = next(r for r in recs if r.get("uuid") == "r10")
+    sub = r10["message"]["content"][0]["content"][1]
+    assert sub["type"] == "text" and "800x600" in sub["text"]
+    # no image block survives, and the count collapses accordingly
+    assert not [r for r in cr.build_manifest(recs)["rows"]
+                if r["kind"] == "image"]
+    assert cr.surface_tokens(recs) < m["totals"]["est_tokens"]
+
+
+def test_stub_image_inside_an_already_stubbed_result_is_not_ignored():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    ids = [r["id"] for r in m["rows"]
+           if r["kind"] == "image" or r["id"] == "t:t9"]
+    assert cr.apply_stubs(recs, m, ids)["ignored"] == []
+
+
+def test_forge_fork_with_tool_use_and_image_stays_well_formed(tmp_path):
+    recs = _rich_transcript()
+    src = tmp_path / "src-sid.jsonl"
+    src.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    m = cr.build_manifest(recs)
+    stub = [r["id"] for r in m["rows"]
+            if r["kind"] in ("image", "tool_use", "result")]
+    res = cr.forge_fork(src, stub)
+    out = [json.loads(ln) for ln in
+           (tmp_path / f"{res['new_session']}.jsonl").read_text().splitlines()
+           if ln.strip()]
+
+    uses, results = {}, set()
+    for r in out:
+        for b in ((r.get("message") or {}).get("content") or []):
+            if not isinstance(b, dict):
+                continue
+            assert b.get("type") != "image", "no image block may survive"
+            if b.get("type") == "tool_use":
+                assert b.get("id") and b.get("name")
+                uses[b["id"]] = b
+            if b.get("type") == "tool_result":
+                results.add(b.get("tool_use_id"))
+    assert set(uses) == results               # every pair still matches
+    assert list(uses["t9"]["input"]) == ["_cr_elided"]
+    assert res["before_tokens"] > res["after_tokens"] > 0
+    assert res["after_tokens"] == cr.surface_tokens(out)

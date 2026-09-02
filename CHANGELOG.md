@@ -19,6 +19,20 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.22.1] - 2026-09-02
+
+### Fixed
+- **Summary tab verdicts: the write that LANDED owns the verdict.** The
+  entries list deduped by app:path with "latest write wins", so a session
+  that tried a path three times — a create refused by validation, the
+  corrected create that landed, a retry answered *already exists* — showed
+  the entry as `error` while it sat right there in kmcp (a real controltech
+  session rendered 9 of 14 entries as errors that way). Ranking is now by
+  evidence strength: a landed write > a refusal > a dry-run, latest among
+  equals. An *already exists* refusal is classified `exists`, not `error` —
+  it is proof the entry is there, not a failed write — and the verdict chip
+  carries the refusal text in its tooltip.
+
 ## [3.22.0] - 2026-09-02
 
 ### Added

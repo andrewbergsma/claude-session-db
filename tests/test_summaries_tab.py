@@ -397,3 +397,28 @@ def test_a_plain_summarize_still_claims_its_pass(dispatch):
     server.summarize_session(SID, "/tmp", archive=False)
     assert dispatch["claimed"] == 1
     assert dispatch["args"][1] == f"/session-summary {SID}"
+
+
+def test_a_landed_write_outranks_a_later_refusal_of_the_same_path(wired):
+    # validation error -> corrected create lands -> retry says already exists:
+    # the operator sees ONE entry in kmcp, so the verdict is the write that landed.
+    first = _write_event("claudecode", "lesson/x", "created", etype="lesson",
+                         ts="2026-08-21T10:00:00Z", err=True)
+    first["error"] = "Input validation error: 'description' is a required property"
+    landed = _write_event("claudecode", "lesson/x", "created", etype="lesson",
+                          ts="2026-08-21T10:05:00Z")
+    retry = _write_event("claudecode", "lesson/x", "created", etype="lesson",
+                         ts="2026-08-21T10:10:00Z", err=True)
+    retry["error"] = "Creation failed: Entry already exists: claudecode:lesson/x"
+    wired.setattr(server, "build_session",
+                  _sessions({SID: {"events": [first, landed, retry]}}))
+    e = server.summaries_payload(SID)[0]["entries"][0]
+    assert e["verdict"] == "created" and e["error"] is None
+
+
+def test_already_exists_alone_is_exists_not_error(wired):
+    ev = _write_event("claudecode", "lesson/x", "created", etype="lesson", err=True)
+    ev["error"] = "Creation failed: Entry already exists: claudecode:lesson/x"
+    wired.setattr(server, "build_session", _sessions({SID: {"events": [ev]}}))
+    e = server.summaries_payload(SID)[0]["entries"][0]
+    assert e["verdict"] == "exists"

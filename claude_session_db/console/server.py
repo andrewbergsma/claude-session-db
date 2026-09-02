@@ -3588,11 +3588,24 @@ _PASS_IN_TITLE = re.compile(r"\(pass (\d+)\)")
 MAX_ENTRY_REFS = 400       # bound on the ANY() array of the one corpus query
 
 
+_VERDICT_RANK = {None: -1, "dry-run": 0, "error": 1, "exists": 1}
+
+
 def _verdict_rank(v) -> int:
-    """A dry-run never outranks the write it rehearsed (the Context tab's rule,
-    kept here): a ref whose only evidence is a dry-run renders as a dry-run,
-    but a real write later in the transcript always wins."""
-    return -1 if v is None else 0 if v == "dry-run" else 1
+    """Evidence strength, not recency. A real write (created / updated /
+    patched / moved / wrote) outranks a refusal, a refusal outranks a dry-run,
+    and among equals the later one wins. A session commonly tries the same
+    path more than once — a create that fails validation, the corrected create
+    that lands, a retry that comes back "already exists" — and the entry the
+    operator sees in kmcp is the one that LANDED, so that attempt must own the
+    verdict; the latest attempt is often the least informative one."""
+    return _VERDICT_RANK.get(v, 2)
+
+
+def _classify_error(err) -> str:
+    """"Already exists" is not a failure of the write, it is proof the entry is
+    there (a retry, or another session got there first): verdict `exists`."""
+    return "exists" if "already exists" in str(err or "").lower() else "error"
 
 
 def _ledger_passes(sid: str) -> list:
@@ -3662,7 +3675,7 @@ def _run_writes(sid: str, warnings: list) -> list:
         for r in refs:
             if not r.get("path"):
                 continue          # a staged-file import names no entry
-            verdict = ("error" if e.get("is_error") else
+            verdict = (_classify_error(e.get("error")) if e.get("is_error") else
                        "dry-run" if e.get("dry_run") else
                        r.get("op") or "wrote")
             out.append({"app": r.get("app"), "path": r["path"],
@@ -3674,9 +3687,10 @@ def _run_writes(sid: str, warnings: list) -> list:
 
 
 def _merge_entries(writes: list, corpus: list, run_labels: dict) -> list:
-    """Dedupe by app:path. The LATEST real write wins the verdict; a dry-run
-    never overrides the write it rehearsed. The corpus row supplies title,
-    entity type and the created/updated timestamps a transcript cannot know."""
+    """Dedupe by app:path. The strongest evidence wins the verdict (a landed
+    write > a refusal > a dry-run, see _verdict_rank), latest among equals.
+    The corpus row supplies title, entity type and the created/updated
+    timestamps a transcript cannot know."""
     rows: dict = {}
     for w in sorted(writes, key=lambda x: x.get("ts") or ""):
         key = f"{w['app'] or '?'}:{w['path']}"

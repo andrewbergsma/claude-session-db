@@ -5450,7 +5450,9 @@ function sumEntryHtml(e, corpusOk){
             : e.verdict === "updated" ? "updated"
             : e.verdict === "dry-run" ? "dry"
             : e.verdict === "error" ? "err" : "";
-  const meta = [`<span class="${cls}">${esc(e.verdict || "wrote")}</span>`];
+  const vtip = e.verdict === "exists" ? "the write came back 'already exists' — the entry is in kmcp (a retry, or another session wrote it first)"
+             : e.verdict === "error" ? (e.error || "the write was refused") : "";
+  const meta = [`<span class="${cls}" title="${esc(vtip)}">${esc(e.verdict || "wrote")}</span>`];
   // Only claimable when the corpus was actually queried — with the knowledge DB
   // down every row would wear "not in corpus", which is an accusation, not a fact.
   if(corpusOk && !e.in_kmcp)

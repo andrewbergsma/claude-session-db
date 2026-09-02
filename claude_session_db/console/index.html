@@ -1086,6 +1086,9 @@
   .dchip.gen { color:var(--accent); border-color:rgba(76,141,255,.55);
                animation:dchip-pulse 1.2s ease-in-out infinite; }
   @keyframes dchip-pulse { 50% { opacity:.35; } }
+  /* Σ only: "we could not ask the archive" is grey and solid — distinct from
+     absent's dashed outline, which is a KNOWN "no summary exists". */
+  .dchip.unk { color:var(--muted); border-color:var(--border); opacity:.7; }
   .dchip:hover { filter:brightness(1.25); }
   /* ghost title: the tldr's proposed title standing in for a raw
      first-prompt/uuid title until accepted (✓) or dismissed */
@@ -1131,6 +1134,15 @@
   .rd-acts .rd-actmsg:not(:empty) { padding:1px 6px; border-radius:4px;
              background:var(--surface2); }
   .rd-acts .rd-actmsg.bad { color:var(--warn); }
+  /* the Σ state, in words, directly above the close-out buttons — the same
+     grade the sidebar chip is colored by, so the reader answers "is this
+     already captured?" before you press Summarize. */
+  .rd-sums { display:flex; align-items:baseline; gap:6px; flex-wrap:wrap;
+             margin-top:10px; padding-top:9px; border-top:1px solid var(--border);
+             font:10.5px var(--mono); color:var(--ink2); }
+  .rd-sums b { font-weight:700; }
+  .rd-sums .why { color:var(--muted); font-size:10px; }
+  .rd-sums + .rd-acts { border-top:none; padding-top:4px; margin-top:4px; }
   /* proposed-title strip (reader + chat header): suggestion, one-press accept */
   .tprop { display:flex; align-items:center; gap:7px; font-size:12px;
            color:var(--ink2); min-width:0; }
@@ -2243,13 +2255,61 @@ function tlStateOf(s){
   return {absent:"abs", generating:"gen", stale:"stale",
           error:"err", fresh:"fresh"}[st] || "abs";
 }
+/* ---- Σ: summarization presence ------------------------------------------
+   The third chip, same family and the same seam as T and ⧗. It answers, at a
+   glance and without opening anything: was this session ever captured to kmcp,
+   and is there REAL new work since that pass's watermark? The grade comes
+   from the ONE grader (summarize.summary_scope_report → _delta_gate), run by
+   a background refresher and served out of a (mtime_ns,size) memo — the poll
+   never grades. `unknown` is grey and honest: the archive could not be asked. */
+const SUM_CLS = {never:"abs", captured:"fresh", delta:"stale",
+                 running:"gen", failed:"err", unknown:"unk"};
+const SUM_WORDS = {
+  never:   "never summarized",
+  captured:"summarized — nothing new since",
+  delta:   "summarized — NEW work since",
+  running: "summary running",
+  failed:  "summarization failed",
+  unknown: "summarization state unknown",
+};
+function sumStateOf(s){
+  const su = s && s.summary;
+  return (su && SUM_CLS[su.state]) ? su.state : "unknown";
+}
+/* One sentence for the tooltip / header / reader: state, pass, watermark
+   date, prior kmcp entry ref, and the grader's own reason. */
+function sumStateText(su){
+  const st = (su && SUM_CLS[su.state]) ? su.state : "unknown";
+  const bits = [SUM_WORDS[st]];
+  if(su && su.since && (st === "delta" || st === "captured"))
+    bits[0] += " " + shortDate(su.since);
+  if(su && su.pass && st !== "never")
+    bits.push("pass " + su.pass + " next");
+  if(su && su.prior) bits.push(su.prior);
+  if(su && su.records != null && st === "delta")
+    bits.push(su.records + " records after the watermark");
+  return bits.join(" · ");
+}
+function sumChipTip(su, tappable){
+  const st = (su && SUM_CLS[su.state]) ? su.state : "unknown";
+  let t = "summary — " + sumStateText(su);
+  if(su && su.reason) t += "\n" + su.reason;
+  if(su && su.stale) t += "\n(the transcript moved since this was graded — "
+    + "re-graded in the background)";
+  if(st === "delta") t += "\nNeeds re-capture: the next pass digests only the tail.";
+  if(st === "never") t += "\nNothing in kmcp for this session yet.";
+  return tappable === false ? t
+    : t + "\nTap to open the reader (Summarize / Archive live at its foot).";
+}
 function digestChips(s){
   const id = s.session_id;
-  const ts = tldrStateOf(s), ls = tlStateOf(s);
+  const ts = tldrStateOf(s), ls = tlStateOf(s), ss = sumStateOf(s);
   return `<span class="dchip ${ts}" title="tl;dr (a last-3-turns catch-up) — ${DCHIP_STATE_TIP[ts]}"
       onclick="rowDigest(event,'${id}','tldr')">T</span>` +
     `<span class="dchip ${ls}" title="timeline (the whole session, one line per turn) — ${DCHIP_STATE_TIP[ls]}"
-      onclick="rowDigest(event,'${id}','timeline')">⧗</span>`;
+      onclick="rowDigest(event,'${id}','timeline')">⧗</span>` +
+    `<span class="dchip ${SUM_CLS[ss]}" title="${esc(sumChipTip(s.summary))}"
+      onclick="rowDigest(event,'${id}','tldr')">Σ</span>`;
 }
 function rowDigest(e, id, kind){
   e.stopPropagation();
@@ -2535,6 +2595,20 @@ function summaryChip(s){
     : `<span class="chip" style="color:${color}" title="${esc(tip)}">${label}</span>`;
 }
 
+/* The Σ chip's words, in the chat header. The chip beside it (summaryChip)
+   reports the last RUN; this one reports the STATE — captured or not, and
+   whether anything has happened since. Same grade, same seam as the sidebar. */
+const SUM_COLOR = {never:"var(--muted)", captured:"var(--good)",
+                   delta:"var(--warn)", running:"var(--accent)",
+                   failed:"var(--bad)", unknown:"var(--muted)"};
+function summaryStateChip(s){
+  const su = s && s.summary;
+  if(!su || s.subagent) return "";
+  const st = sumStateOf(s);
+  return `<span class="chip" style="color:${SUM_COLOR[st]}"
+      title="${esc(sumChipTip(su, false))}">Σ ${esc(sumStateText(su))}</span>`;
+}
+
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const dtitle = s.user_title || s.title;   // user-set title overrides derived
@@ -2583,7 +2657,7 @@ function renderHeader(s){
       ${s.topic?`<span class="chip" style="color:var(--purple)" title="topic taxonomy (overlay, not derived)">▦ ${esc(s.topic)}${s.subtopic?" › "+esc(s.subtopic):""}</span>`:""}
       ${s.truncated?`<span class="chip" style="color:var(--warn)" title="the transcript is too large to render whole — only its tail is shown here (the archive still holds all of it)">tail only</span>`:""}
       ${s.archived?`<span class="chip" style="color:var(--warn)" title="archived — hidden from the sidebar by an index entry; nothing on disk was moved or deleted">archived</span>`:""}
-      ${summaryChip(s)}
+      ${summaryStateChip(s)}${summaryChip(s)}
     </div>
     ${tldrLine(s)}
     ${proposalLine(s)}
@@ -4962,13 +5036,17 @@ function openReader(id, kind){
   // may already be gone (archiving removes it from the Projects list).
   const prev = (readerFor && readerFor.id === id) ? readerFor : null;
   readerFor = {id, kind};
-  if(prev) for(const k of ["archived","dispatched","cwd","msg","bad","busy","scope"])
+  if(prev) for(const k of ["archived","dispatched","cwd","msg","bad","busy","scope","summary"])
     readerFor[k] = prev[k];
   const row = (navData && navData.sessions || []).find(x => x.session_id === id);
   if(row){
     if(readerFor.archived === undefined) readerFor.archived = !!row.archived;
     if(row.cwd) readerFor.cwd = row.cwd;
+    if(row.summary) readerFor.summary = row.summary;
   }
+  // Archiving drops the row from the nav; the detail pane still has the grade.
+  if(!readerFor.summary && curId === id && curSession && curSession.summary)
+    readerFor.summary = curSession.summary;
   const dlg = document.getElementById("readerdlg");
   if(!dlg.classList.contains("open")){ dlg.classList.add("open"); ovOpen(); }
   document.getElementById("rd-card").innerHTML =
@@ -5095,7 +5173,14 @@ function readerActsHtml(){
   const btn = (label, fn, dis, title) =>
     `<button class="act sm" ${dis ? "disabled" : ""} onclick="readerAct('${fn}')"
        title="${esc(title)}">${label}</button>`;
-  return `<div class="rd-acts" id="rd-acts">
+  const su = r.summary;
+  const sst = su ? (SUM_CLS[su.state] ? su.state : "unknown") : null;
+  const sums = su ? `<div class="rd-sums" title="${esc(sumChipTip(su, false))}">
+      <span style="color:${SUM_COLOR[sst]}">Σ</span>
+      <b style="color:${SUM_COLOR[sst]}">${esc(sumStateText(su))}</b>
+      ${su.reason ? `<span class="why">${esc(su.reason)}</span>` : ""}
+    </div>` : "";
+  return `<div id="rd-foot">` + sums + `<div class="rd-acts">
     ${btn(sumLabel(sc), "summarize", sumDis, sumWhy || sumTitle(sc, false))}
     ${btn(sc && sc.since ? "✎⇩ …and archive" : "✎⇩ Sum + archive", "sumarch",
       sumDis, sumWhy || sumTitle(sc, true))}
@@ -5104,10 +5189,10 @@ function readerActsHtml(){
         ? "Bring the session back to the sidebar (an index entry flips — nothing on disk changes)"
         : "Archive only, no summary — an index entry, never a mutation; retrievable from the Archive tab")}
     <span class="rd-actmsg${r.bad ? " bad" : ""}">${esc(r.msg || "")}</span>
-  </div>`;
+  </div></div>`;
 }
 function renderReaderActs(){
-  const el = document.getElementById("rd-acts");
+  const el = document.getElementById("rd-foot");
   if(el) el.outerHTML = readerActsHtml();
 }
 async function readerAct(kind){

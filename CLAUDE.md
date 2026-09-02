@@ -298,6 +298,26 @@ when two runs share a project dir, and blind between spawn and first write.
   (index-entry flip only). Confirm-free; post-click state lands inline
   (`summary dispatched ✓` / `archived ✓`), and a summarize already running for
   the session disables both summarize buttons with the reason in the title.
+  A **third chip, `Σ`**, answers what the row could never say without opening
+  something: *is this session captured, and is there anything new since?* Six
+  states — `never` (dashed/dim), `captured` (green, nothing substantive since),
+  `delta` (amber — the OPEN-delta case, real new work after the watermark;
+  a capture with no resolvable watermark reads amber too, since its next pass
+  is a full re-capture), `running` (pulsing blue), `failed` (red — a
+  `summarize_attempts` backoff row or a failed console run), `unknown` (solid
+  grey — the archive could not be asked; never a false "never"). The tooltip
+  carries pass N, the watermark date, the prior kmcp ref, the post-watermark
+  record count and the grader's reason; a tap opens the same reader, whose foot
+  now states the grade in words above the Summarize buttons, as does a `Σ …`
+  chip in the chat header beside the summarizing-run chip (state vs. last run).
+  **One grader, and the poll never grades**: the state comes from
+  `summarize.summary_scope_report` → `_delta_gate` — the button's, the timer's
+  and `csd summary-scope`'s gate — run by ONE background refresher
+  (`_summary_refresher`, `CSD_SUMMARY_REFRESH_S` 120s, serial, mirrored to
+  `$CSD_STATE_DIR/console/summary.json`), while `summary_presence()` on the
+  request path is a pure `(mtime_ns, size)` memo read that opens no connection.
+  It ships as `summary` in the same `/api/sessions` field family as
+  `tldr`/`timeline`; every failure degrades to `unknown`, never an error.
 
 ### Repos overlay — the cross-REPO lens (`/api/repos`)
 

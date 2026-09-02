@@ -19,6 +19,52 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.19.0] - 2026-09-02
+
+### Added
+- **The Σ chip — summarization state at a glance.** Every sidebar row now
+  carries a third presence chip beside `T` (tl;dr) and `⧗` (timeline), and it
+  answers the one question the console could never answer without opening
+  something: *has this session been captured to kmcp, and is there anything new
+  since?* Six states, colored like their siblings — dashed/dim `never
+  summarized`, green `summarized — nothing new since <date>`, amber
+  `summarized — NEW work since <date>` (the OPEN-delta case: needs
+  re-capture), pulsing blue `summary running`, red `summarization failed`
+  (a `summarize_attempts` backoff row, or a failed console run), and a solid
+  grey `unknown` when the archive could not be asked. The tooltip carries the
+  next pass number, the watermark date, the prior kmcp entry ref, the record
+  count after the watermark and the grader's own reason. A tap opens the
+  digest reader — the popover that already carries the close-out actions.
+- The same state, **in words**, in two more places: a `Σ …` chip in the chat
+  header beside the summarizing-run chip (state vs. last run — they answer
+  different questions), and a line at the digest reader's foot directly above
+  Summarize / Sum + archive / Archive, so the reader says whether a session is
+  already captured *before* the button is pressed.
+- `summary` in the `/api/sessions` row payload (and in `/api/session`), the
+  same field family as `tldr` and `timeline`: `{state, pass, since, prior,
+  records, source, attempts, reason, checked_at, stale, pending}`.
+
+### Changed
+- **One grader, one seam.** Nothing new classifies a delta: the chip is graded
+  by `summarize.summary_scope_report()` → `_delta_gate` — the same gate the
+  launchd timer queues on, the Summarize button labels itself from and
+  `csd summary-scope` prints — so the chip, the button, the timer and the
+  `/session-summary` skill can never disagree.
+- **The nav poll never grades.** `summary_presence()` is a pure read of a
+  memo keyed on the transcript's `(mtime_ns, size)` — the same signature the
+  tldr/timeline presence chips memoize on — and never opens a connection. A
+  single background refresher (`_summary_refresher`, `CSD_SUMMARY_REFRESH_S`,
+  default 120s, serial and staggered) grades the wanted rows newest-first and
+  mirrors the memo to `$CSD_STATE_DIR/console/summary.json`, so a restarted
+  console does not show an all-grey sidebar. Same seam as tldr/timeline and
+  the repos lens: the endpoint reads, the worker writes. A settled summarize
+  pass invalidates its row so the next tick re-grades it.
+- Degrade, never block: no DSN, an unreachable archive, a raising grader, or a
+  row not yet graded all land as `unknown` with the reason in the tooltip —
+  never an error, never a slow poll. The grader's own "prior capture
+  unresolved" degrade is mapped to `unknown` rather than `never`, because
+  "never summarized" is a claim an unanswered archive cannot support.
+
 ## [3.18.0] - 2026-09-01
 
 ### Added

@@ -262,6 +262,33 @@ when two runs share a project dir, and blind between spawn and first write.
   block. The console does not quiesce (a manual close-out is deliberate) — a
   transcript written inside phase-4's idle window comes back as a `warning` the
   UI shows, because a live session is digested short, silently.
+- **Summary tab** (`GET /api/summaries`) — the rail tab that answers *has this
+  session been captured, by what, and what landed in the corpus*. Controls:
+  **Summarize** (auto scope, wearing the same pass-aware label as the header
+  button; disabled with the reason when the grade is `none`), **Full
+  re-capture** (`delta:"off"`), **Capture events**, ⟳ — with the grade stated
+  in words (watermark, source, pass, prior ref). **Runs** merges three
+  independent records of the same history: the `summary_passes` ledger (the
+  only one that sees launchd's phase-4 local-Ollama passes — marked `phase-4`),
+  the console-minted child runs on `meta.json` (durable across a restart;
+  `summary_pass` / `summary_kind` ride there), and the in-process
+  `SUMMARY_RUNS` tracker (rc + in-flight). **Entries written** groups by entity
+  type and links each `app:path` into /browse, deduped across this session's
+  transcript and every run's — extracted by the **Context tab's own** write
+  extractor so the two can never disagree about a created/updated/dry-run/error
+  verdict, and joined to the knowledge DB in **one** query so a written ref is
+  confirmed present (or flagged `not in corpus`). On-demand ONLY: it grades the
+  tail and re-parses each run's JSONL, so it re-polls only while a run is in
+  flight and never rides the nav poll. Degrade doctrine as everywhere on this
+  seam — an unreachable archive or knowledge DB costs only its own half and
+  lands in `warnings[]`, never a 500; a child key is refused 400.
+  **Capture events** is the same off-session dispatch through the same
+  envelope with the /session-summary skill's **own** `--events` override
+  appended (its thin-changelog path: changelog `event` entries only, no session
+  entry, no lessons, no tasks). Because it writes no session entry it
+  deliberately takes **no `summary_passes` claim** — a ledger row would advance
+  the pass number and imply a watermark `csd reconcile-summaries` would later
+  stamp — and it never archives.
 - **Mine angles** — `csd angles --session <sid>` on demand, so the rail is
   usable without `csd angles-watch` running.
 - **tl;dr timeline** — the first *pre-determined angle button*: a whole-session,

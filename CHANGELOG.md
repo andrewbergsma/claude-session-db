@@ -19,6 +19,15 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.19.1] - 2026-09-02
+
+### Fixed
+- **Expanding a tool row now shows its result.** The lazy `/api/tool_result`
+  fetch (3.15.1) sent `curSession` — the rendered session *payload* — as the
+  `id`, so every expand asked the server for `[object Object]` and rendered
+  *result unavailable — session not found*. It now sends `curId`, the session
+  id every other lazy endpoint already uses.
+
 ## [3.19.0] - 2026-09-02
 
 ### Added

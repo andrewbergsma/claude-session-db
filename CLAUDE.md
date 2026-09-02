@@ -397,6 +397,19 @@ guessed URL. `GET /api/repo?id=<sid>` derives the root server-side from the
 transcript; `?root=` is admitted only for a root the registry already knows —
 a repo root IS a git command's cwd, so an unvalidated one is path injection.
 
+**Commits group by PULL REQUEST, not just by branch.** The Git rail's "commits
+in session window" and the detail's commit list share one grouper
+(`commit_groups_payload`), which resolves every commit to the PR it landed as —
+a `Merge pull request #N` subject (its `M^1..M^2` side commits included), a
+`… (#N)` squash marker, gh's `mergeCommit.oid`, then PR-oid membership — in
+**pure code over data already fetched**, never an extra git call. On a
+squash-merge trunk this is the difference between one group called `main` and
+one group per PR; commits belonging to no PR trail in `no PR · direct to
+‹branch›`, and the PR cards below stop repeating what the groups already show.
+Both partitions ship in one payload (`groups` + `group_alt`), so the header's
+`by PR | by branch` toggle is a re-render, and a grouping failure still degrades
+to the flat list plus a `group_note`.
+
 **The attention band is deliberately narrow**: uncommitted *tracked* edits, an
 unpushed trunk, or a worktree whose folder is gone. Untracked files and
 months-old unmerged branches are a working repo's normal resting state — banding

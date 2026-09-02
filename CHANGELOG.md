@@ -19,6 +19,50 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.21.0] - 2026-09-02
+
+### Added
+- **Commits grouped by PR** (Git rail, and the repo detail's commit list).
+  The by-branch partition answers "part of which branch"; on a squash-merge
+  trunk that is one useless group called `main` while the PR cards underneath
+  it repeat the very same commits. Every commit now resolves to the pull
+  request it landed as — strongest evidence first: a `Merge pull request #N`
+  subject (whose side commits, `M^1..M^2`, are part of that PR too), a
+  `… (#N)` squash marker, gh's own `mergeCommit.oid`, then membership in a
+  PR's commit oids. Resolution is **pure code over data already fetched** — no
+  extra git call, no model. A number with no gh row (gh unavailable, or the PR
+  older than the fetched 30) still forms a group, headed `#N` with the
+  commit's own subject as its title and no invented state or link.
+- **Group headers** carry the number (a real hyperlink when `origin` is
+  GitHub, plain text otherwise), the PR title, a state chip in the same
+  colours the PR cards use, the checks glyph, the head branch, the merge age
+  and a commit count. Groups are newest-first; commits belonging to no PR
+  trail in a single **`no PR · direct to ‹branch›`** group, and unmerged local
+  branches keep their own groups. Collapse state is remembered in
+  localStorage, as the branch groups already were.
+- **`by PR | by branch` toggle** in the section header, remembered in
+  localStorage. The server ships **both** partitions in one payload
+  (`groups` + `group_alt`, over the same commit dicts by reference), so the
+  swap is a re-render with no fetch and no git. `group_mode` names the
+  default: by PR whenever at least one commit resolves, else the by-branch
+  view that has always shipped.
+- **The two views are one.** With PR grouping active, the *recently merged /
+  closed* PR cards that already stand as commit groups above are not repeated
+  — the list shows only PRs outside the window, or collapses to
+  `N shown above as commit groups`. Open PRs keep their cards.
+
+### Changed
+- `group_commits(commits, topo, gh, group_by="branch")` gained the mode
+  argument; the default is unchanged, byte-for-byte. Groups now carry
+  `kind: "pr" | "branch" | "direct"`, and PR groups a
+  `pr: {number, title, state, draft, checks, branch, url, merged_at, known}`.
+  `commit_groups_payload()` is the one seam both surfaces call.
+- `gh pr list` now also fetches `mergeCommit` (stripped from the wire payload;
+  it exists for attribution only).
+- Doctrine unchanged: grouping never raises. A failure yields `[]` and a
+  `group_note`, and both surfaces fall back to the flat commit list they
+  already ship — commits are never withheld because their grouping failed.
+
 ## [3.20.0] - 2026-09-02
 
 ### Changed

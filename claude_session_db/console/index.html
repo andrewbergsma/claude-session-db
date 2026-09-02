@@ -733,7 +733,20 @@
   .cchip.open { color:var(--good); border-color:var(--good); }
   .cchip.merged { color:var(--purple); border-color:var(--purple); }
   .cchip.closed { color:var(--bad); border-color:var(--bad); }
+  .cchip.draft { color:var(--muted); border-color:var(--muted); }
   a.cchip:hover { border-color:var(--accent); color:var(--accent); }
+  /* ---- by-PR headers: the number leads, the title carries the meaning ---- */
+  .cpr { flex:0 0 auto; font-weight:700; color:var(--ink); text-decoration:none; }
+  a.cpr:hover { color:var(--accent); text-decoration:underline; }
+  .ctitle { min-width:0; flex:1 1 auto; white-space:nowrap; overflow:hidden;
+            text-overflow:ellipsis; color:var(--ink2); font-weight:400; }
+  .cage { flex:0 0 auto; color:var(--muted); }
+  /* the by PR | by branch toggle, right-aligned inside a .wr-h / detail h3 */
+  .cgmode { float:right; font:9.5px var(--mono); font-weight:400;
+            text-transform:none; letter-spacing:0; color:var(--muted); }
+  .cgmode a { color:var(--muted); text-decoration:none; cursor:pointer; padding:0 3px; }
+  .cgmode a.on { color:var(--accent); font-weight:700; }
+  .cgmode a:hover { color:var(--ink); }
   /* the repo-detail table wears the same headers as table rows */
   tr.cgh { cursor:pointer; }
   tr.cgh > td { padding-top:9px; }
@@ -3839,7 +3852,11 @@ function cgrpLoad(){
   catch(e){ cgrpState = {}; }          // private mode / bad JSON: use defaults
   return cgrpState;
 }
-function cgrpId(repo, g){ return `${repo||"?"}::${g.branch}::${g.merge_hash||""}`; }
+function cgrpId(repo, g){
+  const kind = g.kind || "branch";
+  const name = (kind === "pr" && g.pr) ? `#${g.pr.number}` : g.branch;
+  return `${repo||"?"}::${kind}::${name}::${g.merge_hash||""}`;
+}
 function cgrpIsOpen(repo, g){
   const st = cgrpLoad(), id = cgrpId(repo, g);
   return (id in st) ? !!st[id] : !g.merged;
@@ -3852,12 +3869,92 @@ function cgrpRemember(id, open){
   try { localStorage.setItem(CGRP_KEY, JSON.stringify(st)); } catch(e){}
 }
 
+/* ---- which partition is on screen: by PR, or by branch --------------------
+   The server ships BOTH (`groups` + `group_alt`) and names the default in
+   `group_mode` — by PR whenever a commit in the list resolves to one, because
+   on a squash-merge trunk the by-branch view is a single group called `main`
+   while the PR cards below it repeat the very same commits. The toggle is
+   therefore a pure client swap: no fetch, no git.
+
+   The preference is remembered globally (not per repo) — it is a way of
+   reading, not a property of a repository — and it only takes effect when the
+   payload actually offers that mode. */
+const CGMODE_KEY = "csd.commitGroupMode";
+function cgmodePref(){
+  try { return localStorage.getItem(CGMODE_KEY) || null; } catch(e){ return null; }
+}
+function cgmodeSet(m){
+  try { localStorage.setItem(CGMODE_KEY, m); } catch(e){}
+}
+/* d is any payload carrying {groups, group_mode, group_alt}. */
+function cgrpView(d){
+  const alt = d.group_alt, pref = cgmodePref();
+  if(pref && alt && alt.mode === pref)
+    return {mode: pref, groups: alt.groups || [], alt: d.group_mode};
+  return {mode: d.group_mode || "branch", groups: d.groups || [],
+          alt: alt ? alt.mode : null};
+}
+const CGMODE_TIP = {
+  pr: "group commits under the pull request each one landed as — a squash merge's (#N), a `Merge pull request #N`, or gh's own mergeCommit",
+  branch: "group commits under the branch they are part of — git's first-parent line, and each merge's own side list",
+};
+/* The `by PR | by branch` switch. Rendered only when both partitions exist. */
+function cgmodeToggle(v, onclick){
+  if(!v.alt) return "";
+  const btn = (m, label) => `<a class="${v.mode===m?"on":""}" onclick="${onclick}(event,'${m}')"
+      title="${esc(CGMODE_TIP[m]||"")}">${label}</a>`;
+  return `<span class="cgmode">${btn("pr","by PR")}|${btn("branch","by branch")}</span>`;
+}
+
+/* The by-PR header: the number (a GitHub link when we have the PR's URL), the
+   PR title, a state chip in the same colours the PR cards use, the head branch,
+   the merge age and the commit count. A number read off a commit subject with
+   no `gh` row behind it (gh unavailable, or the PR older than the fetched
+   window) still gets a group — plain, with no invented state or link. */
+function cgrpHeadPR(g, web, open){
+  const p = g.pr || {}, cls = prStateCls(p.state, p.draft);
+  const num = p.url
+    ? `<a class="cpr" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+         href="${esc(p.url)}" title="${esc("open pull request #" + p.number + " on GitHub")}">#${esc(p.number)}</a>`
+    : `<span class="cpr" title="${esc(p.known === false
+        ? "the commits name PR #" + p.number + ", but gh has no row for it here — either gh is unavailable or the PR is older than the fetched window"
+        : "pull request #" + p.number)}">#${esc(p.number)}</span>`;
+  let chips = "";
+  if(p.state)
+    chips += `<span class="cchip ${cls}" title="${esc(PR_STATE_TIP[cls]||"")}">${p.draft?"draft":esc((p.state||"").toLowerCase())}</span>`;
+  chips += checksGlyph(p.checks);
+  if(p.branch){
+    chips += (web && g.remote_name)
+      ? `<a class="cchip" target="_blank" rel="noopener" onclick="event.stopPropagation()"
+           href="${esc(web)}/tree/${ghPath(g.remote_name)}"
+           title="${esc("the head branch this PR merges: " + p.branch)}">⎇ ${esc(p.branch)}</a>`
+      : `<span class="cchip" title="${esc("the head branch this PR merges: " + p.branch
+          + " — no remote carries it any more, which is normal after --delete-branch")}">⎇ ${esc(p.branch)}</span>`;
+  }
+  if(g.worktree)
+    chips += `<span class="cchip wt" title="${esc("checked out in a worktree: " + g.worktree)}">⌥</span>`;
+  const when = p.merged_at || ((g.commits||[])[0]||{}).when;
+  const age = when
+    ? `<span class="cage" title="${esc(p.merged_at ? "when this PR was merged" : "when its newest commit landed")}">${rel(when)}</span>` : "";
+  return `<span class="cx">${open ? "▾" : "▸"}</span>${num}`
+    + `<span class="ctitle" title="${esc(p.title||"")}">${esc(p.title||"")}</span>`
+    + chips + age + `<span class="cn" title="commits in this group">${g.count}</span>`;
+}
+
 /* The header's contents: branch name, merged/unmerged chip, PR chip, worktree
    glyph. The name is a GitHub link ONLY when a remote actually carries the
    branch (`remote_name`) — a merged branch is usually deleted, and a local-only
    one never existed there, so linking either produces a 404 wearing a
    hyperlink. Same rule the repo detail's branch cells follow. */
 function cgrpHead(g, web, open){
+  if((g.kind || "branch") === "pr") return cgrpHeadPR(g, web, open);
+  if(g.kind === "direct"){
+    // the trailing group of the by-PR view: what landed outside any PR
+    return `<span class="cx">${open ? "▾" : "▸"}</span>`
+      + `<span class="cb" title="${esc("these commits name no pull request — they were committed straight onto "
+          + g.branch)}">no PR · direct to ${esc(g.branch)}</span>`
+      + `<span class="cn" title="commits in this group">${g.count}</span>`;
+  }
   const nm = (web && g.remote_name)
     ? `<a class="cb" target="_blank" rel="noopener" onclick="event.stopPropagation()"
          href="${esc(web)}/tree/${ghPath(g.remote_name)}"
@@ -3881,12 +3978,24 @@ function cgrpHead(g, web, open){
   return `<span class="cx">${open ? "▾" : "▸"}</span>${nm}${chips}<span class="cn" title="commits in this group">${g.count}</span>`;
 }
 
+/* What the group claims about the commits under it — one sentence, plain. */
+function cgrpTip(g){
+  const kind = g.kind || "branch";
+  if(kind === "pr")
+    return "the commits below landed as pull request #" + ((g.pr||{}).number || "?")
+      + ((g.pr||{}).branch ? " (from " + g.pr.branch + ")" : "");
+  if(kind === "direct")
+    return "the commits below name no pull request — they were committed straight onto " + g.branch;
+  return "the commits below are part of " + g.branch
+    + (g.current ? " — the branch this checkout is on" : "");
+}
+
 /* The rail's block form: a div per group, commits nested inside it. */
 function gitGroupBlock(g, repo, web){
   const open = cgrpIsOpen(repo, g);
   return `<div class="cgrp${g.current?" cur":""}${open?"":" closed"}">
     <div class="cgrp-h" data-key="${esc(cgrpId(repo, g))}" onclick="cgrpTapRail(this)"
-      title="${esc("the commits below are part of " + g.branch + (g.current ? " — the branch this checkout is on" : ""))}">${cgrpHead(g, web, open)}</div>
+      title="${esc(cgrpTip(g))}">${cgrpHead(g, web, open)}</div>
     <div class="cgrp-c">${(g.commits||[]).map(gitCommitRow).join("")}</div></div>`;
 }
 function cgrpTapRail(el){
@@ -3970,17 +4079,27 @@ function renderGit(d){
   // filed under the branch it is part of — which git records exactly, unlike
   // the timestamp membership above it
   const w = d.session_window || {};
-  const wc = w.commits || [], wg = w.groups || [];
-  html += `<div class="wr-h" title="commits whose timestamps fall inside the transcript's timespan — that membership is best-effort; the branch each one is grouped under is not, it comes from git's own first-parent line and merge records">commits in session window · ${wc.length}${
-    wg.length > 1 ? ` · ${wg.length} branches` : ""}</div>`;
+  const wc = w.commits || [];
+  const view = cgrpView(w), wg = view.groups;
+  const nPR = wg.filter(g => (g.kind||"") === "pr").length;
+  const unit = view.mode === "pr"
+    ? (nPR === 1 ? "1 PR" : nPR + " PRs")
+    : (wg.length + " branches");
+  html += `<div class="wr-h" title="commits whose timestamps fall inside the transcript's timespan — that membership is best-effort; the PR or branch each one is grouped under is not, it comes from git's own records and gh's PR listing">${
+    cgmodeToggle(view, "gitSetGroupMode")}commits in session window · ${wc.length}${
+    (wg.length > 1 && unit) ? ` · ${unit}` : ""}</div>`;
   if(!wc.length)
     html += `<div class="rl-empty">none in this session's timespan</div>`;
   else if(wg.length)
     html += wg.map(g => gitGroupBlock(g, r.root, d.web)).join("");
   else
     html += (w.group_note
-        ? `<div class="gmore" title="every commit is still listed — only the by-branch grouping could not be derived">ungrouped — ${esc(w.group_note)}</div>`
+        ? `<div class="gmore" title="every commit is still listed — only the grouping could not be derived">ungrouped — ${esc(w.group_note)}</div>`
         : "") + wc.map(gitCommitRow).join("");
+  // PRs already standing as commit groups above must not be repeated as cards
+  // below — the whole point of the by-PR view is that the two lists are one.
+  const shownPRs = new Set(wg.filter(g => g.pr && g.pr.number != null)
+                             .map(g => g.pr.number));
 
   // PRs
   const gh = d.gh || {};
@@ -3993,8 +4112,13 @@ function renderGit(d){
   else if(!(gh.prs||[]).length)
     html += `<div class="rl-empty">no PRs</div>`;
   else{
+    // Open PRs always keep their cards (they are live work, not history);
+    // merged/closed ones already shown above as groups collapse to a count.
     const open = gh.prs.filter(p => p.state === "OPEN");
-    const done = gh.prs.filter(p => p.state !== "OPEN").slice(0, 8);
+    const closed = gh.prs.filter(p => p.state !== "OPEN");
+    const dedup = closed.filter(p => !shownPRs.has(p.number));
+    const nDedup = closed.length - dedup.length;
+    const done = dedup.slice(0, 8);
     const row = p => {
       const cls = prStateCls(p.state, p.draft);
       const when = p.state === "MERGED" && p.merged_at
@@ -4009,9 +4133,22 @@ function renderGit(d){
     html += open.length ? open.map(row).join("")
                         : `<div class="rl-empty">no open PRs</div>`;
     if(done.length)
-      html += `<div class="wr-h" title="PRs already merged into the base branch, or closed without merging — the most recent few">recently merged / closed</div>` + done.map(row).join("");
+      html += `<div class="wr-h" title="PRs already merged into the base branch, or closed without merging — the most recent few${
+        nDedup ? ", excluding the ones already listed above as commit groups" : ""}">recently merged / closed${
+        nDedup ? ` · ${done.length} outside the window` : ""}</div>` + done.map(row).join("");
+    else if(nDedup)
+      html += `<div class="wr-h" title="every recently merged or closed PR is already listed above as a commit group">recently merged / closed</div>`
+        + `<div class="gmore" style="margin-left:0" title="all ${nDedup} of them are the commit groups above">${nDedup} shown above as commit groups</div>`;
   }
   el.innerHTML = html;
+}
+
+/* The by PR | by branch switch. Client-side only: both partitions are already
+   in the payload the rail last fetched, so the swap is a re-render. */
+function gitSetGroupMode(ev, m){
+  if(ev) ev.stopPropagation();
+  cgmodeSet(m);
+  if(gitData) renderGit(gitData);
 }
 
 /* ---------- Files tab: read-only file browser -----------------------------
@@ -5648,7 +5785,15 @@ function renderRepos(){
    registry already knows, from a card. Everything GitHub can host — commits,
    branches, PRs — is a real hyperlink when origin is GitHub, and plain text
    when it is not; a guessed URL is worse than none. */
-let repoDetailRoot = null, repoFocusBranch = null;
+let repoDetailRoot = null, repoFocusBranch = null, repoDetailData = null;
+
+/* The detail's copy of the by PR | by branch switch — same client-side swap,
+   same remembered preference; the payload already carries both partitions. */
+function repoSetGroupMode(ev, m){
+  if(ev) ev.stopPropagation();
+  cgmodeSet(m);
+  if(repoDetailData) renderRepoDetail(repoDetailData);
+}
 
 async function openRepoFor(branch){
   if(!curId) return;
@@ -5671,6 +5816,7 @@ async function loadRepoDetail(url){
   try {
     const d = await (await fetch(url)).json();
     repoDetailRoot = d.root || null;
+    repoDetailData = d;
     renderRepoDetail(d);
   } catch(e){
     pane.innerHTML = `<div class="empty">repo unavailable — ${esc(String(e))}</div>`;
@@ -5682,7 +5828,7 @@ function closeRepoDetail(fromPop){
   const wasOpen = pane.classList.contains("open");
   pane.classList.remove("open");
   pane.innerHTML = "";
-  repoDetailRoot = null; repoFocusBranch = null;
+  repoDetailRoot = null; repoFocusBranch = null; repoDetailData = null;
   if(wasOpen && fromPop !== true) ovDone();
 }
 
@@ -5777,18 +5923,23 @@ function renderRepoDetail(d){
       <td style="color:var(--muted)" title="who authored the commit">${esc(c.author)}</td>
       <td style="color:var(--muted)" title="when the commit was made">${esc(repoAgo(c.when))}</td>
       </tr>`;
-  const cgroups = d.groups || [];
+  const cview = cgrpView(d);
+  const cgroups = cview.groups;
   const crows = cgroups.length
     ? cgroups.map((g, i) => {
         const open = cgrpIsOpen(d.root, g);
         return `<tr class="cgh${open?"":" closed"}" data-g="g${i}"
             data-key="${esc(cgrpId(d.root, g))}" onclick="cgrpTapTable(this)"><td colspan="6">
             <div class="cgrp-h${g.current?" cur":""}" style="cursor:inherit"
-              title="${esc("the commits below are part of " + g.branch + (g.current ? " — the branch this checkout is on" : ""))}">${cgrpHead(g, web, open)}</div>
+              title="${esc(cgrpTip(g))}">${cgrpHead(g, web, open)}</div>
             </td></tr>`
           + (g.commits || []).map(c => cRow(c, `g${i}`, open)).join("");
       }).join("")
     : (d.commits || []).map(c => cRow(c, "", true)).join("");
+  const cnPR = cgroups.filter(g => (g.kind||"") === "pr").length;
+  const cunit = cview.mode === "pr"
+    ? (cnPR === 1 ? " · 1 PR" : ` · ${cnPR} PRs`)
+    : (cgroups.length ? ` · ${cgroups.length} branches` : "");
 
   // Group headers link at the repo-level pages — /branches, /commits, /pulls —
   // which exist regardless of what is pushed, unlike a per-ref URL.
@@ -5812,10 +5963,10 @@ function renderRepoDetail(d){
     ${d.worktree_total ? grp(`<span title="extra folders checked out from this repo, each on its own branch">worktrees · ${d.worktree_total}</span>`, wrows) : ""}
     <div class="grp"><h3><span title="a pull request asks to merge one branch into another; until it is merged its commits are not on the trunk">pull requests${prs.length ? " · " + prs.length : ""}</span>${ghLink("/pulls", "all PRs")}</h3>
       ${prows ? `<table>${prows}</table>` : (prNote || '<div style="color:var(--muted)">none</div>')}</div>
-    ${grp(`<span title="every branch's recent commits, not only the one you are on — a hash with ↑ has not been pushed anywhere. Each is filed under the branch it is part of: git's first-parent line for this checkout, and each merge's own side list for the branches that landed.">commits · latest ${(d.commits||[]).length} across all branches${
-            cgroups.length ? ` · ${cgroups.length} branches` : ""}</span>${
+    ${grp(`<span title="every branch's recent commits, not only the one you are on — a hash with ↑ has not been pushed anywhere. Each is filed under the PULL REQUEST it landed as, or (by branch) under git's first-parent line and each merge's own side list.">commits · latest ${(d.commits||[]).length} across all branches${cunit}</span>${
             (!cgroups.length && d.group_note)
-              ? ` <span style="color:var(--muted)" title="every commit is still listed — only the by-branch grouping could not be derived">· ungrouped (${esc(d.group_note)})</span>` : ""}`,
+              ? ` <span style="color:var(--muted)" title="every commit is still listed — only the grouping could not be derived">· ungrouped (${esc(d.group_note)})</span>` : ""}${
+            cgmodeToggle(cview, "repoSetGroupMode")}`,
           crows, "/commits", "all commits")}
   `;
   if(repoFocusBranch){

@@ -265,3 +265,199 @@ def test_commit_dicts_are_carried_by_reference(repo):
     groups, _ = S.group_commits(rows, topo_of(repo["root"]))
     ids = {id(c) for g in groups for c in g["commits"]}
     assert ids == {id(c) for c in rows}
+
+
+# ---- by-PR grouping --------------------------------------------------------
+# The other partition: which PULL REQUEST each commit landed as. Pinned here is
+# every rule with a wrong answer readily available — a squash marker read off
+# the subject, a `Merge pull request #N` claiming its own side commits, gh's
+# mergeCommit oid resolving a commit whose subject says nothing, a PR number
+# with no gh row still forming a group, the no-PR leftovers trailing, and the
+# mode falling back to by-branch when nothing resolves at all.
+
+@pytest.fixture
+def squash_repo(tmp_path):
+    """A squash-merge trunk — the motivating case. Every landed commit IS a PR.
+
+        main ── A (no PR) ── B (#756) ── C (#757) ── D (no PR)
+    """
+    root = tmp_path / "squash"
+    root.mkdir()
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "T")
+    a = commit(root, "A", "chore: bootstrap the repo")
+    b = commit(root, "B", "feat(commercial): notice-clock state machine (#756)")
+    c = commit(root, "C", "feat: crew de-identification (#757)")
+    d = commit(root, "D", "chore: bump deps")
+    return {"root": root, "a": a, "b": b, "c": c, "d": d}
+
+
+def by_key(groups):
+    """Groups keyed the way the UI addresses them: #N for a PR, else branch."""
+    return {(f"#{g['pr']['number']}" if g.get("kind") == "pr" else g["branch"]): g
+            for g in groups}
+
+
+@pytest.mark.parametrize("subject,expect", [
+    ("feat(commercial): notice-clock state machine (#756)", (756, "squash")),
+    ("fix: trailing whitespace (#12)  ", (12, "squash")),
+    ("Merge pull request #7 from owner/feat/x", (7, "merge")),
+    ("Merge pull request #7", (7, "merge")),
+    # a number that is NOT the squash marker: mid-subject, or no number at all
+    ("revert the (#12) change and move on", (None, None)),
+    ("Merge branch 'feat/x'", (None, None)),
+    ("plain subject", (None, None)),
+    ("", (None, None)),
+    (None, (None, None)),
+])
+def test_pr_number_from_subject(subject, expect):
+    assert S._pr_number_from_subject(subject) == expect
+
+
+def test_squash_suffix_makes_one_group_per_pr(squash_repo):
+    root = squash_repo["root"]
+    groups, note = S.group_commits(flat(root), topo_of(root), None, "pr")
+    assert note is None
+    keys = by_key(groups)
+    assert set(keys) == {"#756", "#757", "main"}
+    assert keys["#756"]["count"] == 1
+    assert keys["#756"]["commits"][0]["hash"] == short(root, squash_repo["b"])
+    # the title is recovered by stripping the marker — it IS the PR title
+    assert keys["#756"]["pr"]["title"] == \
+        "feat(commercial): notice-clock state machine"
+    # no gh row behind it: a plain header, with no invented state or link
+    assert keys["#756"]["pr"]["known"] is False
+    assert keys["#756"]["pr"]["state"] is None
+    assert keys["#756"]["pr"]["url"] is None
+    assert keys["#756"]["branch"] == "#756"
+
+
+def test_commits_with_no_pr_trail_in_a_direct_group(squash_repo):
+    root = squash_repo["root"]
+    groups, _ = S.group_commits(flat(root), topo_of(root), None, "pr")
+    last = groups[-1]
+    assert last["kind"] == "direct"          # trailing, even though D is newest
+    assert last["branch"] == "main"
+    assert {c["hash"] for c in last["commits"]} == {short(root, squash_repo["a"]),
+                                                   short(root, squash_repo["d"])}
+    # …and the PR groups above it are newest-first
+    assert [g["pr"]["number"] for g in groups[:-1]] == [757, 756]
+
+
+def test_gh_row_supplies_the_title_state_and_link(squash_repo):
+    root = squash_repo["root"]
+    gh = {"prs": [{"number": 756, "title": "Notice clock", "state": "MERGED",
+                   "draft": False, "checks": "pass", "branch": "feat/clock",
+                   "url": "https://x/pull/756", "merged_at": "2026-08-30T10:00:00Z",
+                   "oids": [], "merge_oid": None}]}
+    g = by_key(S.group_commits(flat(root), topo_of(root), gh, "pr")[0])["#756"]
+    assert g["pr"] == {"number": 756, "title": "Notice clock", "state": "MERGED",
+                       "draft": False, "checks": "pass", "branch": "feat/clock",
+                       "url": "https://x/pull/756",
+                       "merged_at": "2026-08-30T10:00:00Z", "known": True}
+    assert g["branch"] == "feat/clock"
+    assert g["merged"] is True                # landed work folds by default
+
+
+def test_merge_commit_and_its_side_commits_are_one_pr_group(repo):
+    """`Merge pull request #7` claims the merge AND everything it carried."""
+    root = repo["root"]
+    groups, _ = S.group_commits(flat(root), topo_of(root), None, "pr")
+    keys = by_key(groups)
+    assert {c["hash"] for c in keys["#7"]["commits"]} == {short(root, repo["m2"]),
+                                                         short(root, repo["p1"])}
+    # the OTHER merge named no PR, so its side branch keeps its branch group
+    assert keys["feat/gone"]["kind"] == "branch"
+    assert keys["feat/gone"]["merged"] is True
+
+
+def test_merge_commit_oid_resolves_a_commit_with_no_subject_marker(squash_repo):
+    """gh's own record of where a PR landed, for a subject that says nothing."""
+    root = squash_repo["root"]
+    gh = {"prs": [{"number": 900, "title": "Bump deps", "state": "MERGED",
+                   "branch": "chore/deps", "url": "https://x/pull/900",
+                   "merged_at": None, "checks": None, "draft": False,
+                   "oids": [], "merge_oid": squash_repo["d"]}]}
+    keys = by_key(S.group_commits(flat(root), topo_of(root), gh, "pr")[0])
+    assert {c["hash"] for c in keys["#900"]["commits"]} == \
+        {short(root, squash_repo["d"])}
+    # A alone is left with no PR
+    assert {c["hash"] for c in keys["main"]["commits"]} == \
+        {short(root, squash_repo["a"])}
+
+
+def test_open_pr_heads_its_unmerged_branch_with_ahead_behind(repo):
+    root = repo["root"]
+    gh = {"prs": [{"number": 42, "title": "Live work", "state": "OPEN",
+                   "draft": False, "checks": "pending", "branch": "feat/live",
+                   "url": "https://x/pull/42", "merged_at": None,
+                   "oids": [repo["l1"], repo["l2"]], "merge_oid": None}]}
+    g = by_key(S.group_commits(flat(root), topo_of(root), gh, "pr")[0])["#42"]
+    assert g["kind"] == "pr"
+    assert g["merged"] is False               # open work opens by default
+    assert g["ahead"] in (2, None)            # None only on a git without the atom
+    assert {c["hash"] for c in g["commits"]} == {short(root, repo["l1"]),
+                                                short(root, repo["l2"])}
+
+
+def test_pr_mode_loses_and_duplicates_nothing(repo):
+    rows = flat(repo["root"])
+    groups, _ = S.group_commits(rows, topo_of(repo["root"]), None, "pr")
+    seen = [c["hash"] for g in groups for c in g["commits"]]
+    assert sorted(seen) == sorted(c["hash"] for c in rows)
+    assert len(seen) == len(set(seen))
+    assert all(g["count"] == len(g["commits"]) for g in groups)
+    assert {id(c) for g in groups for c in g["commits"]} == {id(c) for c in rows}
+
+
+def test_branch_mode_is_untouched_by_the_new_default(repo):
+    """The default argument still means by-branch, exactly as before."""
+    root = repo["root"]
+    a, _ = S.group_commits(flat(root), topo_of(root))
+    b, _ = S.group_commits(flat(root), topo_of(root), None, "branch")
+    assert [g["branch"] for g in a] == [g["branch"] for g in b]
+    assert a[0]["current"] is True
+    assert all(g["kind"] == "branch" for g in a)
+
+
+# ---- mode selection --------------------------------------------------------
+
+def test_payload_defaults_to_pr_when_anything_resolves(squash_repo):
+    root = squash_repo["root"]
+    p = S.commit_groups_payload(flat(root), topo_of(root))
+    assert p["group_mode"] == "pr"
+    assert p["group_alt"]["mode"] == "branch"
+    assert any(g.get("kind") == "pr" for g in p["groups"])
+    # the alternative is the branch partition, over the very same commit dicts
+    assert [g["branch"] for g in p["group_alt"]["groups"]] == ["main"]
+    ids = {id(c) for g in p["groups"] for c in g["commits"]}
+    assert ids == {id(c) for g in p["group_alt"]["groups"] for c in g["commits"]}
+
+
+def test_payload_falls_back_to_branch_with_no_prs_and_offers_no_toggle(tmp_path):
+    root = tmp_path / "nopr"
+    root.mkdir()
+    git(root, "init", "-b", "main")
+    git(root, "config", "user.email", "t@example.com")
+    git(root, "config", "user.name", "T")
+    commit(root, "A", "chore: one")
+    commit(root, "B", "chore: two")
+    p = S.commit_groups_payload(flat(root), topo_of(root))
+    assert p["group_mode"] == "branch"
+    assert p["group_alt"] is None             # nothing to toggle to
+    assert [g["branch"] for g in p["groups"]] == ["main"]
+    assert p["group_note"] is None
+
+
+def test_pr_grouping_never_raises_and_degrades_to_a_note():
+    groups, note = S.group_commits([{"hash": "abc1234", "when": None}],
+                                   {"line": None, "merges": 7}, None, "pr")
+    assert groups == []
+    assert note and note.startswith("grouping failed:")
+    # …and the payload wrapper degrades with it rather than propagating
+    p = S.commit_groups_payload([{"hash": "abc1234", "when": None}],
+                                {"line": None, "merges": 7})
+    assert p["groups"] == [] and p["group_mode"] == "branch"
+    assert p["group_alt"] is None
+    assert p["group_note"].startswith("grouping failed:")

@@ -3877,7 +3877,7 @@ def _gh_prs(root: str, refresh: bool) -> dict:
                 p = subprocess.run(
                     [gh, "pr", "list", "--state", "all", "--json",
                      "number,title,state,isDraft,headRefName,url,mergedAt,"
-                     "statusCheckRollup,commits",
+                     "statusCheckRollup,commits,mergeCommit",
                      "--limit", "30"],
                     cwd=root, capture_output=True, text=True,
                     timeout=GH_TIMEOUT_S)
@@ -3893,6 +3893,13 @@ def _gh_prs(root: str, refresh: bool) -> dict:
                              "checks": _checks_rollup(r.get("statusCheckRollup")),
                              "oids": [c.get("oid") for c in (r.get("commits") or [])
                                       if isinstance(c, dict) and c.get("oid")],
+                             # the commit the PR landed AS on the base branch —
+                             # for a squash merge it is the only trace of the
+                             # PR in the trunk's history, and its oid is not in
+                             # `oids` (those are the branch's own commits).
+                             "merge_oid": (r.get("mergeCommit") or {}).get("oid")
+                                          if isinstance(r.get("mergeCommit"), dict)
+                                          else None,
                              "subs": [c.get("messageHeadline") or ""
                                       for c in (r.get("commits") or [])
                                       if isinstance(c, dict)],
@@ -4139,18 +4146,23 @@ def _remote_name_for(topo: dict, branch: str | None):
     return None
 
 
-def group_commits(commits, topo: dict, gh: dict | None = None):
-    """(groups, note) — a flat commit list partitioned by its owning branch.
+def group_commits(commits, topo: dict, gh: dict | None = None,
+                  group_by: str = "branch"):
+    """(groups, note) — a flat commit list partitioned by branch or by PR.
 
     Pure set arithmetic over a cached topology: no git, no exceptions. Each
     commit dict is carried BY REFERENCE, so whatever the caller already stamped
     on it (pr, pushed, refs, is_merge) rides along untouched and the flat list
     and the groups can never disagree about a commit.
 
-    Groups come back in date order of their newest commit, the current branch's
-    own line always first.
+    `group_by="branch"` (the default, and the original behaviour) comes back in
+    date order of each group's newest commit, the current branch's own line
+    always first. `group_by="pr"` re-partitions the same commits under the PULL
+    REQUEST each one landed as — see `_group_commits_pr`.
     """
     try:
+        if group_by == "pr":
+            return _group_commits_pr(commits, topo, gh)
         return _group_commits(commits, topo, gh)
     except Exception as exc:                      # never break the rail
         return [], f"grouping failed: {type(exc).__name__}: {exc}"[:200]
@@ -4200,6 +4212,7 @@ def _group_commits(commits, topo, gh):
         name = ((pr.get("branch") if pr else None) or m.get("name")
                 or "(merged branch)")
         claim(m.get("side") or [], f"merge:{m['hash']}", {
+            "kind": "branch",
             "branch": name, "merged": True, "merge_hash": m["hash"],
             "pr": _pr_ref(pr) if pr else None,
             "worktree": (topo.get("worktrees") or {}).get(name),
@@ -4208,6 +4221,7 @@ def _group_commits(commits, topo, gh):
 
     for b in topo.get("branches") or ():
         claim(b.get("hashes") or [], f"branch:{b['name']}", {
+            "kind": "branch",
             "branch": b["name"], "merged": False, "merge_hash": None,
             "pr": None,
             "worktree": (topo.get("worktrees") or {}).get(b["name"]),
@@ -4218,6 +4232,7 @@ def _group_commits(commits, topo, gh):
 
     head_key = "\x00head"
     meta[head_key] = {
+        "kind": "branch",
         "branch": head_name, "merged": False, "merge_hash": None, "pr": None,
         "worktree": (topo.get("worktrees") or {}).get(head_name),
         "remote_name": _remote_name_for(topo, head_name),
@@ -4237,6 +4252,209 @@ def _group_commits(commits, topo, gh):
     for g in groups:
         g.pop("_newest")
     return groups, topo.get("note")
+
+
+# ---- commit grouping: which PULL REQUEST each commit landed as -------------
+# The by-branch partition above answers "part of which branch". On a squash-
+# merge repo that is one useless group called `main`, while the PR cards under
+# it repeat the very same eight commits. This is the other partition — one
+# group per PR — so the two views become one.
+#
+# Resolution is pure code over data ALREADY fetched: no extra git call, no
+# model. Strongest evidence first, per commit:
+#
+#   1. `Merge pull request #N from …` — the merge commit that landed PR N.
+#   2. `… (#N)` subject suffix — the squash-merge marker GitHub writes. On a
+#      squash repo it is the ONLY trace a PR leaves in the trunk's history.
+#   3. `mergeCommit.oid` from `gh pr list` — the commit a PR landed AS, matched
+#      by prefix (snapshot hashes are abbreviated %h). This resolves a squash
+#      commit whose subject carries no marker at all.
+#   4. membership in a PR's own commit oids — an open PR's branch commits.
+#   5. inheritance — a side commit of a merge that resolved to N is part of N
+#      too (`rev-list M^1..M^2`, which the topology already computed).
+#
+# A number with no gh row (gh unavailable, or the PR older than the fetched
+# window) STILL forms a group: headed `#N`, titled from the commit's own
+# subject, with no state chip because we genuinely do not know one. Everything
+# unresolved falls back to the BRANCH partition — an unmerged local branch
+# keeps its own group, and the head line's leftovers become the trailing
+# "no PR · direct to <branch>" group.
+
+_SQUASH_PR_RE = re.compile(r"\(#(\d+)\)\s*$")
+_MERGE_PR_NUM_RE = re.compile(r"^Merge pull request #(\d+)\b")
+
+
+def _pr_number_from_subject(subject):
+    """(number, how) — the PR a commit subject names; `how` is merge|squash."""
+    s = (subject or "").strip()
+    m = _MERGE_PR_NUM_RE.match(s)
+    if m:
+        return int(m.group(1)), "merge"
+    m = _SQUASH_PR_RE.search(s)
+    if m:
+        return int(m.group(1)), "squash"
+    return None, None
+
+
+def _pr_title_from_subject(subject, how):
+    """The PR title a subject implies, for when gh has no row to ask.
+
+    A squash commit's subject IS the PR title with `(#N)` appended, so stripping
+    the marker recovers it exactly. A merge subject is used verbatim.
+    """
+    s = (subject or "").strip()
+    if how == "squash":
+        return _SQUASH_PR_RE.sub("", s).strip() or s
+    return s
+
+
+def _resolve_commit_prs(rows, topo, gh):
+    """(hash -> PR number, PR number -> subject-derived title). Rules 1-5."""
+    prs = [p for p in ((gh or {}).get("prs") or []) if p.get("number") is not None]
+    num_of: dict[str, int] = {}
+    title_of: dict[int, str] = {}
+    merge_num: dict[str, int] = {}      # merge commit short hash -> PR number
+
+    for c in rows:                                      # rules 1 + 2
+        h, subj = c.get("hash") or "", c.get("subject") or ""
+        n, how = _pr_number_from_subject(subj)
+        if n is None:
+            continue
+        num_of[h] = n
+        title_of.setdefault(n, _pr_title_from_subject(subj, how))
+        if how == "merge":
+            merge_num[h] = n
+
+    for p in prs:                                       # rules 3 + 4
+        n, oid = p["number"], p.get("merge_oid")
+        for c in rows:
+            h = c.get("hash") or ""
+            if not h or h in num_of:
+                continue
+            if (oid and oid.startswith(h)) or any(
+                    o.startswith(h) for o in (p.get("oids") or ())):
+                num_of[h] = n
+
+    by_hash = {c["hash"]: c for c in rows if c.get("hash")}
+    lens = sorted({len(h) for h in by_hash})
+    for m in topo.get("merges") or ():                  # rule 5
+        n = merge_num.get(m.get("hash")) or num_of.get(m.get("hash"))
+        if n is None:
+            # the merge's text named no PR: fall back to the PR whose oids
+            # cover the side list — the same headRefName rule the branch
+            # partition uses to name a group.
+            side = set(m.get("side") or ())
+            p = next((p for p in prs
+                      if any(o in side for o in (p.get("oids") or ()))), None)
+            n = p["number"] if p else None
+        if n is None:
+            continue
+        for f in (m.get("side") or ()):
+            h = next((f[:k] for k in lens if f[:k] in by_hash), None)
+            if h is not None and h not in num_of:
+                num_of[h] = n
+    return num_of, title_of
+
+
+def _group_commits_pr(commits, topo, gh):
+    rows = [c for c in (commits or []) if c.get("hash")]
+    if not rows:
+        return [], topo.get("note")
+
+    # The branch partition is the FALLBACK for everything no PR claims, so it
+    # is derived first and consulted per commit. Same dicts, by reference.
+    branch_groups, note = _group_commits(rows, topo, gh)
+    owner = {c["hash"]: g for g in branch_groups for c in g["commits"]}
+
+    num_of, title_of = _resolve_commit_prs(rows, topo, gh)
+    by_num = {p["number"]: p for p in ((gh or {}).get("prs") or [])
+              if p.get("number") is not None}
+    branches = {b["name"]: b for b in (topo.get("branches") or ())}
+    head_name = topo.get("head_branch") or topo.get("trunk") or "HEAD"
+
+    def pr_meta(n):
+        p = by_num.get(n)
+        name = (p or {}).get("branch")
+        b = branches.get(name) if name else None
+        state = (p or {}).get("state")
+        return {
+            "kind": "pr",
+            "pr": {"number": n,
+                   "title": (p or {}).get("title") or title_of.get(n),
+                   "state": state,
+                   "draft": (p or {}).get("draft"),
+                   "checks": (p or {}).get("checks"),
+                   "branch": name,
+                   "url": (p or {}).get("url"),
+                   "merged_at": (p or {}).get("merged_at"),
+                   # False = a number we read off a commit, with no gh row
+                   # behind it; the header stays plain rather than inventing
+                   # a state or a link.
+                   "known": p is not None},
+            "branch": name or f"#{n}",
+            # an OPEN PR is live work and opens by default; anything landed
+            # (or unknowable) folds, exactly as a merged branch group does.
+            "merged": state != "OPEN",
+            "merge_hash": None,
+            "worktree": (topo.get("worktrees") or {}).get(name),
+            "remote_name": _remote_name_for(topo, name),
+            "ahead": (b or {}).get("ahead"), "behind": (b or {}).get("behind"),
+            "current": False,
+        }
+
+    direct_key = "\x00direct"
+    buckets: dict[str, list] = {}
+    meta: dict[str, dict] = {}
+    for c in rows:
+        n = num_of.get(c["hash"])
+        if n is not None:
+            key = f"pr:{n}"
+            meta.setdefault(key, pr_meta(n))
+        else:
+            g = owner.get(c["hash"])
+            if g is None or g.get("current"):
+                key = direct_key
+                meta.setdefault(key, {
+                    **{k: v for k, v in (g or {}).items()
+                       if k not in ("commits", "count")},
+                    "kind": "direct", "pr": None, "current": True,
+                    "branch": (g or {}).get("branch") or head_name})
+            else:
+                key = f"branch:{g['branch']}:{g.get('merge_hash') or ''}"
+                meta.setdefault(key, {k: v for k, v in g.items()
+                                      if k not in ("commits", "count")})
+        buckets.setdefault(key, []).append(c)
+
+    groups = []
+    for key, items in buckets.items():
+        groups.append({**meta[key], "count": len(items), "commits": items,
+                       "_newest": _iso_epoch(items[0].get("when")) or 0})
+    # newest first — and the leftovers that belong to no PR always trail.
+    groups.sort(key=lambda g: (g["kind"] == "direct", -g["_newest"]))
+    for g in groups:
+        g.pop("_newest")
+    return groups, note
+
+
+def commit_groups_payload(commits, topo: dict, gh: dict | None = None) -> dict:
+    """Both partitions of one commit list, plus which one to open on.
+
+    `{groups, group_note, group_mode, group_alt}`. `groups` is the default
+    view: BY PR whenever at least one commit resolves to a PR (the whole point
+    — a squash-merge trunk's by-branch view is one group called `main`), else
+    the by-branch partition that has always shipped. `group_alt` carries the
+    other partition so the header's toggle costs no fetch, and is None when
+    there is nothing to toggle to. Both hold the SAME commit dicts by
+    reference, and neither can raise — a failure yields [] and a note, and the
+    caller falls back to the flat list it already ships.
+    """
+    branch_groups, note = group_commits(commits, topo, gh, "branch")
+    pr_groups, pr_note = group_commits(commits, topo, gh, "pr")
+    if any(g.get("kind") == "pr" for g in pr_groups):
+        return {"groups": pr_groups, "group_note": pr_note, "group_mode": "pr",
+                "group_alt": {"mode": "branch", "groups": branch_groups}}
+    return {"groups": branch_groups, "group_note": note,
+            "group_mode": "branch", "group_alt": None}
 
 
 def git_payload(sid: str, refresh: bool = False):
@@ -4280,14 +4498,14 @@ def git_payload(sid: str, refresh: bool = False):
             _attribute_commits_to_prs(snap, gh)
         # Group AFTER attribution: the group carries the very same commit dicts
         # the flat list does, so the `pr` stamp rides along by reference.
-        window["groups"], window["group_note"] = group_commits(
-            window["commits"], _cached_topology(root, refresh), gh)
+        window.update(commit_groups_payload(
+            window["commits"], _cached_topology(root, refresh), gh))
         snap["web"] = _web_url_cached(root)
         # ship the listing without the oid payload; flag the session branch's PR
         branch = snap["repo"].get("branch")
         out = dict(gh)
         out["prs"] = [
-            {**{k: v for k, v in p.items() if k not in ("oids", "subs")},
+            {**{k: v for k, v in p.items() if k not in ("oids", "subs", "merge_oid")},
              "session_branch": bool(branch) and p.get("branch") == branch}
             for p in (gh.get("prs") or [])]
         snap["gh"] = out
@@ -4695,12 +4913,12 @@ def repo_detail(root: str) -> dict:
     # grouping earns its keep. Same commit dicts, so `commits` and `groups`
     # can never drift; the flat list stays for a caller that wants it and for
     # the UI's fallback when `group_note` says the topology was unreadable.
-    base["groups"], base["group_note"] = group_commits(
-        commits, _cached_topology(root, refresh=False), gh)
+    base.update(commit_groups_payload(
+        commits, _cached_topology(root, refresh=False), gh))
     # The oid payload is for commit->PR attribution, not for the wire.
     if base["gh"].get("prs"):
         base["gh"] = dict(base["gh"], prs=[
-            {k: v for k, v in p.items() if k not in ("oids", "subs")}
+            {k: v for k, v in p.items() if k not in ("oids", "subs", "merge_oid")}
             for p in base["gh"]["prs"]])
     return base
 

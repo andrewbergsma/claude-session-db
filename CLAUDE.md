@@ -625,6 +625,45 @@ stale heartbeat; clear the stuck process and the next tick's guard reclaims the
 lock. See lessons `claudecode:lesson/csd-sweep-idle-in-transaction-lock-convoy`
 and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 
+## Schema (`DATA_MODEL.md` is the reference)
+
+**Read [`DATA_MODEL.md`](DATA_MODEL.md) before touching the schema.** It is the
+authority for every table, column, view, payload shape and migration — this file
+does not duplicate it. `SCHEMA_VERSION` lives in `postgres.py`; the current
+version is **9** (Claude Code v2.1.161-258 impact release, 3.23.0), recorded in
+the `metadata` table and re-applied idempotently by `initialize()`.
+
+**The never-drop convention.** Claude Code adds session-scoped record types
+without warning; eleven arrived between v2.1.161 and v2.1.258 and were parsed
+into `records["unknown"]` and dropped, because nothing read that list. Since v9
+there are exactly two legitimate destinations for a new record type:
+
+1. give it a **modelled route** — a dedicated table, or a mapped column on
+   `sessions` / `messages` — and mark it `is_modelled = true`; or
+2. let it land in **`session_records`**, the catch-all, stored **verbatim** with
+   `is_modelled = false`.
+
+There is no third option. Dropping a record — or a content block, or a field —
+is a defect, not a design choice.
+
+**The UNMODELLED tripwire** is what makes option 2 visible instead of silent.
+`SyncStats.unknown_types` carries the census; it prints on the sync summary and
+the one-line sweep form, rides the sweep heartbeat so the DB-free
+`csd sweep-health` can report it as a `notice:`, and `csd stats` prints the
+whole-archive census from `session_records` itself. It is a **signal, never a
+failure**: an unmodelled type must not set `ok=false` or change an exit code.
+When you promote a type to a modelled route, keep the `session_records` row —
+nothing is ever deleted.
+
+**Migrations are additive, idempotent and guarded.** No column is dropped or
+retyped, no row deleted (`messages.forked_from` is retained as legacy). Column
+additions sit behind an `information_schema` guard keyed on the first new column
+so the ACCESS EXCLUSIVE `ALTER` fires once, not on every 5-minute sweep tick.
+Data backfills go through `postgres.BACKFILLS` / `run_backfills`: bounded (20s
+per `initialize()`), resumable from a cursor in `metadata`, `IS DISTINCT FROM`-
+guarded, and failure-isolated. A single long `UPDATE` is the exact
+`idle in transaction` shape that once convoyed this database for ~9h.
+
 ## Architecture
 
 - `jsonl_records.py` — JSONL record parsing (dataclasses, stdlib-only). Every
@@ -643,7 +682,7 @@ and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 ## Key invariants
 
 - **No truncation.** Content blocks and tool results are stored verbatim; the
-  largest results are pulled from `tool-results/*.txt` overflow files. `tldr` is
+  largest results are pulled from `tool-results/*.txt` **and `*.json`** overflow files. `tldr` is
   a nullable derived sibling, never a replacement.
 - **Full usage** is captured per assistant message (input + output + cache_read +
   cache_creation + ephemeral), plus the raw `usage` JSONB — the token-economics

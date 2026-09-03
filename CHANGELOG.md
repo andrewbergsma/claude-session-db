@@ -19,7 +19,7 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
-## [3.24.0] - Unreleased
+## [3.24.0] - 2026-09-02
 
 The **code-defect batch** — schema **v10**. An adversarial review of the live
 archive on 2026-09-02 found eight defects: duplicated child rows, a predicate
@@ -136,6 +136,19 @@ rewritten outside a documented resumable backfill. Full schema reference:
   3.23.0 entry above is corrected to match.
 - **The `fallback` content block is dated to v2.1.215**, its first observation
   in the corpus, not v2.1.247 (the release csd happened to notice it in).
+
+### Migration note
+- v10 is applied by `initialize()` like every other version: guarded
+  `ALTER … IF NOT EXISTS`-shaped DDL, then the resumable `BACKFILLS`. Nothing
+  is dropped, truncated or deleted; the only permitted deletes remain the
+  per-file `clear_file_data` path.
+- **Running v10 DDL against a database a v9 process still sweeps**: park
+  `metadata.views_version` at `9` until the v10 code is merged. v9's
+  `CREATE OR REPLACE VIEW v_token_cost_daily` cannot drop the three columns
+  v10 adds ("cannot drop columns from view"), so a v9 `initialize()` that
+  decides to re-run its view DDL will raise and fail the sweep. With
+  `views_version = 9` the v9 sweep skips view DDL entirely, and the merged v10
+  code recreates the views on its next run (9 ≠ 10).
 
 ## [3.23.0] - 2026-09-02
 

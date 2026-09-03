@@ -598,12 +598,25 @@ class UserMessage:
 
     @property
     def is_direct_prompt(self) -> bool:
-        """True if this is a direct user prompt (not a tool result)."""
+        """True if `message.content` is a bare STRING.
+
+        NOTE: this is NOT "is a user prompt". A prompt carrying an image, a
+        document, or any other block is a LIST and answers False here. Use
+        `is_tool_result` to classify — see the note there.
+        """
         return isinstance(self.content, str)
 
     @property
     def is_tool_result(self) -> bool:
-        """True if this contains tool results."""
+        """True iff the content actually contains a `tool_result` block.
+
+        This is THE classifier for user-record type, and the negation of
+        `is_direct_prompt` is not a substitute for it. A user record is one of
+        exactly two things — an answer to a tool call, or a prompt — and the
+        only positive evidence for the first is a tool_result block. Content
+        shape is not evidence: list content is equally the shape of an
+        image/document/multi-block prompt.
+        """
         if not isinstance(self.content, list):
             return False
         return any(
@@ -612,14 +625,25 @@ class UserMessage:
 
     @property
     def prompt_text(self) -> Optional[str]:
-        """Extract the prompt text if this is a direct prompt."""
+        """The user's text, whether the content is a string or a list.
+
+        A user message is NOT string-only. Pasting an image, attaching a
+        document, or any of the richer prompt shapes Claude Code has added
+        makes `message.content` a LIST — `[{"type":"image",...},
+        {"type":"text","text":"…"}]` — and that list is still a prompt.
+
+        This used to return only the FIRST text block, which silently truncated
+        a multi-block prompt to its first paragraph. Every text block is joined
+        now, in order.
+        """
         if isinstance(self.content, str):
             return self.content
-        # Check for text blocks in array content
-        for item in self.content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                return item.get("text")
-        return None
+        if not isinstance(self.content, list):
+            return None
+        texts = [item.get("text") for item in self.content
+                 if isinstance(item, dict) and item.get("type") == "text"
+                 and item.get("text")]
+        return "\n".join(texts) if texts else None
 
     @property
     def tool_result_ids(self) -> list[str]:

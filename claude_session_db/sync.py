@@ -453,7 +453,15 @@ class SessionSync:
             "parent_uuid": msg.parent_uuid,
             "ts": msg.timestamp,
             "role": "user",
-            "message_type": "prompt" if msg.is_direct_prompt else "tool_result",
+            # Classify on POSITIVE evidence, not on content shape. The old
+            # `"prompt" if msg.is_direct_prompt else "tool_result"` typed every
+            # list-content user record as a tool_result, and `is_direct_prompt`
+            # is True only for a bare string — so an image paste, a document
+            # attachment, or any multi-block prompt was filed as a tool result.
+            # Those rows then vanished from `user_prompt_count`, from
+            # `first_prompt`, from the reconcile gate's empty/trivial
+            # heuristics, and from every "what did the user ask" query.
+            "message_type": "tool_result" if msg.is_tool_result else "prompt",
             "prompt_text": msg.prompt_text,
             "prompt_id": msg.prompt_id,
             "permission_mode": msg.permission_mode,

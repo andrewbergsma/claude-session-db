@@ -825,6 +825,51 @@ BACKFILLS = [
                    (SELECT count(*) FROM upd)      AS updated
         """,
     },
+    {
+        # See jsonl_records.UserMessage.is_tool_result / sync._user_row.
+        # `message_type` was `"prompt" if is_direct_prompt else "tool_result"`,
+        # and `is_direct_prompt` is True only for STRING content — so every user
+        # prompt carrying an image, a document, or any list-shaped content was
+        # filed as a tool_result. This corrects exactly those rows: role=user,
+        # typed tool_result, but with NO tool_result block anywhere in the raw
+        # content. Guarded twice over (`raw` must actually lack the block), so
+        # it can never relabel a genuine tool result.
+        "key": "v9_relabel_list_content_prompts",
+        "desc": "messages.message_type: list-content user prompts mislabelled "
+                "as tool_result",
+        "sql": """
+            WITH batch AS (
+                SELECT uuid, raw, prompt_text FROM messages
+                WHERE uuid > %(after)s ORDER BY uuid LIMIT %(limit)s
+            ), cand AS (
+                SELECT b.uuid,
+                       -- text blocks out of list content, joined in order
+                       (SELECT string_agg(blk->>'text', E'\\n'
+                                          ORDER BY ord)
+                        FROM jsonb_array_elements(b.raw->'message'->'content')
+                             WITH ORDINALITY AS t(blk, ord)
+                        WHERE jsonb_typeof(b.raw->'message'->'content') = 'array'
+                          AND blk->>'type' = 'text') AS txt
+                FROM batch b
+                WHERE jsonb_typeof(b.raw->'message'->'content') = 'array'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM jsonb_array_elements(b.raw->'message'->'content') e
+                      WHERE e->>'type' = 'tool_result')
+            ), upd AS (
+                UPDATE messages m
+                SET message_type = 'prompt',
+                    prompt_text  = coalesce(m.prompt_text, c.txt)
+                FROM cand c
+                WHERE m.uuid = c.uuid
+                  AND m.role = 'user'
+                  AND m.message_type = 'tool_result'
+                RETURNING 1
+            )
+            SELECT (SELECT max(uuid) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)  AS scanned,
+                   (SELECT count(*) FROM upd)    AS updated
+        """,
+    },
 ]
 
 

@@ -226,7 +226,10 @@ class SessionSync:
         self.verbose = verbose
         self.parser = JSONLParser(self.claude_dir)
         self.archive = SessionArchive(self.dsn)
-        self._project_cache: dict[str, int] = {}
+        # encoded_path -> (project_id, decoded_from) — the provenance is
+        # cached too, so a later file with a real cwd hint can still UPGRADE
+        # a path this run first resolved by guessing (schema v10).
+        self._project_cache: dict[str, tuple[int, str]] = {}
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -306,14 +309,26 @@ class SessionSync:
         naive decode fails on every dot-directory and every worktree project,
         and nothing said so.
         """
-        if project_encoded not in self._project_cache:
-            decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
-            if stats is not None and not project_path_is_decodable(project_encoded, decoded):
-                stats.note_undecodable_project(project_encoded)
-            self._project_cache[project_encoded] = self.archive.get_or_create_project(
-                project_encoded, decoded
-            )
-        return self._project_cache[project_encoded]
+        cached = self._project_cache.get(project_encoded)
+        # `decoded_from` is the provenance of the path (schema v10): 'cwd' when
+        # the transcript's own cwd re-encodes to this directory name (ground
+        # truth), else 'encoded' (the naive guess). It is what lets the upsert
+        # UPGRADE a stored guess and never downgrade ground truth.
+        decoded_from = ("cwd" if cwd_hint
+                        and encode_project_path(cwd_hint) == project_encoded
+                        else "encoded")
+        # Re-resolve when this file can do better than the cached resolution:
+        # the run's FIRST file for a project may have had no usable cwd hint,
+        # and caching that guess would suppress the upgrade for the whole run.
+        if cached is not None and (cached[1] == "cwd" or decoded_from == "encoded"):
+            return cached[0]
+        decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
+        if stats is not None and not project_path_is_decodable(project_encoded, decoded):
+            stats.note_undecodable_project(project_encoded)
+        pid = self.archive.get_or_create_project(
+            project_encoded, decoded, decoded_from=decoded_from)
+        self._project_cache[project_encoded] = (pid, decoded_from)
+        return pid
 
     def _sync_file(self, path: Path, is_subagent: bool, stats: SyncStats, force: bool) -> bool:
         source_file = str(path)

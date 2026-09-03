@@ -70,6 +70,15 @@ rewritten outside a documented resumable backfill. Full schema reference:
   seen" meaning. The second payload shape (`enteredExisting: true`, with no
   `originalBranch`/`originalHeadCommit`) is accepted as a binding like any
   other. Both columns are exposed on `v_session_overview`.
+- **`projects.decoded_path` no longer freezes at the first insert.**
+  `get_or_create_project`'s conflict path updated only `last_seen_at`, so a
+  project first seen without a usable `cwd` hint kept the naive (and for every
+  dot-directory and worktree project, wrong) decode forever. A new nullable
+  **`projects.decoded_from`** ('cwd' | 'encoded' | NULL = pre-v10) records the
+  provenance; a `cwd`-derived path now upgrades a stored guess, and a guess
+  never overwrites anything — the upgrade is strictly one-way. The per-run
+  project cache remembers the provenance too, so a later file with a real hint
+  can upgrade within the same sync. `encoded_path` remains the unique key.
 - **`sessions.tool_use_count` / `error_count` count identities, not rows.**
   `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
   `block_id` fallback so an id-less block is not silently dropped by

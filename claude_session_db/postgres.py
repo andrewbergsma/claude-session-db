@@ -107,6 +107,36 @@ CREATE TABLE IF NOT EXISTS projects (
 );
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(project_name);
 
+-- Migration (idempotent, guarded): schema v10 `projects.decoded_from`.
+--
+-- `decoded_path` / `project_name` froze at whatever the FIRST insert guessed:
+-- the conflict path updated only `last_seen_at`, so a project first seen
+-- without a usable `cwd` hint kept the naive decode forever, even after a later
+-- transcript supplied ground truth. The encoding maps both `/` and `.` to `-`
+-- and is not invertible, so that guess is wrong for every dot-directory and
+-- every worktree project.
+--
+-- `decoded_from` records HOW the stored path was obtained, which is what makes
+-- a safe upgrade possible:
+--
+--   'cwd'      the transcript's own cwd re-encodes to this directory name —
+--              ground truth, the only reliable inversion available
+--   'encoded'  the naive decode — a guess
+--   NULL       recorded before v10; provenance unknown, treated as a guess
+--
+-- A 'cwd' value overwrites; an 'encoded' guess never overwrites anything.
+-- Never a downgrade.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'projects'
+          AND column_name = 'decoded_from'
+    ) THEN
+        ALTER TABLE projects ADD COLUMN decoded_from TEXT;
+    END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
     project_id   BIGINT REFERENCES projects(project_id),
@@ -1865,16 +1895,43 @@ class SessionArchive:
 
     # -- projects / sessions ------------------------------------------------
 
-    def get_or_create_project(self, encoded_path: str, decoded_path: str) -> int:
+    def get_or_create_project(self, encoded_path: str, decoded_path: str,
+                              decoded_from: str = "encoded") -> int:
+        """Upsert a project row, UPGRADING a guessed path when ground truth arrives.
+
+        `decoded_from` is 'cwd' when `decoded_path` came from a transcript's own
+        `cwd` (which re-encodes to this exact directory name — the only reliable
+        inversion of an encoding that maps both `/` and `.` to `-`), else
+        'encoded' for the naive decode.
+
+        The conflict path used to update only `last_seen_at`, so the FIRST
+        insert's guess was permanent: a project first seen without a usable cwd
+        hint kept `/Users/andrew//claude` forever even after a later transcript
+        said otherwise. Now a 'cwd' resolution overwrites the stored path and
+        name, and an 'encoded' guess never overwrites anything — the upgrade is
+        one-way, so this can never downgrade ground truth back to a guess.
+        `encoded_path` remains the unique key and is never derived.
+        """
         conn = self.connect()
         name = Path(decoded_path).name
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO projects(encoded_path, decoded_path, project_name)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (encoded_path) DO UPDATE SET last_seen_at = now()
+                """INSERT INTO projects(encoded_path, decoded_path, project_name,
+                                        decoded_from)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (encoded_path) DO UPDATE SET
+                     last_seen_at = now(),
+                     decoded_path = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN EXCLUDED.decoded_path
+                                         ELSE projects.decoded_path END,
+                     project_name = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN EXCLUDED.project_name
+                                         ELSE projects.project_name END,
+                     decoded_from = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN 'cwd'
+                                         ELSE projects.decoded_from END
                    RETURNING project_id""",
-                (encoded_path, decoded_path, name),
+                (encoded_path, decoded_path, name, decoded_from),
             )
             pid = cur.fetchone()[0]
         conn.commit()

@@ -136,6 +136,22 @@ rewritten outside a documented resumable backfill. Full schema reference:
   3.23.0 entry above is corrected to match.
 - **The `fallback` content block is dated to v2.1.215**, its first observation
   in the corpus, not v2.1.247 (the release csd happened to notice it in).
+- **Status line reads context and cache from the payload.**
+  `statusline/statusline-command.sh` now renders the context bar and the cache
+  indicator from the status-line payload's `context_window` and `prompt_cache`
+  blocks instead of scanning the session transcript, and sizes the bar
+  correctly for a 1M context window (it previously assumed 200K). Dropping the
+  transcript scan takes a 37 MB session from **687 ms to 133 ms** — the status
+  line runs on every render, so that latency was paid constantly. New
+  `statusline/test_statusline.sh` replays 11 recorded payload samples through
+  the script (**55 assertions**), including first-turn nulls, post-compact,
+  a resumed session with no `prompt_cache`, the legacy transcript fallback and
+  a malformed payload. `statusline/README.md` rewritten to match.
+- **DATA_MODEL.md reconciled against the merged v10 code** — the review rewrite
+  (1,159 → 1,812 lines) was written against the v10 *plan*, so the "commit
+  pending" markers, the two-instead-of-three `v_token_cost_daily` columns, the
+  backfill driving keys and the predicted-vs-measured backfill figures are
+  corrected against the shipped DDL. `CLAUDE.md` and `README.md` follow.
 
 ### Migration note
 - v10 is applied by `initialize()` like every other version: guarded

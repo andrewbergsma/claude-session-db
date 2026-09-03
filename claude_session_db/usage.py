@@ -37,6 +37,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 # ── OAuth constants (extracted from the Claude Code 2.1.202 binary) ────────────
+#
+# WATCH ITEM — version drift. `USER_AGENT` pins 2.1.202 while the machine is on
+# 2.1.258+, i.e. ~56 releases of drift. It has not broken: the endpoints below
+# do not appear to gate on the client version, and the OAuth `client_id` is the
+# stable public Claude Code one. But this is exactly the shape of a dependency
+# that fails all at once and looks like an auth problem — a 401/403 on
+# TOKEN_URL or USAGE_URL that is really a rejected user agent.
+#
+# If `csd usage` starts failing with an auth-shaped error and the credentials
+# are known good, re-extract these five constants from the current Claude Code
+# binary before touching the vault:
+#     strings "$(which claude)" | grep -E 'claude-cli/|oauth-20|/v1/oauth/'
+# The refresh token rotates on EVERY use, so a failed refresh can also be a
+# desynced vault — check `csd usage list` first. Deliberately NOT exercised by
+# the test suite: the OAuth path spends a real rotation.
+#
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code public OAuth client
 TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"

@@ -41,11 +41,66 @@ TASKS_TMP_BASE = Path("/private/tmp")
 TASK_OUTPUT_MAX_BYTES = 5 * 1024 * 1024
 
 
-def decode_project_path(encoded: str) -> str:
-    """Decode a project dir name: -Users-me-GitHub-x -> /Users/me/GitHub/x."""
+def encode_project_path(path: str) -> str:
+    """Claude Code's own project-dir encoding: every `/` AND `.` becomes `-`.
+
+    This is why the decode below cannot be exact — see `decode_project_path`.
+    """
+    return path.replace("/", "-").replace(".", "-")
+
+
+def decode_project_path(encoded: str, cwd_hint: Optional[str] = None) -> str:
+    """Decode a project dir name: `-Users-me-GitHub-x` -> `/Users/me/GitHub/x`.
+
+    THE ENCODING IS NOT INVERTIBLE. Claude Code maps both `/` and `.` to `-`,
+    so a `-` in the directory name is three different characters and the naive
+    decode is a guess. It guesses wrong for, among others:
+
+      * dot-directories — `-Users-andrew--claude` decodes to
+        `/Users/andrew//claude`, which normalises to `/Users/andrew/claude`,
+        not `/Users/andrew/.claude`. Every worktree project
+        (`…-infrastructure--claude-worktrees-net-v1`) is in this family.
+      * hyphens in a real directory name — `claude-session-db` becomes three
+        path segments.
+      * scratchpad projects that embed an encoded path inside an encoded path
+        (`-private-tmp-claude-501--Users-…-scratchpad`).
+      * `CLAUDE_CODE_PROJECT_DIR_NAME` — an arbitrary operator-supplied name
+        with no path relationship at all.
+      * the v2.1.224 long-path scheme, which shortens/hashes very long paths.
+
+    Two mitigations, in order:
+
+      1. `cwd_hint` — the transcript's OWN `cwd`, which is ground truth. If it
+         encodes to this exact directory name it IS the answer, and no guessing
+         is needed. This is the only reliable inversion available.
+      2. otherwise the naive decode, which is kept because `decoded_path` and
+         `project_name` are descriptive only — `projects.encoded_path` is the
+         unique key and is never derived.
+
+    Callers that care should ask `project_path_is_decodable()` and flag rather
+    than trust the result. `SessionSync` does, and reports the count.
+    """
+    if cwd_hint and encode_project_path(cwd_hint) == encoded:
+        return cwd_hint
     if encoded.startswith("-"):
         encoded = encoded[1:]
     return "/" + encoded.replace("-", "/")
+
+
+def project_path_is_decodable(encoded: str, decoded: str) -> bool:
+    """True when `decoded` is a believable inversion of `encoded`.
+
+    Two conditions, and the second is the one that catches the dot-directory
+    family: the decode must RE-ENCODE to the same directory name, and it must
+    actually exist on disk. `/Users/andrew//claude` re-encodes correctly and is
+    still wrong — only the existence check knows that.
+    """
+    if encode_project_path(decoded) != encoded:
+        return False
+    try:
+        return Path(decoded).is_dir()
+    except OSError:
+        return False
 
 
 @dataclass
@@ -77,6 +132,15 @@ class SyncStats:
     # counter now says "we do not model this yet", not "we lost this".)
     unknown: int = 0
     unknown_types: dict = field(default_factory=dict)
+
+    # Project directory names csd could not believably decode. The encoding
+    # maps both `/` and `.` to `-`, so it is not invertible; before this the
+    # naive decode produced a wrong `decoded_path` for every dot-directory and
+    # every worktree project, silently. See decode_project_path.
+    undecodable_projects: set = field(default_factory=set)
+
+    def note_undecodable_project(self, encoded: str) -> None:
+        self.undecodable_projects.add(encoded)
 
     def note_unknown(self, record_type: str, n: int = 1) -> None:
         self.unknown += n
@@ -113,6 +177,13 @@ class SyncStats:
             out += (f"\n  UNMODELLED record types: {self.unknown:,} records — "
                     f"{self.unknown_census(20)}\n"
                     f"    (captured verbatim in session_records; no dedicated table yet)")
+        if self.undecodable_projects:
+            names = sorted(self.undecodable_projects)
+            out += (f"\n  UNDECODABLE project dirs: {len(names)} — "
+                    + ", ".join(names[:5])
+                    + (f", +{len(names) - 5} more" if len(names) > 5 else "")
+                    + "\n    (projects.decoded_path is a best-effort guess for these;"
+                      " encoded_path is the key and is exact)")
         return out
 
     def oneline(self) -> str:
@@ -131,6 +202,8 @@ class SyncStats:
                 f"{body} ({self.errors} errors)")
         if self.unknown:
             line += f" · UNMODELLED {self.unknown:,}: {self.unknown_census()}"
+        if self.undecodable_projects:
+            line += f" · {len(self.undecodable_projects)} undecodable project dirs"
         return line
 
 
@@ -213,9 +286,22 @@ class SessionSync:
 
     # -- per-file -----------------------------------------------------------
 
-    def _project_id_for(self, project_encoded: str) -> int:
+    def _project_id_for(self, project_encoded: str, stats: Optional[SyncStats] = None,
+                        cwd_hint: Optional[str] = None) -> int:
+        """project_id for an encoded project dir name.
+
+        `cwd_hint` is the transcript's own `cwd` — ground truth, and the only
+        reliable way to invert an encoding that maps both `/` and `.` to `-`.
+        When neither the hint nor the naive decode is believable, the project
+        is FLAGGED (see SyncStats.undecodable_projects) rather than silently
+        recorded with a garbage `decoded_path`. The flag is the point: the
+        naive decode fails on every dot-directory and every worktree project,
+        and nothing said so.
+        """
         if project_encoded not in self._project_cache:
-            decoded = decode_project_path(project_encoded)
+            decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
+            if stats is not None and not project_path_is_decodable(project_encoded, decoded):
+                stats.note_undecodable_project(project_encoded)
             self._project_cache[project_encoded] = self.archive.get_or_create_project(
                 project_encoded, decoded
             )
@@ -257,7 +343,12 @@ class SessionSync:
         # a subagent file additionally defines a CHILD session row keyed
         # "<parent>:<agent_id>" so the sidechain is a navigable identity.
         if not is_subagent:
-            project_id = self._project_id_for(project_encoded)
+            # The transcript's own cwd is ground truth for the project dir name
+            # the encoding cannot be inverted from.
+            ctx = next((m for m in records.get("user", []) + records.get("assistant", [])),
+                       None)
+            project_id = self._project_id_for(
+                project_encoded, stats, cwd_hint=getattr(ctx, "cwd", None))
             self._upsert_session(records, owning_session_id, project_id, source_file, st)
         else:
             self._upsert_subagent_session(records, path, owning_session_id,
@@ -788,7 +879,8 @@ class SessionSync:
         self.archive.upsert_session({
             **derived,
             "session_id": f"{parent_session_id}:{agent_id}",
-            "project_id": self._project_id_for(project_encoded),
+            "project_id": self._project_id_for(
+                project_encoded, cwd_hint=getattr(ctx, "cwd", None)),
             "file_path": source_file,
             "is_subagent": True,
             "parent_session_id": parent_session_id,

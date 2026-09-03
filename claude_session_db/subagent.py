@@ -45,8 +45,17 @@ def read_agent_meta(agent_jsonl: Path) -> dict:
 def discover_subagents(session_dir: Path) -> list[SubagentInfo]:
     """Find all subagent JSONL files for a session.
 
-    Subagent files live in {session-dir}/subagents/agent-{17-hex-id}.jsonl
-    (workflow agents nest at subagents/workflows/wf_*/agent-*.jsonl).
+    Subagent files live at `{session-dir}/subagents/agent-{17-hex-id}.jsonl`,
+    and workflow agents NEST at
+    `{session-dir}/subagents/workflows/wf_*/agent-*.jsonl`.
+
+    RECURSIVE, deliberately. This used to be a flat `glob("agent-*.jsonl")`,
+    which silently returned zero of the nested workflow agents. It was a latent
+    trap rather than a live bug — `SessionSync.enumerate_files` walks with
+    `rglob` and finds them, so the archive never actually missed one — but the
+    two discoverers disagreeing about what a session's subagents ARE is the
+    kind of divergence that becomes a real bug the moment anything else calls
+    this. Both now use the same rule.
     """
     subagent_dir = session_dir / "subagents"
     if not subagent_dir.exists():
@@ -56,7 +65,7 @@ def discover_subagents(session_dir: Path) -> list[SubagentInfo]:
             agent_id=f.stem.replace("agent-", ""),
             file_path=f,
         )
-        for f in sorted(subagent_dir.glob("agent-*.jsonl"))
+        for f in sorted(subagent_dir.rglob("agent-*.jsonl"))
     ]
 
 

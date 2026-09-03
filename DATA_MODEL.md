@@ -13,10 +13,30 @@ wrong before:
 - **Where a column comes from.** A column with no stated source is a derivation,
   and a derivation can drift from the transcript. Every row below names either a
   JSONL field or the code that computes it.
-- **What is NOT a column.** The archive is lossless — every record keeps a `raw`
-  JSONB — so "not modelled" never means "not stored". [Raw-only
+- **What is NOT a column — and the three places where it is not kept at all.**
+  Where a raw escape hatch exists it is authoritative and verbatim, so "not
+  modelled" never means "not stored". There are exactly three:
+  `messages.raw`, `system_events.raw`, `session_records.payload`. [Raw-only
   fields](#8-raw-only-fields) lists what is present in the archive but reachable
   only through JSONB.
+
+  **Three families have no escape hatch through v9**, and are the only places
+  where this archive is genuinely lossy:
+
+  - **`attachments`** keeps the `attachment` object and nothing else. The
+    record's `cwd`, `gitBranch`, `version`, `entrypoint`, `userType`, `slug`,
+    `agentId` and `sessionKind` are dropped on ingest.
+  - **`queue_operations`, `pr_links`, `file_history`, `agent_tasks`** keep their
+    promoted columns only; any field Claude Code adds to those record types is
+    lost until a column is added for it.
+  - **The seven latest-wins session-metadata types** — `ai-title`,
+    `last-prompt`, `mode`, `permission-mode`, `bridge-session`, `agent-name`,
+    `custom-title` — collapse into one `sessions` column each. The current value
+    survives; every earlier value, and the time it changed, does not.
+
+  **v10 closes two of the three:** it adds `attachments.raw`, and additionally
+  stores the metadata types verbatim in `session_records`. See
+  [§9](#9-migration-history).
 
 Companion documents: `CLAUDE.md` (architecture and doctrine), `CHANGELOG.md`
 (release history), `claude_session_db/postgres.py` (the DDL itself — this file
@@ -74,10 +94,30 @@ documents it, it does not define it).
 ```
 
 **Sync signal** is `*.jsonl` filesystem mtime (`st_mtime_ns`), never
-`sessions-index.json`. Ingest is idempotent: `messages` / `attachments` /
-`system_events` upsert by uuid, `session_records` by `(source_file,
-source_line)`, and every other per-file table is cleared by `source_file` before
-re-insert.
+`sessions-index.json`.
+
+### Ingest is idempotent — but that word means four different things here
+
+| Mechanism | Tables | Consequence |
+|---|---|---|
+| `ON CONFLICT (uuid) DO NOTHING` | `messages`, `attachments`, `system_events` | **NOT an upsert.** An existing row is never rewritten — not by a re-sync, and not by `csd ingest --force`. |
+| True upsert (`DO UPDATE`) | `session_records` on `(source_file, source_line)`, `agent_tasks` on `key` | later content wins |
+| COALESCE upsert | `sessions`, `projects` | a later file lacking a field never wipes a value an earlier one set; and these are **never cleared** |
+| `file_mtime_ns` comparison | `task_outputs` | re-swept only when the source file changed |
+
+**Every per-file table is DELETEd by `source_file` before re-insert** —
+`messages`, `content_blocks`, `tool_results`, `attachments`, `system_events`,
+`queue_operations`, `pr_links`, `agent_tasks`, `session_records`, and
+`file_history` (with `file_backups` cascading). `sessions` and `projects` are
+deliberately NOT in that set.
+
+> **The per-file DELETE is the only thing that makes `DO NOTHING` correctable.**
+> For a transcript still on disk, a re-sync clears its rows first, so the
+> re-insert lands and a parser fix takes effect. For a row whose source file has
+> been deleted, or for a value that must change without re-parsing, `DO NOTHING`
+> means the row is frozen — the only route is a bounded backfill in
+> `postgres.BACKFILLS` (`SessionArchive.run_backfills`). **Fixing the parser is
+> necessary but never sufficient.**
 
 ### The project-slug encoding is not invertible
 
@@ -102,10 +142,36 @@ and named in the sync summary.
 
 | Convention | Meaning |
 |---|---|
-| **Source** | The JSONL field the column is read from, or `derived` + the code that computes it. |
-| **Since** | The Claude Code version that introduced the SOURCE FIELD, where known. Blank = present since the archive began. |
+| **Source** | Where the value comes from: a named JSONL field, or one of the four derivation kinds below. |
+| **Since** | The Claude Code version that introduced **the SOURCE FIELD** — not the version of csd that added the column. Blank = present since the archive began. A `2.1.x` here means "no row older than this can have a value", which is what tells a NULL apart from a real absence. |
 | **LEGACY** | Kept and still populated for historical rows, but Claude Code no longer emits the source. Never dropped — the archive does not remove columns. |
-| `→` | "feeds"; e.g. `cost-state.totalCostUSD → sessions.reported_cost_usd`. |
+| `→` | **A logical reference, not a declared foreign key.** `sessions.project_id → projects` describes intent; the database does not enforce it unless the row also says **FK**. |
+| **FK** | A declared foreign-key constraint. There are exactly four in the whole schema — see [§6](#6-reference-and-control-tables). |
+
+**The four derivation kinds.** A column with no named JSONL field is one of
+these, and the distinction is what tells you whether a value can be stale:
+
+| Kind | Written by | Can it drift from the transcript? |
+|---|---|---|
+| `default` | the database — a `BIGSERIAL` sequence or a DDL default | no |
+| `parsed` | `sync.py` / `jsonl_records.py`, at ingest, from the record itself | only if the parser is wrong AND the file is never re-synced |
+| `recomputed` | a post-ingest aggregate `UPDATE` (`recompute_session_aggregates`) | yes — it is a snapshot of the last recompute |
+| `backfilled` | a one-time `postgres.BACKFILLS` `UPDATE` over existing rows | yes — rows added after the backfill was marked `done` are not covered |
+
+> **None of these is a Postgres generated column** (verified: 0 in the catalog).
+> See the note at the end of [§9](#migration-discipline) for why.
+
+**`source_line` is populated on `session_records` and nowhere else.** Every
+other table declares the column and leaves it NULL on every row (verified live:
+0 non-NULL on `messages`, `content_blocks`, `tool_results`, `attachments`,
+`system_events`). It is not repeated in the per-table notes below.
+
+> **`LIKE` pattern hazard.** `model_pricing.model_pattern` is matched with
+> `LIKE pattern || '%'`. In `LIKE`, **`_` is a single-character wildcard**, so
+> `claude-opus-5` also matches a hypothetical `claude+opus-5`; and the
+> longest-pattern-wins tiebreak is by `length()` alone, so **two patterns of
+> equal length that both match have no defined winner**. Keep patterns
+> distinct in length or disjoint in prefix.
 
 **Universal per-record fields.** Every conversation record (user / assistant /
 system / attachment) carries `type`, `uuid`, `sessionId`, `timestamp`,

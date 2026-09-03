@@ -19,6 +19,128 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.23.0] - 2026-09-02
+
+The **Claude Code v2.1.161-258 impact release** — schema **v9**. Eleven record
+types, six model families, a fork mechanism and a `/cd` had arrived in the
+transcripts since the last audit, and the archive was silently poorer for all of
+them. Full schema reference: [`DATA_MODEL.md`](DATA_MODEL.md).
+
+### Added
+- **`session_records` — the catch-all that ends silent record loss.** The parser
+  has always collected `records["unknown"]`, and nothing has ever read it: every
+  session-scoped record type Claude Code added between v2.1.161 and v2.1.258 was
+  parsed and then dropped on the floor. Every such record is now stored
+  **verbatim** — ten modelled types (`atis-latch`, `worktree-state`,
+  `relocated`, `file-history-delta`, `history-suppression`, `frame-link`,
+  `cost-state`, `artifact-autoreact-ledger`, `artifact-comment-monitor`,
+  `fork-context-ref`) plus anything csd has never seen, flagged
+  `is_modelled = false`. Keyed `(source_file, source_line)` — these records carry
+  no uuid and a transcript is append-only — and in `PER_FILE_TABLES`, so a
+  re-sync clears before re-inserting.
+- **The UNMODELLED tripwire**, on all four surfaces a new record type could
+  reach. `SyncStats` carries a census by type; `csd ingest` prints
+  `UNMODELLED record types: N records — type×n, …` under the sync summary and on
+  the one-line sweep form; the sweep heartbeat carries it so **`csd sweep-health`
+  reports it as a `notice:`** despite being deliberately DB-free; and `csd stats`
+  prints the whole-archive census from the table itself, so a type that arrived
+  weeks ago and never recurred is still visible. It is a **signal, never a
+  failure** — an unmodelled type never sets `ok=false` and never changes an exit
+  code. The convention for the next one: give it a modelled route, or let it land
+  in `session_records`. Never drop it.
+- **Fork lineage, relocation and worktree binding on `sessions`** —
+  `forked_from_session_id`, `forked_from_uuid`, `fork_context_length`,
+  `fork_agent_id` (from `fork-context-ref`), `current_cwd` (from `relocated`, the
+  v2.1.169 `/cd`), and `worktree_session`. A fork, a relocated session and an
+  ordinary one were indistinguishable before.
+- **Claude Code's own cost ledger on `sessions`** — `cost_state`,
+  `reported_cost_usd`, `reported_{total,api,tool}_duration_ms`,
+  `reported_lines_{added,removed}`, `has_unknown_model_cost`, from the
+  `cost-state` record — plus **`session_kind`** (`bg` marks a background
+  session).
+- **`v_session_cost_drift`** — csd's computed cost against the harness's own
+  reported cost, carrying what is needed to *attribute* a gap rather than just
+  display one: `drift_usd` / `drift_pct`, `sidechain_messages`,
+  `fallback_messages`, `unpriced_messages`, `reported_model_usage`. A session
+  with no `cost-state` yet has a NULL reported side, never a fake zero.
+- **`v_message_cost.api_message_ratio`** — `priced_messages / distinct
+  api_message_id`. One API response can land as several `messages` rows, and the
+  ratio measures it: **1.808-2.443** on four real sessions, tracking the observed
+  cost drift closely. See *Notes* for why the dedup is deferred.
+- **`messages` usage sub-fields** — `thinking_tokens`, `server_tool_use`,
+  `iterations` (JSONB) + `iteration_count`, so a model **fallback** is at least
+  visible; plus `messages.effort` and `messages.session_kind`.
+- **`csd angles sessions` FLAGS column** — `bg` (background session), `mv` (the
+  session relocated; the PROJECT column is derived from where it was *filed*,
+  not where it now is), `fk` (a fork, inheriting another session's context),
+  `—` for an ordinary row.
+- **Undecodable-project reporting.** Claude Code's project-slug encoding maps
+  both `/` and `.` to `-` and is **not invertible**, so the naive decode is wrong
+  for every dot-directory (`-Users-andrew--claude`) and every worktree project.
+  Sync now uses the transcript's own `cwd` as ground truth when it re-encodes to
+  the directory name, and otherwise **flags** the project and reports the count
+  rather than recording a garbage `decoded_path`. `projects.encoded_path` was and
+  remains the exact key.
+- **`tool_labels.py`** — one label table for the tools the v2.1.161-258 window
+  added (the `TaskCreate` / `TaskUpdate` / `TaskOutput` / `ListAgents`
+  background-task family, and friends), shared by the console renderers and
+  `csd angles`, so the two cannot drift.
+
+### Changed
+- **Model pricing: the Claude 5 family, solved from the harness's own ledger.**
+  `cost-state.totalCostUSD` is a second independent number, so the rates were
+  *derived* rather than assumed: **opus-5 $5/$25**, sonnet-5 $2/$10 (exact on
+  16/16 rows), fable-5 and fable-5-1 $10/$50, mythos-5 / mythos-5-1 at the same
+  tier. **`claude-fable-5-1` alone carries a 0.025 cache-read multiplier**
+  ($0.25/MTok) — exact on 7/7 rows, and a 5.1-only change; every other family
+  member keeps 0.10.
+- **Opus 4.6 / 4.7 / 4.8 corrected to $5/$25.** The generic `claude-opus-4`
+  pattern priced them at 15/75 — 3× over — and longest-pattern-wins now routes
+  them to their own rows. Together with the 5 family, **unpriced assistant
+  messages went from 338,515 to 0.**
+- **`csd angles` sees the whole orchestration family.** `angle_agents` covered
+  `Agent` / `SendMessage` / `TaskStop` only, so a turn that created three
+  background tasks and updated two of them produced one "stop" headline or
+  nothing at all.
+
+### Fixed
+- **User records are classified on evidence, not on content shape.** A prompt
+  whose content happened to be a *list* was labelled `tool_result`; the
+  classifier now looks for an actual `tool_result` block. **+7,179 rows** moved
+  to `prompt`, with `prompt_text` backfilled for them.
+- **Unknown content blocks are kept, not dropped.** A block type the parser does
+  not model is preserved verbatim in `content_blocks.block_payload` instead of
+  vanishing between JSONL and Postgres.
+- **Structured tool-result overflow is archived.** Subagent overflow discovery
+  matched `tool-results/*.txt` only, so every `.json` overflow file — the
+  structured ones — was skipped.
+- Undecodable project names no longer crash or mis-file the sync (see above),
+  and the console/renderer surfaces label the new tools instead of showing a
+  bare tool name.
+
+### Notes
+- **Schema v9 migration is additive, idempotent and automatic** — it applies on
+  the next `initialize()` (any `csd ingest`, or the launchd sweep) with no
+  manual step. Column additions sit behind an `information_schema` guard keyed on
+  the first new column, so the ACCESS EXCLUSIVE `ALTER` fires once and not on
+  every 5-minute tick; `ADD COLUMN` without a default is O(1) in PG11+. No column
+  is dropped, no column retyped, no row deleted: `messages.forked_from` is
+  retained as **legacy**.
+- **Backfills are bounded and resumable** (`postgres.BACKFILLS`,
+  `SessionArchive.run_backfills`). Each walks the `messages` primary key in 20K
+  committed batches with a cursor in `metadata`, spends at most 20s per
+  `initialize()`, resumes on the next sweep, is `IS DISTINCT FROM`-guarded so a
+  re-run writes nothing, and isolates its own failures so a broken backfill can
+  never stop ingest. A single long `UPDATE` is exactly the *idle in transaction*
+  shape that once convoyed this database for ~9h.
+- **The `api_message_ratio` dedup is deliberately deferred.** Deduplicating
+  `v_message_cost` by `api_message_id` is the right fix, and it changes every
+  historical cost number in the archive — it gets its own change with its own
+  verification, not a footnote in this one. Until then `v_session_cost_drift`
+  *measures* the over-count instead of hiding it.
+- No new CLI commands or flags; every surface above is an addition to an existing
+  one.
+
 ## [3.22.1] - 2026-09-02
 
 ### Fixed

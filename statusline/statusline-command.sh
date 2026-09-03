@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # Claude Code statusline script
-# Receives JSON on stdin from Claude Code
+# Receives the status-line JSON payload on stdin from Claude Code.
+#
+# Contract: https://code.claude.com/docs/en/statusline
+# Verified against Claude Code v2.1.259 (2026-09).
+#
+# Design rules (see README.md "Why it is shaped this way"):
+#   1. ONE jq pass over the payload. Claude Code cancels an in-flight status
+#      line script when the next update triggers (300ms debounce), so a slow
+#      script renders intermittently or not at all.
+#   2. NEVER read the whole transcript. That is O(session size) and was the
+#      dominant cost of the previous version (~0.6s on a 37 MB transcript).
+#      The payload now carries everything the transcript was being mined for.
+#   3. Every segment degrades independently. A missing field drops its own
+#      segment; it never blanks the line.
 
 input=$(cat)
 
@@ -13,207 +26,242 @@ RED=$'\033[31m'
 CYAN=$'\033[36m'
 MAGENTA=$'\033[35m'
 
-# --- Model (family + version, e.g. "Opus 4.7" from "Opus 4.7 (1M context)") ---
-# Drop the trailing "(... context)" suffix; the window size is already shown
-# on row 2 via the "/<size>k" context budget.
-model_id=$(echo "$input" | jq -r '.model.id // ""')
-model_name=$(echo "$input" | jq -r '.model.display_name // ""')
-model_name=$(echo "$model_name" | sed -E 's/ *\(.*\)$//')
+# ---------------------------------------------------------------------------
+# Single jq pass over the payload.
+#
+# Emits one @tsv row of fixed-order fields. @tsv escapes any embedded tab or
+# newline, so the row is always exactly one line with stable field count.
+# Every lookup is null-guarded; jq never errors on a missing or null key.
+# ---------------------------------------------------------------------------
+JQ_PROG='
+def num(v): if (v | type) == "number" then v else null end;
+def str(v): if (v | type) == "string" then v else null end;
 
-# --- Session ID ---
-session_id=$(echo "$input" | jq -r '.session_id // ""')
+  (.context_window // {})                as $cw
+| (if (.context_window.current_usage | type) == "object"
+   then .context_window.current_usage else {} end) as $cu
+| (if (.prompt_cache | type) == "object" then .prompt_cache else null end) as $pc
+| (str(.model.id) // "")                 as $mid
+| (str(.model.display_name) // "")       as $mname
+
+# Context window size: the payload is authoritative (200000, or 1000000 for
+# extended-context models). Only fall back to sniffing the model id/name.
+| ( num($cw.context_window_size)
+    // (if ($mid + " " + $mname | test("1m|1 ?m context|long ?context"; "i"))
+        then 1000000 else 200000 end) )   as $size
+
+# Tokens currently in the context window, input-only — the same basis Claude
+# Code uses for used_percentage (output_tokens are excluded).
+#   1. context_window.total_input_tokens  (authoritative, current turn)
+#   2. derived from current_usage         (older payloads)
+#   3. derived from used_percentage       (last resort)
+| ( num($cw.total_input_tokens)
+    // ( if ($cu | length) > 0
+         then ((num($cu.input_tokens) // 0)
+               + (num($cu.cache_creation_input_tokens) // 0)
+               + (num($cu.cache_read_input_tokens) // 0))
+         else null end )
+    // ( if num($cw.used_percentage) != null
+         then (($cw.used_percentage / 100) * $size | floor)
+         else null end ) )                as $tot
+
+| (num($cu.cache_read_input_tokens))      as $cached
+| (num($cw.used_percentage)
+   // (if $tot != null and $size > 0 then ($tot * 100 / $size) else null end)) as $pct
+
+| [ $mid
+  , $mname
+  , (str(.session_id) // "")
+  , (str(.workspace.current_dir) // str(.cwd) // "")
+  , ($size | tostring)
+  , (if $tot    != null then ($tot    | floor | tostring) else "" end)
+  , (if $cached != null then ($cached | floor | tostring) else "" end)
+  , (if $pct    != null then ($pct    | tostring)         else "" end)
+  , (if $pc != null then "1" else "0" end)
+  , (if $pc != null and $pc.warm == true then "1" else "0" end)
+  , (if $pc != null and (num($pc.expires_at) != null)
+     then ($pc.expires_at | floor | tostring) else "" end)
+  , (if $pc != null then (str($pc.ttl) // "") else "" end)
+  , (if $pc != null and (num($pc.hit_ratio) != null)
+     then ($pc.hit_ratio | tostring) else "" end)
+  , (if $pc != null and (num($pc.misses) != null)
+     then ($pc.misses | floor | tostring) else "" end)
+  , (str(.effort.level) // "")
+  , (str(.output_style.name) // "")
+  , (str(.transcript_path) // "")
+  ]
+# US (0x1f) as the field separator, not tab: tab is IFS whitespace, so bash
+# collapses runs of tabs and every empty field would shift the whole row.
+| map(tostring)
+| join("\u001f")
+'
+
+row=$(printf '%s' "$input" | jq -r "$JQ_PROG" 2>/dev/null)
+
+model_id=""; model_name=""; session_id=""; current_dir=""
+ctx_size=200000; total_tokens=""; cached_tokens=""; used_pct=""
+pc_present=0; pc_warm=0; pc_expires=""; pc_ttl=""; pc_hit=""; pc_misses=""
+effort=""; style=""; transcript_path=""
+
+if [ -n "$row" ]; then
+  IFS=$'\037' read -r model_id model_name session_id current_dir ctx_size \
+    total_tokens cached_tokens used_pct pc_present pc_warm pc_expires \
+    pc_ttl pc_hit pc_misses effort style transcript_path <<<"$row"
+fi
+
+# Numeric hygiene: anything that must go into arithmetic gets a definite value.
+case "$ctx_size"     in ''|*[!0-9]*) ctx_size=200000 ;; esac
+case "$pc_present"   in 1) ;; *) pc_present=0 ;; esac
+case "$pc_warm"      in 1) ;; *) pc_warm=0 ;; esac
+case "$pc_expires"   in ''|*[!0-9]*) pc_expires="" ;; esac
+case "$pc_misses"    in ''|*[!0-9]*) pc_misses="" ;; esac
+
+# Drop the trailing "(... context)" suffix from the display name; the window
+# size is already shown on row 2 via the "/<size>k" context budget.
+model_name=${model_name%% (*}
 
 # --- Working directory (basename, or ~/... if under $HOME) ---
-current_dir=$(echo "$input" | jq -r '.workspace.current_dir // ""')
+dir_display=""
 if [ -n "$current_dir" ]; then
-  home_dir="$HOME"
-  if [[ "$current_dir" == "$home_dir" ]]; then
+  if [ "$current_dir" = "$HOME" ]; then
     dir_display="~"
-  elif [[ "$current_dir" == "$home_dir"/* ]]; then
-    dir_display="~${current_dir#$home_dir}"
+  elif [ "${current_dir#"$HOME"/}" != "$current_dir" ]; then
+    dir_display="~/${current_dir#"$HOME"/}"
   else
     dir_display="$current_dir"
   fi
-else
-  dir_display=""
+fi
+
+# ---------------------------------------------------------------------------
+# Legacy fallback: only when the payload carried no context signal at all.
+#
+# Pre-v2.0.65 payloads have no context_window. Rather than scan the whole
+# transcript (O(session size), ~0.5s on a 37 MB JSONL), read only the tail.
+# `tail -n` seeks from the end, so this is O(tail) — 9ms on that same file.
+# ---------------------------------------------------------------------------
+if [ -z "$total_tokens" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
+  usage_json=$(tail -n 400 "$transcript_path" 2>/dev/null \
+    | grep -F '"type":"assistant"' 2>/dev/null \
+    | tail -1 \
+    | jq -r '.message.usage // empty' 2>/dev/null)
+  if [ -n "$usage_json" ]; then
+    read -r t c < <(printf '%s' "$usage_json" | jq -r '
+      "\((.input_tokens // 0) + (.cache_creation_input_tokens // 0)
+         + (.cache_read_input_tokens // 0)) \(.cache_read_input_tokens // 0)"' 2>/dev/null)
+    case "$t" in ''|*[!0-9]*) : ;; *) total_tokens=$t ;; esac
+    case "$c" in ''|*[!0-9]*) : ;; *) cached_tokens=$c ;; esac
+  fi
 fi
 
 # --- Git / worktree status (branch, worktree marker, dirty, ahead/behind) ---
-# Computed by shelling out to git against current_dir; not present in stdin JSON.
-git_branch=""
-git_ahead=0
-git_behind=0
-git_dirty=0
-is_worktree=0
-
-if [ -n "$current_dir" ] && git -C "$current_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  # One call gets branch, upstream ahead/behind, and per-file change lines.
+# Not in the payload; one `git status` call supplies all four pieces.
+git_segment=""
+if [ -n "$current_dir" ] && [ -d "$current_dir" ] \
+   && git -C "$current_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   status_v2=$(git -C "$current_dir" status --porcelain=v2 --branch 2>/dev/null)
   git_branch=$(printf '%s\n' "$status_v2" | awk '/^# branch.head / {print $3; exit}')
-  ab=$(printf '%s\n' "$status_v2" | awk '/^# branch.ab / {print $3, $4; exit}')
-  if [ -n "$ab" ]; then
-    git_ahead=$(printf '%s\n' "$ab" | awk '{gsub(/[+]/,"",$1); print $1+0}')
-    git_behind=$(printf '%s\n' "$ab" | awk '{gsub(/[-]/,"",$2); print $2+0}')
-  fi
-  # Count changed/untracked entries (lines starting with 1, 2, u, or ?).
-  git_dirty=$(printf '%s\n' "$status_v2" | grep -cE '^(1|2|u|\?) ')
-
-  # Linked worktree iff git-dir and git-common-dir diverge.
-  gd=$(git -C "$current_dir" rev-parse --git-dir 2>/dev/null)
-  gcd=$(git -C "$current_dir" rev-parse --git-common-dir 2>/dev/null)
-  if [ -n "$gd" ] && [ -n "$gcd" ] && [ "$gd" != "$gcd" ]; then
-    is_worktree=1
-  fi
-fi
-
-# Build the compact git segment (omit pieces that are zero/absent).
-git_segment=""
-if [ -n "$git_branch" ]; then
-  git_segment="${CYAN}⎇ ${git_branch}${RESET}"
-  [ "$is_worktree" -eq 1 ] && git_segment="${git_segment} ${MAGENTA}⧉${RESET}"
-  [ "${git_dirty:-0}" -gt 0 ] && git_segment="${git_segment} ${YELLOW}±${git_dirty}${RESET}"
-  ab_disp=""
-  [ "${git_ahead:-0}" -gt 0 ] && ab_disp="↑${git_ahead}"
-  [ "${git_behind:-0}" -gt 0 ] && ab_disp="${ab_disp}↓${git_behind}"
-  [ -n "$ab_disp" ] && git_segment="${git_segment} ${DIM}${ab_disp}${RESET}"
-fi
-
-# --- Context window size: 1M for [1m]/longcontext variants, else 200k ---
-if echo "$model_id" | grep -qiE '1m|-1m|long'; then
-  ctx_size=1000000
-else
-  ctx_size=200000
-fi
-
-# --- Parse transcript for cached/uncached token split ---
-transcript_path=$(echo "$input" | jq -r '.transcript_path // ""')
-cached_tokens=0
-uncached_tokens=0
-total_tokens=0
-got_transcript=0
-
-last_ts=""
-if [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
-  # Extract usage block from the last assistant message in the JSONL.
-  # Transcript lines have outer "type":"assistant" with usage nested at .message.usage
-  # Also handles lines where inner message object has "type":"message","role":"assistant"
-  # Grab the whole last assistant line once — it carries both the usage block and
-  # the ISO-8601 timestamp we use as the cache-expiry anchor.
-  last_asst_line=$(grep -F '"type":"assistant"' "$transcript_path" 2>/dev/null | tail -1)
-  usage_json=$(printf '%s' "$last_asst_line" | jq -r '.message.usage // empty' 2>/dev/null)
-  last_ts=$(printf '%s' "$last_asst_line" | jq -r '.timestamp // empty' 2>/dev/null)
-
-  # Fallback: some formats use "role":"assistant" at outer level
-  if [ -z "$usage_json" ]; then
-    last_asst_line=$(grep -F '"role":"assistant"' "$transcript_path" 2>/dev/null | tail -1)
-    usage_json=$(printf '%s' "$last_asst_line" | jq -r '.message.usage // .usage // empty' 2>/dev/null)
-    last_ts=$(printf '%s' "$last_asst_line" | jq -r '.timestamp // empty' 2>/dev/null)
-  fi
-
-  if [ -n "$usage_json" ]; then
-    input_tok=$(echo "$usage_json" | jq -r '.input_tokens // 0')
-    cache_create=$(echo "$usage_json" | jq -r '.cache_creation_input_tokens // 0')
-    cache_read=$(echo "$usage_json" | jq -r '.cache_read_input_tokens // 0')
-    output_tok=$(echo "$usage_json" | jq -r '.output_tokens // 0')
-
-    total_tokens=$(( input_tok + cache_create + cache_read + output_tok ))
-    cached_tokens=$cache_read
-    uncached_tokens=$(( total_tokens - cached_tokens ))
-    got_transcript=1
-  fi
-fi
-
-# Fall back to used_percentage if transcript parse failed
-if [ "$got_transcript" -eq 0 ]; then
-  used_pct=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
-  if [ -n "$used_pct" ]; then
-    total_tokens=$(echo "$used_pct $ctx_size" | awk '{printf "%d", $1 / 100 * $2}')
-  else
-    total_tokens=0
-  fi
-  cached_tokens=0
-  uncached_tokens=$total_tokens
-fi
-
-# Clamp total
-if [ "$total_tokens" -gt "$ctx_size" ]; then
-  total_tokens=$ctx_size
-fi
-
-# Usage-aware color for the context budget: <150k green, 150k–200k yellow, 200k+ red.
-# Computed here (before token_display) so the expiry segment can revert to it.
-if [ "$total_tokens" -lt 150000 ]; then
-  token_color="$GREEN"
-elif [ "$total_tokens" -lt 200000 ]; then
-  token_color="$YELLOW"
-else
-  token_color="$RED"
-fi
-
-# --- Cache expiry: anchor = last request timestamp + TTL (refreshes every turn) ---
-# The API never returns an expiry, but the prompt cache lives TTL seconds past the
-# last request. Claude Code writes the prefix with either a 1h or 5m TTL; detect
-# which by scanning recent usage for the most recent non-zero ephemeral bucket
-# (cache_read refreshes the existing entry's TTL, so a pure-read turn keeps the
-# same window). expiry = last_ts + ttl; we render that as a local clock time.
-ttl_seconds=0
-expiry_disp=""
-expiry_color=""
-if [ "$got_transcript" -eq 1 ] && [ "$cached_tokens" -gt 0 ] && [ -n "$last_ts" ]; then
-  ttl_kind=$(grep -F '"type":"assistant"' "$transcript_path" 2>/dev/null \
-    | tail -50 \
-    | jq -rs 'map(.message.usage.cache_creation // empty)
-              | map(select((.ephemeral_1h_input_tokens // 0) > 0 or (.ephemeral_5m_input_tokens // 0) > 0))
-              | last
-              | if . == null then ""
-                elif (.ephemeral_1h_input_tokens // 0) > 0 then "1h"
-                else "5m" end' 2>/dev/null)
-  case "$ttl_kind" in
-    1h) ttl_seconds=3600 ;;
-    *)  ttl_seconds=300 ;;   # 5m write seen, or none → API default of 5 minutes
-  esac
-
-  # Parse the UTC timestamp to epoch (BSD/macOS date first, GNU date fallback).
-  clean_ts="${last_ts%.*}"; clean_ts="${clean_ts%Z}"
-  ts_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "$clean_ts" +%s 2>/dev/null)
-  [ -z "$ts_epoch" ] && ts_epoch=$(date -u -d "$last_ts" +%s 2>/dev/null)
-
-  if [ -n "$ts_epoch" ]; then
-    exp_epoch=$(( ts_epoch + ttl_seconds ))
-    remain=$(( exp_epoch - $(date +%s) ))
-    if [ "$remain" -le 0 ]; then
-      expiry_disp="cold"
-      expiry_color="$RED"
-    else
-      # Local clock time the cache goes cold (slides forward each turn).
-      exp_clock=$(date -r "$exp_epoch" +%H:%M 2>/dev/null)
-      [ -z "$exp_clock" ] && exp_clock=$(date -d "@$exp_epoch" +%H:%M 2>/dev/null)
-      expiry_disp="exp ${exp_clock}"
-      if [ "$remain" -le 60 ]; then expiry_color="$YELLOW"; else expiry_color="$GREEN"; fi
+  if [ -n "$git_branch" ] && [ "$git_branch" != "(detached)" ]; then
+    git_ahead=0; git_behind=0
+    ab=$(printf '%s\n' "$status_v2" | awk '/^# branch.ab / {print $3, $4; exit}')
+    if [ -n "$ab" ]; then
+      git_ahead=$(printf '%s\n' "$ab" | awk '{gsub(/[+]/,"",$1); print $1+0}')
+      git_behind=$(printf '%s\n' "$ab" | awk '{gsub(/[-]/,"",$2); print $2+0}')
     fi
+    # Changed/untracked entries: lines starting with 1, 2, u, or ?.
+    git_dirty=$(printf '%s\n' "$status_v2" | grep -cE '^(1|2|u|\?) ')
+    case "$git_dirty" in ''|*[!0-9]*) git_dirty=0 ;; esac
+
+    # Linked worktree iff git-dir and git-common-dir diverge.
+    is_worktree=0
+    gd=$(git -C "$current_dir" rev-parse --git-dir 2>/dev/null)
+    gcd=$(git -C "$current_dir" rev-parse --git-common-dir 2>/dev/null)
+    [ -n "$gd" ] && [ -n "$gcd" ] && [ "$gd" != "$gcd" ] && is_worktree=1
+
+    git_segment="${CYAN}⎇ ${git_branch}${RESET}"
+    [ "$is_worktree" -eq 1 ] && git_segment="${git_segment} ${MAGENTA}⧉${RESET}"
+    [ "$git_dirty" -gt 0 ] && git_segment="${git_segment} ${YELLOW}±${git_dirty}${RESET}"
+    ab_disp=""
+    [ "$git_ahead"  -gt 0 ] && ab_disp="↑${git_ahead}"
+    [ "$git_behind" -gt 0 ] && ab_disp="${ab_disp}↓${git_behind}"
+    [ -n "$ab_disp" ] && git_segment="${git_segment} ${DIM}${ab_disp}${RESET}"
   fi
 fi
 
-# --- Token counts in thousands (round to nearest 1k) ---
-total_k=$(echo "$total_tokens" | awk '{printf "%d", $1 / 1000 + 0.5}')
-cached_k=$(echo "$cached_tokens" | awk '{printf "%d", $1 / 1000 + 0.5}')
+# ---------------------------------------------------------------------------
+# Context budget segment
+# ---------------------------------------------------------------------------
 size_k=$(( ctx_size / 1000 ))
 
-if [ "$got_transcript" -eq 1 ] && [ "$cached_k" -gt 0 ]; then
-  if [ -n "$expiry_disp" ]; then
-    # Expiry segment gets its own color, then reverts to token_color for the rest.
-    token_display="${total_k}k (${cached_k}k cached · ${expiry_color}${expiry_disp}${RESET}${token_color}) / ${size_k}k"
+if [ -n "$total_tokens" ]; then
+  # Percentage of the *actual* window, so a 1M session is not permanently red.
+  if [ -n "$used_pct" ]; then
+    pct_int=$(awk -v p="$used_pct" 'BEGIN{printf "%d", (p<0?0:p)+0.5}' 2>/dev/null)
   else
-    token_display="${total_k}k (${cached_k}k cached) / ${size_k}k"
+    pct_int=$(awk -v t="$total_tokens" -v s="$ctx_size" \
+      'BEGIN{if(s>0) printf "%d", t*100/s+0.5; else print 0}' 2>/dev/null)
   fi
+  case "$pct_int" in ''|*[!0-9]*) pct_int=0 ;; esac
+
+  if   [ "$pct_int" -lt 75 ]; then token_color="$GREEN"
+  elif [ "$pct_int" -lt 90 ]; then token_color="$YELLOW"
+  else                             token_color="$RED"
+  fi
+
+  total_k=$(awk -v t="$total_tokens" 'BEGIN{printf "%d", t/1000 + 0.5}')
+  token_display="${total_k}k"
+
+  # --- Cache detail, from the prompt_cache block (v2.1.251+) --------------
+  cache_bits=()
+  if [ -n "$cached_tokens" ] && [ "$cached_tokens" -gt 0 ] 2>/dev/null; then
+    cached_k=$(awk -v c="$cached_tokens" 'BEGIN{printf "%d", c/1000 + 0.5}')
+    [ "$cached_k" -gt 0 ] && cache_bits+=("${cached_k}k cached")
+  fi
+
+  if [ "$pc_present" -eq 1 ]; then
+    if [ "$pc_warm" -eq 1 ] && [ -n "$pc_expires" ]; then
+      exp_clock=$(date -r "$pc_expires" +%H:%M 2>/dev/null)
+      [ -z "$exp_clock" ] && exp_clock=$(date -d "@$pc_expires" +%H:%M 2>/dev/null)
+      if [ -n "$exp_clock" ]; then
+        remain=$(( pc_expires - $(date +%s) ))
+        if   [ "$remain" -le 0 ];  then exp_color="$RED"
+        elif [ "$remain" -le 60 ]; then exp_color="$YELLOW"
+        else                            exp_color="$GREEN"
+        fi
+        cache_bits+=("${exp_color}exp ${exp_clock}${RESET}${token_color}")
+      fi
+    elif [ "$pc_warm" -eq 0 ]; then
+      cache_bits+=("${RED}cold${RESET}${token_color}")
+    fi
+
+    if [ -n "$pc_hit" ]; then
+      hit_pct=$(awk -v h="$pc_hit" 'BEGIN{printf "%d", h*100 + 0.5}' 2>/dev/null)
+      case "$hit_pct" in ''|*[!0-9]*) hit_pct="" ;; esac
+      if [ -n "$hit_pct" ]; then
+        if [ -n "$pc_misses" ] && [ "$pc_misses" -gt 0 ]; then
+          cache_bits+=("${hit_pct}% hit ${YELLOW}${pc_misses} miss${RESET}${token_color}")
+        else
+          cache_bits+=("${hit_pct}% hit")
+        fi
+      fi
+    fi
+  fi
+
+  if [ "${#cache_bits[@]}" -gt 0 ]; then
+    joined="${cache_bits[0]}"
+    for ((i = 1; i < ${#cache_bits[@]}; i++)); do
+      joined="${joined} · ${cache_bits[$i]}"
+    done
+    token_display="${token_display} (${joined})"
+  fi
+
+  token_display="${token_display} / ${size_k}k"
 else
-  token_display="${total_k}k / ${size_k}k"
+  # No context signal yet (first turn, or right after /compact).
+  token_color="$DIM"
+  token_display="—k / ${size_k}k"
 fi
 
 # --- Effort / output style label ---
-effort=$(echo "$input" | jq -r '.effort.level // ""')
-style=$(echo "$input" | jq -r '.output_style.name // ""')
-
 if [ -n "$effort" ]; then
   extra=" ${effort}"
 elif [ -n "$style" ] && [ "$style" != "default" ]; then
@@ -222,8 +270,7 @@ else
   extra=""
 fi
 
-# --- Output (single line) ---
-# Build model+dir segment
+# --- Output (two rows) ---
 if [ -n "$dir_display" ]; then
   left="${model_name}  ${dir_display}"
 else
@@ -236,11 +283,20 @@ else
   session_segment=""
 fi
 
-# Row 1 — location: model + dir + git/worktree segment (git_segment carries its own colors)
-line1="${DIM}${left}${RESET}"
-[ -n "$git_segment" ] && line1="${line1}  ${git_segment}"
+# Row 1 — location: model + dir + git/worktree segment.
+line1=""
+[ -n "$left" ] && line1="${DIM}${left}${RESET}"
+if [ -n "$git_segment" ]; then
+  [ -n "$line1" ] && line1="${line1}  "
+  line1="${line1}${git_segment}"
+fi
 
-# Row 2 — session state: context budget (usage-colored) + effort/style + session id
+# Row 2 — session state: context budget + cache detail + effort/style + session id.
 line2="${token_color}${token_display}${RESET}${DIM}${extra}${session_segment}${RESET}"
 
-printf '%s\n%s\n' "$line1" "$line2"
+# A payload we could not parse at all still renders row 2 rather than a blank row.
+if [ -n "$line1" ]; then
+  printf '%s\n%s\n' "$line1" "$line2"
+else
+  printf '%s\n' "$line2"
+fi

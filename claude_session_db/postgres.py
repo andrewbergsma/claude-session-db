@@ -453,6 +453,55 @@ INSERT INTO model_pricing (model_pattern, input_per_mtok, output_per_mtok, effec
     ('claude-3-opus',     15, 75, '2024-02-01', 'Opus 3 list price')
 ON CONFLICT (model_pattern) DO NOTHING;
 
+-- Claude 5 family (schema v9). Added when a 30-day scan found 234K assistant
+-- messages on claude-opus-5 / -sonnet-5 / -fable-5 / -fable-5-1 priced by NO
+-- pattern at all, i.e. counted as `unpriced` and silently missing from every
+-- cost rollup.
+--
+-- These rates are NOT taken from a price list — they are SOLVED from Claude
+-- Code's own `cost-state` records, which carry per-model {inputTokens,
+-- outputTokens, cacheReadInputTokens, cacheCreationInputTokens, costUSD}. Least
+-- squares over those observations reproduces every sampled row to the cent:
+--   sonnet-5    $2/$10   read 0.10x  write 1.25x   (16/16 rows exact)
+--   fable-5-1   $10/$50  read 0.025x write 2.00x   (7/7 rows exact)
+--   fable-5     $10/$50  read 0.10x                (write blends 5m/1h)
+--   opus-5      $5/$25   read 0.10x                (e.g. 705 in + 73 out +
+--                        90,544 cache-write = $0.571250 exactly at 5/25/1.25x)
+-- The 0.025 cache-read multiplier ($0.25/MTok) is a **Fable 5.1-only** change;
+-- fable-5, opus-5 and sonnet-5 all measure at the standard 0.10x. Applying
+-- 0.025 across the family would under-report cache reads ~4x, and cache reads
+-- are the dominant term in an agentic transcript.
+--
+-- Cache WRITE multipliers keep the table defaults (1.25x 5m / 2.0x 1h): the
+-- view already splits writes by TTL from ephemeral_5m/1h_tokens, so it prices
+-- each bucket correctly where the transcript records the split.
+--
+-- FAST MODE IS NOT DISTINGUISHABLE FROM THE TRANSCRIPT. Opus 5 fast mode bills
+-- at $10/$50 rather than $5/$25, but `usage.speed` is absent on ~36% of
+-- assistant records and the model string is identical either way — so ONE FLAT
+-- RATE PER MODEL applies here and a fast-mode-heavy session under-reports.
+-- (`messages.speed` is archived; a future view can lens it.)
+--
+-- The `[1m]` long-context variant (`claude-opus-5[1m]` in cost-state) matches
+-- the same LIKE prefix. As documented above, the view does not model a
+-- long-context premium.
+INSERT INTO model_pricing (model_pattern, input_per_mtok, output_per_mtok,
+                           cache_read_mult, effective_from, notes) VALUES
+    ('claude-opus-5',    5, 25, 0.10,  '2026-01-01', 'Opus 5 (solved from cost-state; fast mode bills 10/50 but is not distinguishable)'),
+    ('claude-sonnet-5',  2, 10, 0.10,  '2026-01-01', 'Sonnet 5 (solved from cost-state, exact on 16/16 rows)'),
+    ('claude-fable-5',  10, 50, 0.10,  '2026-01-01', 'Fable 5 (solved from cost-state; standard 0.10x cache read)'),
+    ('claude-fable-5-1',10, 50, 0.025, '2026-01-01', 'Fable 5.1 — cache reads $0.25/MTok (0.025x), exact on 7/7 rows'),
+    ('claude-mythos-5',  10, 50, 0.10,  '2026-01-01', 'Mythos 5 — same tier/price as Fable 5 (not yet observed locally)'),
+    ('claude-mythos-5-1',10, 50, 0.025, '2026-01-01', 'Mythos 5.1 — same tier/price as Fable 5.1 (not yet observed locally)'),
+    -- Correction, same measurement method: the pre-existing `claude-opus-4`
+    -- row prices ALL Opus 4.x at 15/75, but Opus 4.6/4.7/4.8 are 5/25 (an
+    -- opus-4-8 cost-state row fits 5/25/1.25x exactly). These longer patterns
+    -- win the length ordering; the 15/75 row still covers Opus 4.0-4.5.
+    ('claude-opus-4-6',  5, 25, 0.10,  '2025-11-01', 'Opus 4.6 — 5/25, not the 15/75 Opus 4.x row'),
+    ('claude-opus-4-7',  5, 25, 0.10,  '2026-01-01', 'Opus 4.7 — 5/25, not the 15/75 Opus 4.x row'),
+    ('claude-opus-4-8',  5, 25, 0.10,  '2026-01-01', 'Opus 4.8 — 5/25 (solved from cost-state, exact)')
+ON CONFLICT (model_pattern) DO NOTHING;
+
 INSERT INTO service_tier_pricing (service_tier, multiplier, notes) VALUES
     ('standard', 1.0, 'default interactive tier'),
     ('priority', 1.0, 'same per-token list price; committed throughput billed separately'),

@@ -729,21 +729,45 @@ Indexes: `idx_tr_message`, `_tool_use`, `_error`, `_error_class` (partial),
 
 Injected context attachments (`type: "attachment"`).
 
-| Column | Type | Null | Source |
-|---|---|---|---|
-| `uuid` | text | no | `uuid` (PK) |
-| `session_id`, `parent_uuid` | text | yes | `sessionId`, `parentUuid` |
-| `ts` | timestamptz | yes | `timestamp` |
-| `attachment_type` | text | yes | `attachment.type` — e.g. `deferred_tools_delta` |
-| `attachment` | jsonb | yes | the whole `attachment` object (variable shape) |
-| `is_sidechain` | boolean | yes | `isSidechain` |
-| `source_file` / `source_line` | text / integer | no / yes | derived |
+**Grain** one row per `attachment` record. **PK** `uuid`. **Writer**
+`sync.py::SessionSync`. **Idempotence** `ON CONFLICT (uuid) DO NOTHING` plus a
+per-`source_file` DELETE.
+
+| Column | Type | Null | Source | Since |
+|---|---|---|---|---|
+| `uuid` | text | no | `uuid` (PK) | |
+| `session_id`, `parent_uuid` | text | yes | `sessionId`, `parentUuid` | |
+| `ts` | timestamptz | yes | `timestamp` | |
+| `attachment_type` | text | yes | `attachment.type` — e.g. `deferred_tools_delta` | |
+| `attachment` | jsonb | yes | the whole `attachment` object (variable shape) | |
+| `is_sidechain` | boolean | yes | `isSidechain` | |
+| `source_file` | text | no | `parsed` | |
+| `source_line` | integer | yes | — | always NULL |
+| `raw` | jsonb | yes | the whole record | **v10** |
+
+> ### ⚠ Through v9 this is the lossiest table in the archive
+>
+> `attachments` keeps the `attachment` object and **nothing else**. Everything
+> the record carries around it is discarded on ingest and is not recoverable
+> from the database: `cwd`, `gitBranch`, `version`, `entrypoint`, `userType`
+> (present on 100% of records), `slug`, `agentId`, `sessionKind`. There is no
+> `raw` column to fall back on.
+>
+> **v10 adds `attachments.raw`**, which closes this. Rows written before v10 stay
+> lossy until their source file is re-synced.
+
+**41 distinct `attachment_type` values** are observed. The dated census is in
+[Appendix A](#attachment-type-distribution-2026-09-02-live-db) — it is a peer of
+the `system_events` subtype list, and just as load-bearing for knowing what
+Claude Code actually injects.
 
 Indexes: `idx_att_session`, `_type`, `_source_file`.
 
 ### `system_events`
 
-`type: "system"` records, one row each. PK `uuid`.
+**Grain** one row per `type: "system"` record. **PK** `uuid`. **Writer**
+`sync.py::SessionSync`. **Idempotence** `ON CONFLICT (uuid) DO NOTHING` plus a
+per-`source_file` DELETE.
 
 | Column | Type | Null | Source |
 |---|---|---|---|
@@ -762,14 +786,14 @@ Indexes: `idx_att_session`, `_type`, `_source_file`.
 | `error_status` / `error_type` / `error_message` | integer / text / text | yes | `error.*` (`api_error`) |
 | `retry_in_ms` / `retry_attempt` / `max_retries` | double / integer / integer | yes | `retryInMs`, `retryAttempt`, `maxRetries` |
 | `is_sidechain`, `slug` | boolean, text | yes | universal |
-| `source_file` / `source_line` | text / integer | no / yes | derived |
+| `source_file` | text | no | `parsed` |
+| `source_line` | integer | yes | — (always NULL) |
 | `raw` | jsonb | yes | the whole record |
 
-Observed subtypes (30-day scan): `turn_duration` (4,998), `stop_hook_summary`
-(4,957 — **returned** after the Jun-2026 audit recorded it as gone),
-`compact_boundary` (103), `informational` (70), `local_command` (40),
-`model_refusal_fallback` (4), `bridge_status` (4), `model_consent_fallback` (2).
-Subtype-specific fields with no column are listed in §8.
+Eleven subtypes are observed archive-wide; the dated census, with first- and
+last-seen dates, is in
+[Appendix A](#system_events-subtype-census-2026-09-02-live-db).
+Subtype-specific fields with no column are listed in [§8](#8-raw-only-fields).
 
 Indexes: `idx_sys_session`, `_subtype`, `_source_file`.
 
@@ -777,15 +801,22 @@ Indexes: `idx_sys_session`, `_subtype`, `_source_file`.
 
 `file-history-snapshot` records and their tracked files.
 
-**`file_history`** — `snapshot_id` (PK, BIGSERIAL), `session_id`, `message_id`
-(`messageId`), `snapshot_message_id` (`snapshot.messageId`), `ts`
-(`snapshot.timestamp`), `file_count`, `has_backups`, `is_snapshot_update`
-(`isSnapshotUpdate`), `source_file`, `source_line`.
+**`file_history`** — **grain** one row per snapshot record; **PK** `snapshot_id`
+(BIGSERIAL); **writer** `sync.py::SessionSync`; **idempotence** cleared by
+`source_file` before re-insert (`file_backups` goes with it via CASCADE).
+Columns: `session_id`, `message_id` (`messageId`), `snapshot_message_id`
+(`snapshot.messageId`), `ts` (`snapshot.timestamp`), `file_count`,
+`has_backups`, `is_snapshot_update` (`isSnapshotUpdate`), `source_file`,
+`source_line` (always NULL). **Keeps promoted columns only — there is no `raw`,**
+so any field Claude Code adds to this record type is dropped.
 
-**`file_backups`** — `backup_id` (PK), `snapshot_id` (FK, ON DELETE CASCADE),
-`file_path` (the key of `trackedFileBackups`), `backup_file_name`,
-`content_hash` (derived: the part of `backupFileName` before `@`), `version`,
-`backup_time`.
+**`file_backups`** — **grain** one row per tracked file within a snapshot;
+**PK** `backup_id` (BIGSERIAL); **writer** `sync.py::SessionSync`;
+**idempotence** none of its own — it exists and disappears with its parent.
+Columns: `snapshot_id` (**FK** → `file_history` `ON DELETE CASCADE` — one of the
+four declared FKs in the schema), `file_path` (the key of
+`trackedFileBackups`), `backup_file_name`, `content_hash` (`parsed`: the part of
+`backupFileName` before `@`), `version`, `backup_time`.
 
 Indexes: `idx_fh_session`, `_source_file`; `idx_fb_snapshot`, `_path`.
 
@@ -794,22 +825,33 @@ Indexes: `idx_fh_session`, `_source_file`; `idx_fb_snapshot`, `_path`.
 
 ### `queue_operations`
 
-`queue-operation` records: `operation_id` (PK), `session_id`, `ts`, `operation`
+**Grain** one row per `queue-operation` record. **PK** `operation_id`
+(BIGSERIAL). **Writer** `sync.py::SessionSync`. **Idempotence** cleared by
+`source_file` before re-insert. Columns: `session_id`, `ts`, `operation`
 (`operation`), `content` (`content`, present ~50% — on enqueue), `source_file`,
-`source_line`. Indexes: `idx_qo_session`, `_source_file`.
+`source_line` (always NULL). **Promoted columns only, no `raw`.**
+**v10** additionally stores each `queue-operation` verbatim in
+`session_records`, so the record stops being lossy.
+Indexes: `idx_qo_session`, `_source_file`.
 
 ### `pr_links`
 
-`pr-link` records: `pr_link_id` (PK), `session_id`, `pr_number` (`prNumber`),
-`pr_url` (`prUrl`), `pr_repository` (`prRepository`), `ts`, `source_file`,
-`source_line`. Indexes: `idx_pr_session`, `_source_file`.
+**Grain** one row per `pr-link` record. **PK** `pr_link_id` (BIGSERIAL).
+**Writer** `sync.py::SessionSync`. **Idempotence** cleared by `source_file`
+before re-insert. Columns: `session_id`, `pr_number` (`prNumber`), `pr_url`
+(`prUrl`), `pr_repository` (`prRepository`), `ts`, `source_file`, `source_line`
+(always NULL). **Promoted columns only, no `raw`.**
+Indexes: `idx_pr_session`, `_source_file`.
 
 ### `agent_tasks`
 
-`started` / `result` agent-lifecycle records, keyed by the content hash `key`
-(`v2:<sha256>`): `key` (PK), `agent_id` (`agentId`), `started` (boolean —
+**Grain** one row per `started` / `result` agent-lifecycle record, collapsed on
+the content hash. **PK** `key` (`v2:<sha256>`). **Writer** `sync.py::SessionSync`.
+**Idempotence** a **true upsert** on `key` (later content wins), plus a
+per-`source_file` DELETE. Columns: `agent_id` (`agentId`), `started` (boolean —
 `type == "started"`), `result` (jsonb — the arbitrary `result` payload),
-`source_file`. Indexes: `idx_at_agent`, `_source_file`.
+`source_file`. **Promoted columns only** — the `result` payload has a hatch, the
+record around it does not. Indexes: `idx_at_agent`, `_source_file`.
 
 ### `task_outputs`
 
@@ -817,15 +859,20 @@ Background-task outputs swept from `/private/tmp/claude-<uid>/<proj>/<sid>/
 tasks/*.output`. That scratchpad is wiped on reboot, so **this table is their
 only durable copy.**
 
+**Grain** one row per `(session, task)`. **PK** `(session_id, task_name)`.
+**Writer** `cli.py sweep` (not the JSONL ingest path — this table has no
+`source_file` and is never cleared by one). **Idempotence** upsert gated on
+`file_mtime_ns`: an unchanged file is skipped, a changed one overwrites.
+
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
-| `session_id`, `task_name` | text | no | derived | composite PK |
+| `session_id`, `task_name` | text | no | `parsed` (from the path) | composite PK |
 | `content` | text | yes | file contents | verbatim, bounded at 5 MB with a truncation note |
-| `char_count` | integer | yes | derived | |
-| `truncated` | boolean | yes | derived | |
+| `char_count` | integer | yes | `parsed` | |
+| `truncated` | boolean | yes | `parsed` | |
 | `file_size`, `file_mtime_ns` | bigint | yes | `stat()` | mtime is the idempotence check |
-| `source_path` | text | yes | derived | |
-| `captured_at` | timestamptz | no | derived | |
+| `source_path` | text | yes | `parsed` | |
+| `captured_at` | timestamptz | no | `default` | |
 
 Symlinks resolving into `~/.claude/projects` are skipped: their target IS a
 subagent transcript the archive already holds losslessly.
@@ -834,23 +881,35 @@ subagent transcript the archive already holds losslessly.
 
 **The catch-all.** Session-scoped record types with no dedicated table, kept
 verbatim. Before v9 these were parsed into `records["unknown"]` and then
-dropped — nothing read that list, which is how eleven record types added between
-Claude Code v2.1.161 and v2.1.258 disappeared in silence.
+dropped — nothing read that list, which is how **ten** record types added
+between Claude Code v2.1.161 and v2.1.258 disappeared in silence.
+
+**Grain** one row per source line. **PK** `(source_file, source_line)`.
+**Writer** `sync.py::SessionSync`. **Idempotence** a **true upsert** on the PK,
+plus a per-`source_file` DELETE.
 
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
 | `session_id` | text | yes | `sessionId` (or the owning session) | |
 | `record_type` | text | no | `type` | |
-| `ts` | timestamptz | yes | `timestamp` or `ts` | **NULL for the seven types that carry no time** — never invented |
-| `agent_id` | text | yes | `agentId` | `fork-context-ref` and other agent-scoped types |
-| `is_modelled` | boolean | no | derived | `true` = a known type routed here; `false` = a type csd has NEVER seen |
+| `ts` | timestamptz | yes | `timestamp` or `ts` | **NULL for the types that carry no time** — never invented |
+| `agent_id` | text | yes | `agentId` | in practice **only `fork-context-ref` carries it** |
+| `is_modelled` | boolean | no | `parsed` | `true` = a known type routed here; `false` = a type csd has NEVER seen |
 | `payload` | jsonb | no | the whole record | **verbatim** |
-| `source_file` | text | no | derived | |
-| `source_line` | integer | no | derived | 1-based line number |
+| `source_file` | text | no | `parsed` | |
+| `source_line` | integer | no | `parsed` | 1-based line number — **the only table where this is populated** |
 
-**PK `(source_file, source_line)`.** These records carry no uuid, and a
-transcript is append-only, so file+line is the natural key. The table is also in
+**Why file+line is the key.** These records carry no uuid, and a transcript is
+append-only, so file+line is the natural key. The table is also in
 `PER_FILE_TABLES`, so a re-sync clears before re-inserting.
+
+> **v10 widens what lands here.** `bridge-session`, `queue-operation`,
+> `last-prompt` and the seven latest-wins metadata types (`ai-title`,
+> `last-prompt`, `mode`, `permission-mode`, `bridge-session`, `agent-name`,
+> `custom-title`) are **additionally** stored verbatim in `session_records`, so
+> their history survives the latest-wins column. They keep their modelled route
+> and are **not** counted as unmodelled — `is_modelled` stays `true` and the
+> tripwire below does not fire on them.
 
 `is_modelled = false` is the standing tripwire:
 
@@ -868,16 +927,32 @@ Indexes: `idx_sr_session`, `_type`, `_ts`, `_unmodelled` (partial).
 
 ## 5. `session_records` payload dictionary
 
-The ten record types routed here, with the fields observed in a 30-day scan of
-2,015 files. Counts are from that window. Fields marked *(derived)* also feed a
-`sessions` column.
+The ten record types routed here through v9, with the fields observed in a
+30-day scan of 2,015 files. Counts are from that window and are restated
+archive-wide in
+[Appendix A](#session_records-types-on-disk-2026-09-02-full-archive-scan).
+Fields marked *(derived)* also feed a `sessions` column.
+
+> Through v9, **1,373 of the 9,074 such records on disk** are in the table —
+> see the [v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+> **v10** adds four more source types to this table (above), which are modelled
+> elsewhere and stored here for history.
 
 ### `atis-latch` — 6,077
 
 | Field | Type | Notes |
 |---|---|---|
-| `atis` | string | 16-hex latch token |
+| `atis` | string | **Three distinct shapes, not one** — see below |
 | `sessionId` | string | |
+
+`atis` is not simply a latch token. Three shapes occur, and **all three co-occur
+within a single `ccVersion`**, so the shape is not a version marker:
+
+| Shape | Share | Example form |
+|---|---|---|
+| empty string | 56% | `""` |
+| 16-hex | 12% | `a1b2c3d4e5f60718` |
+| capability token | 32% | `v1.<16hex>.<16ch>.<8hex>.<base64url>` |
 
 ### `worktree-state` — 816
 
@@ -894,12 +969,19 @@ The ten record types routed here, with the fields observed in a 30-day scan of
 | `worktreeSession.sessionId` | string | |
 | `sessionId` | string | authoritative over the nested copy |
 
+`worktreeSession` is **`object | null`**; it is null on **38%** of these records,
+which is a worktree **EXIT**. The 8-key table above is the *created-worktree*
+shape; from **2.1.226** an *entered-existing* shape also appears, carrying the
+first six keys plus `enteredExisting: true` and **omitting** `originalBranch`
+and `originalHeadCommit`. See
+[`sessions.worktree_session`](#relocation-and-worktree-binding--schema-v9).
+
 ### `relocated` — 733
 
 | Field | Type | Notes |
 |---|---|---|
 | `sessionId` | string | |
-| `relocatedCwd` | string | *(derived → `sessions.current_cwd`)*. Emitted by `/cd` (v2.1.169) and worktree moves |
+| `relocatedCwd` | string | *(derived → `sessions.current_cwd`)*. Emitted by `/cd` (v2.1.169) and worktree moves. **The latest `relocated` beats a later record `cwd`** in 1 of the 18 files carrying both |
 
 ### `file-history-delta` — 638
 
@@ -911,7 +993,7 @@ owning session is supplied at sync time.
 | `messageId` | string (uuid) | |
 | `snapshotMessageId` | string (uuid) | |
 | `trackingPath` | string | absolute path of the tracked file |
-| `backup` | object | `{backupFileName, version, backupTime, realParentDir}`; `backupFileName` may be null |
+| `backup` | object | `{backupFileName, version, backupTime, realParentDir}`. **`realParentDir` is optional** (617 of 638); **`backupFileName` is null on 66%** |
 | `timestamp` | string (ISO) | → `session_records.ts` |
 
 ### `history-suppression` — 291
@@ -919,8 +1001,8 @@ owning session is supplied at sync time.
 | Field | Type | Notes |
 |---|---|---|
 | `sessionId` | string | |
-| `cause` | string | e.g. `restored_owner_mismatch` |
-| `vetoedAgainstAccountUuid` | string (uuid) | present on ~4% |
+| `cause` | string | `migration` **96%**, `restored_owner_mismatch` **4%** — only two values observed |
+| `vetoedAgainstAccountUuid` | string (uuid) | present **iff** `cause = restored_owner_mismatch`, i.e. the same 4%. The two travel together |
 | `ts` | string (ISO) | → `session_records.ts` (note: `ts`, not `timestamp`) |
 
 ### `frame-link` — 241
@@ -941,8 +1023,8 @@ Claude Code's own running cost ledger. All fields *(derived)* except as noted.
 | Field | Type | Notes |
 |---|---|---|
 | `sessionId` | string | |
-| `totalCostUSD` | number | → `sessions.reported_cost_usd` |
-| `modelUsage` | object | `{<model>: {inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, webSearchRequests, costUSD}}`. Model keys include the long-context form `claude-opus-5[1m]` |
+| `totalCostUSD` | number | → `sessions.reported_cost_usd`. **int or float** — do not assume a decimal point |
+| `modelUsage` | object | `{<model>: {inputTokens, outputTokens, cacheReadInputTokens, cacheCreationInputTokens, webSearchRequests, costUSD}}`, plus **`thinkingTokens` (int) from 2.1.257**. Model keys include the long-context form `claude-opus-5[1m]`, which **never appears in `messages.model`** (verified: 0 rows) and bills at the identical 5 / 25 / 0.10 / 1.25 rates as plain `claude-opus-5` — verified to the cent |
 | `hasUnknownModelCost` | boolean | → `sessions.has_unknown_model_cost` |
 | `totalDuration` | integer (ms) | → `reported_total_duration_ms` |
 | `totalAPIDuration` | integer (ms) | → `reported_api_duration_ms` |
@@ -961,7 +1043,7 @@ Claude Code's own running cost ledger. All fields *(derived)* except as noted.
 |---|---|---|
 | `type`, `v` | string, integer | `v` = payload schema version (1) |
 | `sessionId`, `accountUuid` | string | |
-| `artifacts` | object | `{<artifact-uuid>: {savedAt, stampHighWater, everBaselined, everHadThreads, turnTimestamps[], threads[]}}` |
+| `artifacts` | object | `{<artifact-uuid>: {savedAt, stampHighWater, everBaselined, everHadThreads, turnTimestamps[], threads[]}}`. Locally **`stampHighWater` is always null and `threads` always `[]`** — the shape exists but has never been exercised here |
 
 ### `artifact-comment-monitor` — 20
 
@@ -973,14 +1055,21 @@ Claude Code's own running cost ledger. All fields *(derived)* except as noted.
 
 ### `fork-context-ref` — 8
 
-Observed **only in sidechain files**. All fields *(derived)*.
+Observed **only in sidechain files**, and only for **fork-type dispatches** — 8
+of 1,856 sidechain files in the scan. All fields *(derived)*. First observed at
+**2.1.232**.
 
 | Field | Type | Notes |
 |---|---|---|
-| `agentId` | string (17-hex) | → `sessions.fork_agent_id` |
+| `agentId` | string (17-hex) | → `sessions.fork_agent_id`. **This is the only record type that populates `session_records.agent_id`** |
 | `parentSessionId` | string (uuid) | → `sessions.forked_from_session_id` |
 | `parentLastUuid` | string (uuid) | → `sessions.forked_from_uuid` |
 | `contextLength` | integer | → `sessions.fork_context_length`; records inherited |
+
+> **The record carries no `sessionId`.** The owning session supplied at sync time
+> is therefore the **parent**, so `session_records.session_id == parentSessionId`
+> for these rows — while `sessions.forked_from_*` land on the **child** row. The
+> two sides of the edge live in different places; do not join them as one.
 
 ---
 
@@ -1313,8 +1402,10 @@ sections above win — they were written against Claude Code v2.1.161-2.1.258 an
 the live catalog.
 
 Known drift since this census: `stop_hook_summary` has **returned** (recorded
-here as gone); `progress` and `summary` remain gone; the eleven record types in
-§5 and the tool families in `tool_labels.py` all postdate it.
+here as gone); `progress` and `summary` remain gone; the **ten** record types in
+§5 and the tool families in `tool_labels.py` all postdate it. `away_summary`,
+`api_error` and `scheduled_task_fire` have since gone quiet — their rows remain,
+so they are legacy, not absent.
 
 ### Record type distribution (2026-06-01)
 
@@ -1377,6 +1468,82 @@ here as gone); `progress` and `summary` remain gone; the eleven record types in
 ### Content-block types (30-day window)
 
 `tool_use` 134,494 · `thinking` 73,827 · `text` 31,076 · `fallback` 4.
+
+**These are ASSISTANT blocks only** — that is what `content_blocks` holds. The
+live table today is `tool_use` 440,550 · `thinking` 220,473 · `text` 184,489 and
+**zero `fallback`**, because the files carrying `fallback` blocks have not been
+re-synced since the v9 parser fix. User-side `image` (606 in 60 days) and
+`document` (31) blocks reach no table at all.
+
+### `system_events` subtype census (2026-09-02, live DB)
+
+Archive-wide, with first- and last-seen dates. `stop_hook_summary` **returned**
+after the Jun-2026 audit recorded it as gone; four subtypes have gone quiet but
+their rows are still here, so they are **legacy, not absent**.
+
+| Subtype | Rows | First | Last | Column coverage |
+|---|---|---|---|---|
+| `turn_duration` | 21,188 | | | `duration_ms`, `message_count` |
+| `stop_hook_summary` | 15,494 | | | **none** — 8 raw-only fields (§8) |
+| `away_summary` | 1,975 | 2026-04-30 | 2026-06-02 | **none** — LEGACY, 0 in the last 60 days |
+| `local_command` | 634 | 2026-04-30 | 2026-09-01 | `content` + `level` |
+| `api_error` | 288 | 2026-05-02 | 2026-06-18 | `error_*`, `retry_*` — LEGACY, 0 in the last 60 days |
+| `bridge_status` | 248 | 2026-05-02 | 2026-08-25 | dedicated `url` column |
+| `scheduled_task_fire` | 237 | 2026-05-02 | 2026-07-08 | **none** — LEGACY, 0 in the last 60 days |
+| `compact_boundary` | 181 | | | `compact_trigger`, `compact_pre_tokens` only — 6 of 8 `compactMetadata` keys are raw-only (§8) |
+| `informational` | 145 | 2026-05-11 | 2026-08-24 | `content` + `level` |
+| `model_consent_fallback` | 10 | | | partial (§8) |
+| `model_refusal_fallback` | 7 | | | partial (§8) |
+
+### Attachment `type` distribution (2026-09-02, live DB)
+
+**41 distinct values** archive-wide. This is the peer of the subtype census
+above: it is the inventory of what Claude Code injects into a context window.
+
+| `attachment_type` | Rows | | `attachment_type` | Rows |
+|---|---|---|---|---|
+| `total_tokens_reminder` | 38,299 | | `read_truncation_notice` | 213 |
+| `output_style` | 19,354 | | `silent_turn_reminder` | 164 |
+| `task_reminder` | 17,424 | | `date` | 141 |
+| `deferred_tools_delta` | 13,267 | | `session_context` | 131 |
+| `skill_listing` | 13,253 | | `invoked_skills` | 87 |
+| `command_permissions` | 3,149 | | `hook_non_blocking_error` | 77 |
+| `batching_reminder_sent` | 2,623 | | `nested_memory` | 71 |
+| `queued_command` | 2,188 | | `task_status` | 61 |
+| `agent_listing_delta` | 2,036 | | `ultra_effort_enter` | 57 |
+| `edited_text_file` | 1,615 | | `plan_mode` | 55 |
+| `mcp_instructions_delta` | 1,553 | | `environment` | 48 |
+| `bash_output_audience_note` | 1,517 | | `plan_mode_exit` | 44 |
+| `date_change` | 1,181 | | `instructions` | 42 |
+| `secondary_reminder_sent` | 780 | | `model` | 34 |
+| `hook_additional_context` | 376 | | `prompt_snapshot` | 28 |
+| `file` | 296 | | `hook_system_message` | 5 |
+| `hook_success` | 293 | | `todo_reminder` | 5 |
+| `auto_mode` | 235 | | `ultra_effort_exit` | 3 |
+| `compact_file_reference` | 222 | | `dynamic_skill` | 3 |
+| | | | `agent_mention` | 2 |
+| | | | `plan_file_reference` | 2 |
+| | | | `workflow_keyword_request` | 1 |
+
+### `session_records` types on disk (2026-09-02, full-archive scan)
+
+`grep` over every `*.jsonl` in `~/.claude/projects` (2,237 files). Compare with
+the 1,373 rows actually in `session_records` — the gap is the
+[v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+
+| Type | On disk |
+|---|---|
+| `atis-latch` | 6,163 |
+| `worktree-state` | 816 |
+| `relocated` | 733 |
+| `file-history-delta` | 636 |
+| `history-suppression` | 291 |
+| `frame-link` | 241 |
+| `cost-state` | 107 |
+| `artifact-autoreact-ledger` | 56 |
+| `artifact-comment-monitor` | 20 |
+| `fork-context-ref` | 9 |
+| **total** | **9,074** |
 
 ### Field frequency on `user` records (2026-06-01)
 

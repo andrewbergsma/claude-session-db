@@ -312,6 +312,10 @@ def _delta_for_row(row: dict[str, Any]) -> DeltaReport:
 _INVENTORY_SQL = """
     SELECT s.session_id, p.project_name, s.cwd, s.git_branch, s.file_path,
            s.message_count, s.created_at,
+           -- schema v9: a background session, a fork, and a session that MOVED
+           -- (a /cd or worktree enter) are all invisible in an inventory keyed
+           -- on the cwd the session started in.
+           s.session_kind, s.current_cwd, s.forked_from_session_id,
            la.last_ts,
            ss.state, ss.reason, ss.kmcp_application, ss.kmcp_path,
            ss.message_count_at_summary, ss.leaf_uuid_at_summary,

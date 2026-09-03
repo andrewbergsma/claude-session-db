@@ -612,6 +612,31 @@ def _fmt_idle(s: int | None) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def _fmt_session_flags(r) -> str:
+    """Compact per-session flags the inventory could not show before schema v9.
+
+    `bg` — sessionKind="bg", a BACKGROUND session. It reads like any other row
+           in an inventory built for open interactive threads, which is exactly
+           why it needs a mark.
+    `mv` — the session RELOCATED (a v2.1.169 `/cd`, or a worktree enter): its
+           current_cwd is not the cwd it was filed under. The PROJECT column is
+           derived from the original, so without this the row points at a
+           directory the session left.
+    `fk` — a fork: it inherited another session's context (fork-context-ref).
+    """
+    flags = []
+    if (r.get("session_kind") or "") == "bg":
+        flags.append("bg")
+    elif r.get("session_kind"):
+        flags.append(str(r["session_kind"])[:3])
+    cur, orig = r.get("current_cwd"), r.get("cwd")
+    if cur and orig and cur != orig:
+        flags.append("mv")
+    if r.get("forked_from_session_id"):
+        flags.append("fk")
+    return "/".join(flags) if flags else "—"
+
+
 def _fmt_agents(r: dict) -> str:
     n = r.get("agents_total") or 0
     if not n:
@@ -657,7 +682,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
     if not rows:
         click.echo(f"No main sessions active in the last {window_days}d.")
         return
-    hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'PROJECT':<20.20} {'BRANCH':<22.22} "
+    hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'FLAGS':<9} {'PROJECT':<20.20} "
+           f"{'BRANCH':<22.22} "
            f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5} {'AGENTS':>8}  "
            f"{'SUMMARY':<12} DELTA")
     click.echo(hdr)
@@ -674,6 +700,7 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         verdict = click.style(f"{r['verdict']:<10}", fg=color) if color \
             else f"{r['verdict']:<10}"
         click.echo(f"{verdict} {r['session_id'][:8]:<8} "
+                   f"{_fmt_session_flags(r):<9} "
                    f"{str(r['project_name'] or ''):<20.20} "
                    f"{str(r['git_branch'] or '—'):<22.22} {last:<12} "
                    f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5} "

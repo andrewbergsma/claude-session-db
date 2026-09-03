@@ -641,6 +641,90 @@ class SessionSync:
 
     # -- session metadata derivation ---------------------------------------
 
+    @staticmethod
+    def _derive_from_session_records(records: dict, ctx_last=None) -> dict:
+        """Derive the schema-v9 `sessions` columns from the generic records.
+
+        Every field here comes from a record type Claude Code added in
+        v2.1.161-258 that csd used to drop. Latest-wins throughout: a
+        transcript is append-only, so the last record of a kind is the current
+        state (a session can relocate more than once, and `cost-state` is
+        rewritten as the session runs).
+
+        `ctx_last` is the LAST conversation record, used as the fallback for
+        current_cwd when the session never emitted a `relocated`.
+        """
+        out: dict = {}
+        latest: dict = {}
+        for rec in records.get("session_record", []):
+            if rec.modelled:
+                latest[rec.kind] = rec.raw
+
+        # -- fork lineage (fork-context-ref, v2.1.212+) --------------------
+        # Replaces the dead `forkedFrom`. Observed only on sidechain files, so
+        # in practice this lands on the child session row.
+        fork = latest.get("fork-context-ref")
+        if fork:
+            out["forked_from_session_id"] = fork.get("parentSessionId")
+            out["forked_from_uuid"] = fork.get("parentLastUuid")
+            length = fork.get("contextLength")
+            out["fork_context_length"] = length if isinstance(length, int) else None
+            out["fork_agent_id"] = fork.get("agentId")
+
+        # -- relocation (relocated, v2.1.169 `/cd`) ------------------------
+        # `cwd` keeps its meaning (where the session STARTED); this is where it
+        # ended up. Without it a /cd'd or worktree-moved session stays filed
+        # under a directory it left hours ago.
+        reloc = latest.get("relocated")
+        current_cwd = reloc.get("relocatedCwd") if reloc else None
+        if not current_cwd and ctx_last is not None:
+            current_cwd = getattr(ctx_last, "cwd", None) or None
+        if current_cwd:
+            out["current_cwd"] = current_cwd
+
+        # -- worktree binding (worktree-state) -----------------------------
+        # Kept verbatim as JSONB: 8 keys today (originalCwd, preEnterOriginalCwd,
+        # worktreePath, worktreeName, worktreeBranch, originalBranch,
+        # originalHeadCommit, sessionId) and the JSONB escape hatch is how this
+        # archive absorbs field drift without a migration.
+        wt = latest.get("worktree-state")
+        if isinstance(wt, dict) and isinstance(wt.get("worktreeSession"), dict):
+            out["worktree_session"] = wt["worktreeSession"]
+
+        # -- Claude Code's own cost ledger (cost-state) --------------------
+        # The harness's number, kept beside csd's computed one so the two can be
+        # compared (v_session_cost_drift) rather than silently disagreeing.
+        cost = latest.get("cost-state")
+        if isinstance(cost, dict):
+            out["cost_state"] = cost
+            out["reported_cost_usd"] = cost.get("totalCostUSD")
+            out["reported_total_duration_ms"] = cost.get("totalDuration")
+            out["reported_api_duration_ms"] = cost.get("totalAPIDuration")
+            out["reported_tool_duration_ms"] = cost.get("totalToolDuration")
+            out["reported_lines_added"] = cost.get("totalLinesAdded")
+            out["reported_lines_removed"] = cost.get("totalLinesRemoved")
+            unknown = cost.get("hasUnknownModelCost")
+            out["has_unknown_model_cost"] = (
+                bool(unknown) if unknown is not None else None)
+
+        return out
+
+    @staticmethod
+    def _derive_session_kind(records: dict) -> Optional[str]:
+        """`sessionKind` ("bg", ...) off any record that carries it.
+
+        Measured CONSTANT per session across user/assistant/attachment/system
+        records (0 of 2 sessions in a 30-day scan carried more than one value),
+        so this is a session attribute and there is deliberately no
+        per-message column.
+        """
+        for bucket in ("user", "assistant", "attachment", "system"):
+            for rec in records.get(bucket, []):
+                kind = (getattr(rec, "raw", None) or {}).get("sessionKind")
+                if kind:
+                    return kind
+        return None
+
     def _upsert_subagent_session(self, records: dict, path: Path,
                                  parent_session_id: str, project_encoded: str,
                                  source_file: str, st) -> None:
@@ -669,7 +753,17 @@ class SessionSync:
         ctx = next((m for m in users + assts), None)
         ts_list = [m.timestamp for m in users + assts if getattr(m, "timestamp", None)]
 
+        # Schema v9. `fork-context-ref` is observed ONLY on sidechain files, so
+        # this is where fork lineage actually lands: a forked subagent inherits
+        # its parent session's context, and these columns say whose and how much.
+        ordered = sorted((m for m in users + assts if getattr(m, "timestamp", None)),
+                         key=lambda m: m.timestamp)
+        derived = self._derive_from_session_records(
+            records, ctx_last=ordered[-1] if ordered else None)
+        derived["session_kind"] = self._derive_session_kind(records)
+
         self.archive.upsert_session({
+            **derived,
             "session_id": f"{parent_session_id}:{agent_id}",
             "project_id": self._project_id_for(project_encoded),
             "file_path": source_file,
@@ -718,7 +812,18 @@ class SessionSync:
         created_at = min(ts_list) if ts_list else None
         modified_at = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
 
+        # Schema v9: fork lineage / relocation / worktree binding / cost-state,
+        # all off record types that used to be dropped. `ctx_last` is the LAST
+        # conversation record — the current_cwd fallback for a session that
+        # moved without emitting a `relocated`.
+        ordered = sorted((m for m in users + assts if getattr(m, "timestamp", None)),
+                         key=lambda m: m.timestamp)
+        derived = self._derive_from_session_records(
+            records, ctx_last=ordered[-1] if ordered else None)
+        derived["session_kind"] = self._derive_session_kind(records)
+
         self.archive.upsert_session({
+            **derived,
             "session_id": session_id,
             "project_id": project_id,
             "file_path": source_file,

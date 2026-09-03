@@ -173,6 +173,72 @@ BEGIN
     END IF;
 END $$;
 
+-- Migration (idempotent, guarded): schema v9 session columns.
+--
+-- All nullable, all additive, none replacing an existing column. Every one is
+-- derived from a record type that used to be DROPPED (see session_records), so
+-- a row only fills in once its transcript is re-synced — `csd ingest --force`
+-- for the back catalogue, the ordinary mtime sweep for live sessions.
+--
+-- Guarded by a single catalog check on the first column so the ACCESS EXCLUSIVE
+-- ALTER fires exactly once, not on every initialize() (DDL off the hot path —
+-- see lesson csd-sweep-idle-in-transaction-lock-convoy). ADD COLUMN with no
+-- default is O(1) in PG11+, so this does not rewrite the heap.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sessions'
+          AND column_name = 'forked_from_session_id'
+    ) THEN
+        ALTER TABLE sessions
+            -- Fork lineage, from `fork-context-ref` (v2.1.212+). Replaces the
+            -- dead `messages.forked_from`, which Claude Code stopped emitting.
+            -- Observed only on SIDECHAIN files, so in practice these land on
+            -- the CHILD session row "<parent>:<agent_id>": a forked subagent
+            -- inherits its parent's context and this says whose, from where,
+            -- and how much.
+            ADD COLUMN forked_from_session_id TEXT,   -- fork-context-ref.parentSessionId
+            ADD COLUMN forked_from_uuid       TEXT,   -- fork-context-ref.parentLastUuid
+            ADD COLUMN fork_context_length    INTEGER,-- fork-context-ref.contextLength (records inherited)
+            ADD COLUMN fork_agent_id          TEXT,   -- fork-context-ref.agentId (the record's own field)
+
+            -- Relocation + worktree binding. `cwd` keeps its meaning exactly —
+            -- the directory the session STARTED in, from its first conversation
+            -- record — because a lot of the archive keys off it (the repos
+            -- lens, project attribution). `current_cwd` is the LAST known one:
+            -- `/cd` (v2.1.169) and worktree moves used to leave a session filed
+            -- under a directory it had long since left.
+            ADD COLUMN current_cwd     TEXT,
+            ADD COLUMN worktree_session JSONB,  -- worktree-state.worktreeSession, verbatim
+
+            -- Claude Code's OWN cost ledger, from the latest `cost-state`
+            -- record. Kept as JSONB (drift-proof, and modelUsage is per-model)
+            -- plus the scalars a comparison view needs. This is the harness's
+            -- number, NEVER csd's — v_session_cost_drift puts the two
+            -- side by side.
+            ADD COLUMN cost_state                JSONB,
+            ADD COLUMN reported_cost_usd         NUMERIC,
+            ADD COLUMN reported_total_duration_ms  BIGINT,
+            ADD COLUMN reported_api_duration_ms    BIGINT,
+            ADD COLUMN reported_tool_duration_ms   BIGINT,
+            ADD COLUMN reported_lines_added        INTEGER,
+            ADD COLUMN reported_lines_removed      INTEGER,
+            ADD COLUMN has_unknown_model_cost      BOOLEAN,
+
+            -- `sessionKind` (e.g. "bg" for a background session). Measured
+            -- CONSTANT per session across every record type that carries it
+            -- (0 of 2 sessions in a 30-day scan showed more than one value),
+            -- so it is a session attribute, not a message one.
+            ADD COLUMN session_kind TEXT;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_sessions_forked_from
+    ON sessions(forked_from_session_id) WHERE forked_from_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_sessions_current_cwd ON sessions(current_cwd);
+CREATE INDEX IF NOT EXISTS idx_sessions_kind
+    ON sessions(session_kind) WHERE session_kind IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS messages (
     uuid        TEXT PRIMARY KEY,
     session_id  TEXT,
@@ -663,7 +729,13 @@ SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        s.parent_session_id, s.agent_id,
        s.own_message_count, s.own_tool_use_count, s.own_error_count,
        s.own_total_input_tokens, s.own_total_output_tokens,
-       s.own_total_cache_read_tokens, s.own_total_cache_creation_tokens
+       s.own_total_cache_read_tokens, s.own_total_cache_creation_tokens,
+       -- schema v9: where the session ENDED UP (a /cd or worktree move used to
+       -- leave it filed under the directory it started in), whether it is a
+       -- background session, its fork parent, and the harness's own cost.
+       s.cwd, s.current_cwd, s.session_kind,
+       s.forked_from_session_id, s.forked_from_uuid, s.fork_context_length,
+       s.worktree_session, s.reported_cost_usd
 FROM sessions s
 LEFT JOIN projects p ON s.project_id = p.project_id
 ORDER BY s.modified_at DESC NULLS LAST;
@@ -934,6 +1006,58 @@ FROM v_message_cost
 GROUP BY 1
 ORDER BY day DESC;
 
+-- ---------------------------------------------------------------------------
+-- v_session_cost_drift (schema v9) — csd's COMPUTED cost vs Claude Code's own
+-- REPORTED cost, per session.
+--
+-- Two independent numbers that ought to agree, and until v9 only one of them
+-- existed. `computed_cost_usd` sums v_message_cost (tokens from the transcript
+-- x the model_pricing rates); `reported_cost_usd` is `cost-state.totalCostUSD`,
+-- the harness's own running total. A gap means one of three things, and the
+-- view is built so you can tell which:
+--   * `unpriced_messages` > 0 — a model with no model_pricing pattern. This is
+--     the failure the Claude 5 seed just fixed, and the reason the view exists.
+--   * fast mode — Opus 5 fast bills 10/50 instead of 5/25 and is NOT
+--     distinguishable from the transcript, so a fast-heavy session reads LOW.
+--   * long-context (>200K) premiums, which the flat per-model rates ignore.
+--
+-- Sessions with no cost-state record yet (never re-synced since v9, or an
+-- older Claude Code) have a NULL reported side and a NULL drift — never a
+-- fake zero.
+CREATE OR REPLACE VIEW v_session_cost_drift AS
+WITH computed AS (
+    SELECT session_id,
+           round(sum(total_cost), 6) AS computed_cost_usd,
+           count(*) AS priced_messages,
+           count(*) FILTER (WHERE unpriced) AS unpriced_messages
+    FROM v_message_cost
+    GROUP BY session_id
+)
+SELECT s.session_id,
+       p.project_name,
+       coalesce(s.custom_title, s.ai_title) AS title,
+       s.modified_at,
+       c.computed_cost_usd,
+       s.reported_cost_usd,
+       round(s.reported_cost_usd - c.computed_cost_usd, 6) AS drift_usd,
+       round(100.0 * (s.reported_cost_usd - c.computed_cost_usd)
+             / nullif(s.reported_cost_usd, 0), 2)           AS drift_pct,
+       c.priced_messages,
+       c.unpriced_messages,
+       s.has_unknown_model_cost,
+       -- the harness's own per-model breakdown, for attributing a drift
+       s.cost_state -> 'modelUsage' AS reported_model_usage,
+       s.reported_total_duration_ms,
+       s.reported_api_duration_ms,
+       s.reported_lines_added,
+       s.reported_lines_removed
+FROM sessions s
+LEFT JOIN computed c ON c.session_id = s.session_id
+LEFT JOIN projects p ON p.project_id = s.project_id
+WHERE NOT s.is_subagent
+  AND (s.reported_cost_usd IS NOT NULL OR c.computed_cost_usd IS NOT NULL)
+ORDER BY abs(coalesce(s.reported_cost_usd, 0) - coalesce(c.computed_cost_usd, 0)) DESC;
+
 -- Phase-4 work queue: pending-only sessions the sweep should summarize next.
 -- This replaces the recent-by-mtime walk (which is ~80% already-summarized —
 -- see claudecode:lesson/recent-by-mtime-backlog-is-mostly-already-summarized).
@@ -1130,7 +1254,19 @@ class SessionArchive:
         "last_prompt_leaf_uuid", "permission_mode", "mode", "bridge_session_id",
         "agent_name", "git_branch", "cwd", "cc_version", "entrypoint",
         "created_at", "modified_at", "message_count",
+        # --- schema v9 (all nullable; COALESCE semantics keep a later file
+        # from wiping a value an earlier one set) ---
+        "forked_from_session_id", "forked_from_uuid", "fork_context_length",
+        "fork_agent_id",
+        "current_cwd", "worktree_session",
+        "cost_state", "reported_cost_usd", "reported_total_duration_ms",
+        "reported_api_duration_ms", "reported_tool_duration_ms",
+        "reported_lines_added", "reported_lines_removed", "has_unknown_model_cost",
+        "session_kind",
     ]
+
+    # Session columns that are JSONB and must be wrapped before being bound.
+    _SESSION_JSONB_COLS = {"worktree_session", "cost_state"}
 
     def _session_upsert_sql(self) -> str:
         cols = self._SESSION_COLS
@@ -1143,12 +1279,17 @@ class SessionArchive:
         return (f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
                 f"ON CONFLICT (session_id) DO UPDATE SET {updates}")
 
+    def _session_values(self, data: dict) -> list:
+        """Bind values for one session row, JSONB columns wrapped."""
+        return [_j(data.get(c)) if c in self._SESSION_JSONB_COLS
+                else scrub(data.get(c))
+                for c in self._SESSION_COLS]
+
     def upsert_session(self, data: dict) -> None:
         """Insert/update a session row. Only non-None values overwrite existing."""
         conn = self.connect()
-        vals = [scrub(data.get(c)) for c in self._SESSION_COLS]
         with conn.cursor() as cur:
-            cur.execute(self._session_upsert_sql(), vals)
+            cur.execute(self._session_upsert_sql(), self._session_values(data))
         conn.commit()
 
     def upsert_sessions(self, rows: list[dict]) -> None:
@@ -1160,8 +1301,7 @@ class SessionArchive:
         conn = self.connect()
         sql = self._session_upsert_sql()
         with conn.cursor() as cur:
-            cur.executemany(sql, [[scrub(r.get(c)) for c in self._SESSION_COLS]
-                                  for r in rows])
+            cur.executemany(sql, [self._session_values(r) for r in rows])
         conn.commit()
 
     # -- batched inserts ----------------------------------------------------

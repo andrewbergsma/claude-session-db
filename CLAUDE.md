@@ -634,7 +634,7 @@ version is **9** (Claude Code v2.1.161-258 impact release, 3.23.0), recorded in
 the `metadata` table and re-applied idempotently by `initialize()`.
 
 **The never-drop convention.** Claude Code adds session-scoped record types
-without warning; eleven arrived between v2.1.161 and v2.1.258 and were parsed
+without warning; ten arrived between v2.1.161 and v2.1.258 and were parsed
 into `records["unknown"]` and dropped, because nothing read that list. Since v9
 there are exactly two legitimate destinations for a new record type:
 

@@ -121,10 +121,13 @@ class SyncStats:
     overflow_results: int = 0
     task_outputs: int = 0
     errors: int = 0
+    # Block/result rows NOT written because their message row is owned by a
+    # different source file (schema v10 cross-file de-duplication).
+    duplicate_rows_skipped: int = 0
 
     # --- the unmodelled-record tripwire -----------------------------------
     # The parser has always collected `records["unknown"]` and nothing has ever
-    # read it, so eleven record types Claude Code added between v2.1.161 and
+    # read it, so the TEN record types Claude Code added between v2.1.161 and
     # v2.1.258 were dropped in silence. These two fields are what makes a NEW
     # record type visible on the next sweep instead of on the next audit.
     # `unknown` counts records; `unknown_types` is the census by type.
@@ -173,6 +176,11 @@ class SyncStats:
             f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
+        if self.duplicate_rows_skipped:
+            out += (f"\n  Duplicate block/result rows skipped: "
+                    f"{self.duplicate_rows_skipped:,}\n"
+                    f"    (their message row is owned by another source file;"
+                    f" see v_duplicate_blocks)")
         if self.unknown:
             out += (f"\n  UNMODELLED record types: {self.unknown:,} records — "
                     f"{self.unknown_census(20)}\n"
@@ -218,7 +226,10 @@ class SessionSync:
         self.verbose = verbose
         self.parser = JSONLParser(self.claude_dir)
         self.archive = SessionArchive(self.dsn)
-        self._project_cache: dict[str, int] = {}
+        # encoded_path -> (project_id, decoded_from) — the provenance is
+        # cached too, so a later file with a real cwd hint can still UPGRADE
+        # a path this run first resolved by guessing (schema v10).
+        self._project_cache: dict[str, tuple[int, str]] = {}
 
     def log(self, msg: str) -> None:
         if self.verbose:
@@ -298,14 +309,26 @@ class SessionSync:
         naive decode fails on every dot-directory and every worktree project,
         and nothing said so.
         """
-        if project_encoded not in self._project_cache:
-            decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
-            if stats is not None and not project_path_is_decodable(project_encoded, decoded):
-                stats.note_undecodable_project(project_encoded)
-            self._project_cache[project_encoded] = self.archive.get_or_create_project(
-                project_encoded, decoded
-            )
-        return self._project_cache[project_encoded]
+        cached = self._project_cache.get(project_encoded)
+        # `decoded_from` is the provenance of the path (schema v10): 'cwd' when
+        # the transcript's own cwd re-encodes to this directory name (ground
+        # truth), else 'encoded' (the naive guess). It is what lets the upsert
+        # UPGRADE a stored guess and never downgrade ground truth.
+        decoded_from = ("cwd" if cwd_hint
+                        and encode_project_path(cwd_hint) == project_encoded
+                        else "encoded")
+        # Re-resolve when this file can do better than the cached resolution:
+        # the run's FIRST file for a project may have had no usable cwd hint,
+        # and caching that guess would suppress the upgrade for the whole run.
+        if cached is not None and (cached[1] == "cwd" or decoded_from == "encoded"):
+            return cached[0]
+        decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
+        if stats is not None and not project_path_is_decodable(project_encoded, decoded):
+            stats.note_undecodable_project(project_encoded)
+        pid = self.archive.get_or_create_project(
+            project_encoded, decoded, decoded_from=decoded_from)
+        self._project_cache[project_encoded] = (pid, decoded_from)
+        return pid
 
     def _sync_file(self, path: Path, is_subagent: bool, stats: SyncStats, force: bool) -> bool:
         source_file = str(path)
@@ -454,6 +477,11 @@ class SessionSync:
                 "is_sidechain": att.is_sidechain,
                 "source_file": source_file,
                 "source_line": None,
+                # schema v10: the whole record. `attachment` is only the
+                # payload sub-object; the record's own top-level fields (cwd,
+                # gitBranch, version, entrypoint, sessionKind, ...) used to be
+                # parsed and then dropped.
+                "raw": att.raw,
             })
 
         for ev in records.get("system", []):
@@ -497,7 +525,7 @@ class SessionSync:
         # The tripwire. `records["unknown"]` is [(line_num, record_type)] for
         # every record type csd has NO handling for at all. It has existed
         # since the first parser and nothing has ever read it, which is how
-        # eleven Claude Code record types were dropped in silence between
+        # ten Claude Code record types were dropped in silence between
         # v2.1.161 and v2.1.258. Counting it here puts a new type on the very
         # next sweep line and on the sweep heartbeat.
         for _line_num, record_type in records.get("unknown", []):
@@ -512,8 +540,37 @@ class SessionSync:
                 "source_file": source_file,
             })
 
-        # Batched inserts
+        # Batched inserts. Messages FIRST: the block/result de-duplication below
+        # asks the archive who owns each message row, and this file's own
+        # messages have to be in place before that question means anything.
         self.archive.insert_messages(msg_rows)
+
+        # De-duplicate across source files (schema v10). `messages` upserts ON
+        # CONFLICT (uuid) DO NOTHING, so a record present in two transcripts
+        # keeps ONE message row — owned by whichever file wrote it first — but
+        # content_blocks/tool_results had no uniqueness and clear_file_data
+        # deletes only by source_file, so the second file appended a SECOND set
+        # of blocks and results. 2.7% of recent assistant messages carried
+        # them, and they inflated sessions.tool_use_count / error_count.
+        #
+        # The rule, consistent with per-file clear semantics: a message's child
+        # rows belong to the file that owns the message row. Rows for a message
+        # owned elsewhere are skipped, not written and not deleted — deleting
+        # them here would destroy rows another file's clear/insert cycle owns.
+        owned_elsewhere = self.archive.message_uuids_owned_elsewhere(
+            [r["message_uuid"] for r in cb_rows] +
+            [r["message_uuid"] for r in tr_rows],
+            source_file,
+        )
+        if owned_elsewhere:
+            n_cb, n_tr = len(cb_rows), len(tr_rows)
+            cb_rows = [r for r in cb_rows if r["message_uuid"] not in owned_elsewhere]
+            tr_rows = [r for r in tr_rows if r["message_uuid"] not in owned_elsewhere]
+            skipped = (n_cb - len(cb_rows)) + (n_tr - len(tr_rows))
+            stats.duplicate_rows_skipped += skipped
+            self.log(f"    skipped {skipped:,} block/result rows for "
+                     f"{len(owned_elsewhere):,} messages owned by another file")
+
         self.archive.insert_content_blocks(cb_rows)
         self.archive.insert_tool_results(tr_rows)
         self.archive.insert_attachments(att_rows)
@@ -635,6 +692,7 @@ class SessionSync:
             "block_type": "", "content": None, "char_count": None, "signature": None,
             "tool_use_id": None, "tool_name": None, "tool_input": None,
             "tool_type": None, "mcp_server": None, "block_payload": None,
+            "caller": None,
             "source_file": source_file, "source_line": None,
         }
         if isinstance(blk, ThinkingBlock):
@@ -653,6 +711,9 @@ class SessionSync:
             row["tool_input"] = blk.input
             row["tool_type"] = blk.tool_type
             row["mcp_server"] = blk.mcp_server
+            # schema v10: verbatim, and NULL when the block carried no caller
+            # at all (parsed since forever, written by nobody until now).
+            row["caller"] = blk.caller.raw or None
         elif isinstance(blk, UnknownBlock):
             # Kept under its OWN type (e.g. "fallback"), payload verbatim. The
             # block used to be dropped, which also shifted every later
@@ -757,6 +818,28 @@ class SessionSync:
     # -- session metadata derivation ---------------------------------------
 
     @staticmethod
+    def _first_prompt(users: list) -> Optional[str]:
+        """The session's first real user prompt, by the v9 classification rule.
+
+        A user record is one of exactly two things — an answer to a tool call,
+        or a prompt — and the only positive evidence for the first is a
+        `tool_result` block (`UserMessage.is_tool_result`). `is_direct_prompt`
+        is NOT that rule: it is True only for bare STRING content, so every
+        prompt carrying an image, a document, or any list-shaped content
+        answered False and was skipped here. `messages.message_type` was fixed
+        for exactly this in v9 (`v9_relabel_list_content_prompts`) and
+        `first_prompt` was left behind on the string-only predicate — 132 of
+        2,684 main sessions carried the wrong first prompt as a result.
+
+        `prompt_text` already joins every text block of a list-shaped prompt in
+        order, so a multi-block prompt is not truncated to its first paragraph.
+        """
+        for u in users:
+            if not u.is_tool_result and not u.is_meta and u.prompt_text:
+                return u.prompt_text
+        return None
+
+    @staticmethod
     def _derive_from_session_records(records: dict, ctx_last=None) -> dict:
         """Derive the schema-v9 `sessions` columns from the generic records.
 
@@ -798,13 +881,37 @@ class SessionSync:
             out["current_cwd"] = current_cwd
 
         # -- worktree binding (worktree-state) -----------------------------
-        # Kept verbatim as JSONB: 8 keys today (originalCwd, preEnterOriginalCwd,
-        # worktreePath, worktreeName, worktreeBranch, originalBranch,
-        # originalHeadCommit, sessionId) and the JSONB escape hatch is how this
-        # archive absorbs field drift without a migration.
+        # THREE payload shapes, all real, all handled:
+        #   a) the full binding — originalCwd, preEnterOriginalCwd,
+        #      worktreePath, worktreeName, worktreeBranch, originalBranch,
+        #      originalHeadCommit, sessionId;
+        #   b) `enteredExisting: true` — the session joined a worktree that
+        #      already existed, so there is no originalBranch/originalHeadCommit
+        #      to record. It is a binding like any other and must not be
+        #      rejected for the missing keys;
+        #   c) `worktreeSession: null` — the EXIT signal, 38% of the records.
+        #
+        # The binding is kept verbatim as JSONB (the escape hatch absorbs field
+        # drift without a migration) and keeps its "last binding ever seen"
+        # meaning. The exit lives in the separate boolean `worktree_active`,
+        # because a COALESCE-ing upsert can never write a null payload and so
+        # could never say a session had LEFT (schema v10; a session that had
+        # ever entered a worktree read as still inside it forever).
+        #
+        # Two different "latest" questions, so two passes: the STATE is the last
+        # worktree-state record of any shape; the BINDING is the last one that
+        # actually carried an object. Taking both off `latest` would drop the
+        # binding the moment a session exited.
         wt = latest.get("worktree-state")
-        if isinstance(wt, dict) and isinstance(wt.get("worktreeSession"), dict):
-            out["worktree_session"] = wt["worktreeSession"]
+        if isinstance(wt, dict) and "worktreeSession" in wt:
+            out["worktree_active"] = isinstance(wt["worktreeSession"], dict)
+            for rec in reversed(records.get("session_record", [])):
+                if rec.kind != "worktree-state":
+                    continue
+                ws = (rec.raw or {}).get("worktreeSession")
+                if isinstance(ws, dict):
+                    out["worktree_session"] = ws
+                    break
 
         # -- Claude Code's own cost ledger (cost-state) --------------------
         # The harness's number, kept beside csd's computed one so the two can be
@@ -830,8 +937,14 @@ class SessionSync:
 
         Measured CONSTANT per session across user/assistant/attachment/system
         records (0 of 2 sessions in a 30-day scan carried more than one value),
-        so this is a session attribute and there is deliberately no
-        per-message column.
+        so this is a session ATTRIBUTE and `sessions.session_kind` is its home.
+
+        `messages.session_kind` exists too (v9 added the column and the
+        `v9_message_effort_usage` backfill filled it from `raw->>'sessionKind'`)
+        — the constancy is what lets `v10_session_kind` recompute the session
+        column from it without re-reading the transcripts. An earlier version
+        of this docstring claimed there was deliberately no per-message column;
+        there is, and the sessions column was the one left NULL on every row.
         """
         for bucket in ("user", "assistant", "attachment", "system"):
             for rec in records.get(bucket, []):
@@ -861,10 +974,9 @@ class SessionSync:
         users = records.get("user", [])
         assts = records.get("assistant", [])
         # The sidechain seed prompt (the Agent dispatch prompt) is the child's
-        # first_prompt — the same shape as a main session's first real prompt.
-        first_prompt = next((u.prompt_text for u in users
-                             if u.is_direct_prompt and not u.is_meta and u.prompt_text),
-                            None)
+        # first_prompt — the same shape as a main session's first real prompt,
+        # and picked by the same v9 rule (see _first_prompt).
+        first_prompt = self._first_prompt(users)
         ctx = next((m for m in users + assts), None)
         ts_list = [m.timestamp for m in users + assts if getattr(m, "timestamp", None)]
 
@@ -905,12 +1017,8 @@ class SessionSync:
         users = records.get("user", [])
         assts = records.get("assistant", [])
 
-        # First real user prompt
-        first_prompt = None
-        for u in users:
-            if u.is_direct_prompt and not u.is_meta and u.prompt_text:
-                first_prompt = u.prompt_text
-                break
+        # First real user prompt (v9 rule — see _first_prompt)
+        first_prompt = self._first_prompt(users)
 
         # Context fields from any conversation record
         ctx = next((m for m in users + assts), None)

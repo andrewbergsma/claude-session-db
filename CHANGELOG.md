@@ -19,9 +19,140 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.0] - 2026-09-02
+
+The **code-defect batch** — schema **v10**. An adversarial review of the live
+archive on 2026-09-02 found eight defects: duplicated child rows, a predicate
+the v9 relabel had already rejected, two never-populated columns, three fields
+dropped on ingest, a frozen project path and a silently incomplete cost view.
+All schema changes are additive and idempotent; no existing row is deleted or
+rewritten outside a documented resumable backfill. Full schema reference:
+[`DATA_MODEL.md`](DATA_MODEL.md).
+
+### Fixed
+- **`content_blocks` / `tool_results` no longer duplicate across source files.**
+  `messages` inserts `ON CONFLICT (uuid) DO NOTHING`, so a record present in two
+  transcripts keeps ONE message row — but the child tables have no uniqueness
+  and `clear_file_data` deletes only by `source_file`, so the second file
+  appended a SECOND set of blocks and results beside the first (2.7% of recent
+  assistant messages; 3,339 duplicated `(message_uuid, tool_use_id)` pairs
+  across 300 recent sessions). Ingest now **skips** block/result rows for a
+  message whose row is owned by a different file — skip, not delete, because
+  deleting by `message_uuid` would destroy rows another file's per-file
+  clear/insert cycle owns and they would not come back until that file's mtime
+  changed. `SyncStats.duplicate_rows_skipped` reports it.
+- **`sessions.first_prompt` uses the v9 prompt rule.** `sync` still picked it
+  with `u.is_direct_prompt` — the STRING-ONLY predicate the v9 relabel had
+  already rejected — so a session whose first prompt carried an image, a
+  document or any list-shaped content stored the *second* prompt, or none: 132
+  of 2,684 main sessions. Both derivation sites (main session and sidechain
+  child) now share `SessionSync._first_prompt`, which classifies on the
+  `tool_result`-block rule and takes `prompt_text` (every text block, in order).
+  New resumable backfill **`v10_first_prompt`** recomputes the history from
+  `messages` — per-session, `IS DISTINCT FROM`-guarded, main sessions only
+  (refresh child rows with `csd backfill-subagents`).
+- **`sessions.session_kind` is populated.** v9 added the column to both
+  `messages` and `sessions`, backfilled only `messages`, and left the sessions
+  column NULL on every row in the archive. New resumable backfill
+  **`v10_session_kind`** sets it from the constant `messages.session_kind`
+  where the session column IS NULL (never overwriting a value ingest derived).
+  `sync._derive_session_kind`'s docstring — which claimed there was
+  deliberately no per-message column — is corrected.
+- **`sessions.worktree_active` (new column) — the worktree EXIT is recordable.**
+  `worktree-state` signals leaving a worktree with `worktreeSession: null` (38%
+  of the records in the live archive) and the session upsert COALESCEs, so the
+  null could never clear `worktree_session`: a session that had ever entered a
+  worktree read as still inside it forever. The state now lives in an explicit
+  boolean — NULL = no `worktree-state` record ever seen, `true` = the last one
+  carried a session object, `false` = the last one was null — written
+  last-observation-wins via the new `_SESSION_LAST_WINS_COLS` rule rather than
+  COALESCE. `worktree_session` is unchanged and keeps its "last binding ever
+  seen" meaning. The second payload shape (`enteredExisting: true`, with no
+  `originalBranch`/`originalHeadCommit`) is accepted as a binding like any
+  other. Both columns are exposed on `v_session_overview`.
+- **`projects.decoded_path` no longer freezes at the first insert.**
+  `get_or_create_project`'s conflict path updated only `last_seen_at`, so a
+  project first seen without a usable `cwd` hint kept the naive (and for every
+  dot-directory and worktree project, wrong) decode forever. A new nullable
+  **`projects.decoded_from`** ('cwd' | 'encoded' | NULL = pre-v10) records the
+  provenance; a `cwd`-derived path now upgrades a stored guess, and a guess
+  never overwrites anything — the upgrade is strictly one-way. The per-run
+  project cache remembers the provenance too, so a later file with a real hint
+  can upgrade within the same sync. `encoded_path` remains the unique key.
+- **`sessions.tool_use_count` / `error_count` count identities, not rows.**
+  `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
+  `block_id` fallback so an id-less block is not silently dropped by
+  `count(DISTINCT)`) and `DISTINCT (message_uuid, tool_use_id)` for errors, on
+  both the main-session and the child-session statement. The aggregates are
+  therefore correct despite the historical duplicates.
+
+### Added
+- **`attachments.raw` (new column).** Every other conversation-flow table keeps
+  the whole record in a `raw` JSONB escape hatch; `attachments` kept only the
+  promoted columns plus the `attachment` sub-object, so the record's own
+  top-level fields (`cwd`, `gitBranch`, `version`, `userType`, `entrypoint`,
+  `sessionKind`, …) were parsed and dropped. Nullable, filled on ingest and by
+  a re-sync. **No backfill is possible** — the data was never written.
+- **Promoted-but-lossy record types are archived verbatim too.** A record type
+  with a dedicated destination could still lose data: `bridge-session` kept only
+  `bridgeSessionId` (dropping `lastSequenceNum`, `ownerAccountUuid`,
+  `ownerOrganizationUuid`, `noHistoryBackfill`), `queue-operation.reason` and
+  `last-prompt.explicit` had no column, and the seven latest-wins
+  session-metadata types (`ai-title`, `custom-title`, `last-prompt`, `mode`,
+  `permission-mode`, `bridge-session`, `agent-name`) collapse onto one
+  `sessions` column so every earlier value existed only in the JSONL. All eight
+  types (`SESSION_RECORD_ALSO_ARCHIVED`) now ALSO land in `session_records`,
+  verbatim, `is_modelled = true` — an addition to the promoted columns, never a
+  replacement, and invisible to the unmodelled census. Still exactly one
+  `session_records` row per JSONL line, so `(source_file, source_line)` remains
+  the key.
+- **`content_blocks.caller` (new column).** `ToolUseBlock` has always parsed
+  `tool_use.caller`, and `sync._content_block_row` never wrote it — dropped on
+  100% of tool_use blocks. Now stored verbatim as JSONB (NULL when the block
+  carried no `caller` at all, so "the transcript said direct" stays
+  distinguishable from "the transcript said nothing"), deliberately unindexed.
+  New resumable backfill **`v10_content_block_caller`** recovers the history
+  from `messages.raw`, matching on `tool_use_id` rather than `block_index` —
+  the pre-v9 dropped-block bug shifted historical indexes, so the index does
+  not address the raw array.
+- **`v_token_cost_daily` reports what it could not price.** New `messages`,
+  `priced_messages` and `unpriced_messages` columns, matching
+  `v_token_cost_by_model`. An unpriced row (no `model_pricing` pattern) yields
+  NULL cost terms that `sum()` silently skips, so the daily rollup — the one
+  `csd usage` reports from — read as a complete total while omitting spend.
+  **No cost arithmetic changed.** The `v_message_cost` DDL comment now names
+  `write_untiered_tokens`, the column the lump-`cache_creation` paragraph was
+  about.
+- **`v_duplicate_blocks`** — the historical duplication made visible:
+  `(message_uuid, session_id, kind, source_files, row_count)` for every message
+  whose blocks or results span more than one `source_file`. Historical
+  duplicates are **not** deleted automatically; the operator cleanup recipe
+  (batched, `LIMIT 20000`, delete only rows whose `source_file` differs from the
+  owning message's) is documented beside the view definition in `postgres.py`.
+
+### Changed
+- **"eleven" record types reconciled to ten** in `sync.py`, the tripwire tests
+  and `CLAUDE.md` — `SESSION_RECORD_TYPES` has always had ten members, and the
+  3.23.0 entry above is corrected to match.
+- **The `fallback` content block is dated to v2.1.215**, its first observation
+  in the corpus, not v2.1.247 (the release csd happened to notice it in).
+
+### Migration note
+- v10 is applied by `initialize()` like every other version: guarded
+  `ALTER … IF NOT EXISTS`-shaped DDL, then the resumable `BACKFILLS`. Nothing
+  is dropped, truncated or deleted; the only permitted deletes remain the
+  per-file `clear_file_data` path.
+- **Running v10 DDL against a database a v9 process still sweeps**: park
+  `metadata.views_version` at `9` until the v10 code is merged. v9's
+  `CREATE OR REPLACE VIEW v_token_cost_daily` cannot drop the three columns
+  v10 adds ("cannot drop columns from view"), so a v9 `initialize()` that
+  decides to re-run its view DDL will raise and fail the sweep. With
+  `views_version = 9` the v9 sweep skips view DDL entirely, and the merged v10
+  code recreates the views on its next run (9 ≠ 10).
+
 ## [3.23.0] - 2026-09-02
 
-The **Claude Code v2.1.161-258 impact release** — schema **v9**. Eleven record
+The **Claude Code v2.1.161-258 impact release** — schema **v9**. Ten record
 types, six model families, a fork mechanism and a `/cd` had arrived in the
 transcripts since the last audit, and the archive was silently poorer for all of
 them. Full schema reference: [`DATA_MODEL.md`](DATA_MODEL.md).

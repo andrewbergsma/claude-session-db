@@ -29,10 +29,12 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 9  # + session_records catch-all, fork/relocation/worktree/cost-state
-                    #   session columns, messages.effort/session_kind, usage sub-fields,
-                    #   Claude 5 pricing, prompt/tool_result relabel. See DATA_MODEL.md
-                    #   "Migration history".
+SCHEMA_VERSION = 10  # v9 + the 2026-09-02 code-defect batch: cross-file block/
+                     #   result de-duplication (+ v_duplicate_blocks), DISTINCT
+                     #   aggregates, sessions.worktree_active, attachments.raw,
+                     #   content_blocks.caller, projects.decoded_from, priced/
+                     #   unpriced counts on v_token_cost_daily, and the
+                     #   v10_* backfills. See DATA_MODEL.md "Migration history".
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -104,6 +106,36 @@ CREATE TABLE IF NOT EXISTS projects (
     last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_projects_name ON projects(project_name);
+
+-- Migration (idempotent, guarded): schema v10 `projects.decoded_from`.
+--
+-- `decoded_path` / `project_name` froze at whatever the FIRST insert guessed:
+-- the conflict path updated only `last_seen_at`, so a project first seen
+-- without a usable `cwd` hint kept the naive decode forever, even after a later
+-- transcript supplied ground truth. The encoding maps both `/` and `.` to `-`
+-- and is not invertible, so that guess is wrong for every dot-directory and
+-- every worktree project.
+--
+-- `decoded_from` records HOW the stored path was obtained, which is what makes
+-- a safe upgrade possible:
+--
+--   'cwd'      the transcript's own cwd re-encodes to this directory name —
+--              ground truth, the only reliable inversion available
+--   'encoded'  the naive decode — a guess
+--   NULL       recorded before v10; provenance unknown, treated as a guess
+--
+-- A 'cwd' value overwrites; an 'encoded' guess never overwrites anything.
+-- Never a downgrade.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'projects'
+          AND column_name = 'decoded_from'
+    ) THEN
+        ALTER TABLE projects ADD COLUMN decoded_from TEXT;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS sessions (
     session_id   TEXT PRIMARY KEY,
@@ -233,6 +265,39 @@ BEGIN
             ADD COLUMN session_kind TEXT;
     END IF;
 END $$;
+-- Migration (idempotent, guarded): schema v10 session columns.
+--
+-- `worktree_active` — the worktree EXIT signal, which was unrecordable.
+-- `worktree-state` carries `worktreeSession: null` when a session LEAVES its
+-- worktree (38% of the records in the live archive), and the session upsert
+-- COALESCEs, so a null payload could never clear `worktree_session`: once a
+-- session had entered a worktree the archive said it was still in one, forever.
+-- Encoding the state as a boolean makes the exit expressible:
+--
+--   NULL   no `worktree-state` record has ever been seen for this session
+--   true   the LAST such record carried a worktreeSession object (in a worktree)
+--   false  the LAST such record carried `worktreeSession: null` (exited)
+--
+-- Written last-wins (see `_SESSION_LAST_WINS_COLS`), NOT "first non-null wins";
+-- `worktree_session` deliberately keeps its old meaning — the last BINDING ever
+-- seen — so the path/branch of the worktree the session was in is not lost when
+-- it leaves.
+--
+-- Guarded by a catalog check so the ACCESS EXCLUSIVE ALTER fires once, not on
+-- every sweep tick.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sessions'
+          AND column_name = 'worktree_active'
+    ) THEN
+        ALTER TABLE sessions ADD COLUMN worktree_active BOOLEAN;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_sessions_worktree_active
+    ON sessions(worktree_active) WHERE worktree_active IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_sessions_forked_from
     ON sessions(forked_from_session_id) WHERE forked_from_session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_current_cwd ON sessions(current_cwd);
@@ -355,7 +420,7 @@ BEGIN
             --                    prices the whole message at the top-level model
             --                    and therefore mis-prices a fallback turn; the
             --                    array is archived so a future view can split it.
-            --                    (Same event as the v2.1.247 `fallback` CONTENT
+            --                    (Same event as the v2.1.215 `fallback` CONTENT
             --                    BLOCK — recorded twice, in two places.)
             --   iteration_count  jsonb_array_length(iterations); 1 normally,
             --                    >1 exactly when a fallback occurred.
@@ -410,13 +475,36 @@ CREATE INDEX IF NOT EXISTS idx_cb_tool ON content_blocks(tool_name);
 CREATE INDEX IF NOT EXISTS idx_cb_tool_use_id ON content_blocks(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_cb_source_file ON content_blocks(source_file);
 
+-- Migration (idempotent, guarded): schema v10 `content_blocks.caller`.
+--
+-- `jsonl_records.ToolUseBlock` has always parsed `tool_use.caller` into a
+-- `ToolUseCaller`, and `sync._content_block_row` never wrote it — so it was
+-- dropped on 100% of tool_use blocks. Kept VERBATIM as JSONB (the value is
+-- `{"type":"direct"}` on every block in the corpus today, which is exactly the
+-- kind of field that suddenly is not).
+--
+-- Deliberately UNINDEXED: one value covers ~100% of rows, so an index on it
+-- would be paid for on every insert and used by nothing. Add one when a query
+-- needs it.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'content_blocks'
+          AND column_name = 'caller'
+    ) THEN
+        ALTER TABLE content_blocks ADD COLUMN caller JSONB;
+    END IF;
+END $$;
+
 -- Migration (idempotent, guarded): schema v9 content-block payload.
 --
 -- `parse_content_block` returned None for any block type it did not recognise,
 -- and sync skips a None — so an unrecognised block was DROPPED, and every later
 -- block in the same message shifted down one `block_index`, silently corrupting
--- the ordering of the blocks that WERE kept. Claude Code v2.1.247's `fallback`
--- block ({"type":"fallback","from":{"model":…},"to":{"model":…}} — a
+-- the ordering of the blocks that WERE kept. Claude Code's `fallback` block
+-- (first observed at v2.1.215) —
+-- {"type":"fallback","from":{"model":…},"to":{"model":…}}, a
 -- server-side model fallback, precisely what a cost or reliability lens wants)
 -- went that way. Unknown blocks are now stored under their REAL block_type with
 -- the payload verbatim here.
@@ -467,6 +555,25 @@ CREATE TABLE IF NOT EXISTS attachments (
     source_file TEXT NOT NULL,
     source_line INTEGER
 );
+-- Migration (idempotent, guarded): schema v10 `attachments.raw`.
+--
+-- Every other conversation-flow table keeps the whole record in a `raw` JSONB
+-- escape hatch; `attachments` kept only the promoted columns plus the
+-- `attachment` sub-object, so an attachment record's own top-level fields
+-- (cwd, gitBranch, version, userType, entrypoint, sessionKind, and whatever
+-- Claude Code adds next) were parsed and then dropped. Nullable, filled on
+-- ingest going forward and by a re-sync; NOT backfillable — the data was never
+-- written, so there is nothing in the archive to recover it from.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'attachments'
+          AND column_name = 'raw'
+    ) THEN
+        ALTER TABLE attachments ADD COLUMN raw JSONB;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_att_session ON attachments(session_id);
 CREATE INDEX IF NOT EXISTS idx_att_type ON attachments(attachment_type);
 CREATE INDEX IF NOT EXISTS idx_att_source_file ON attachments(source_file);
@@ -917,6 +1024,138 @@ BACKFILLS = [
                    (SELECT count(*) FROM upd)    AS updated
         """,
     },
+    {
+        # `sync._upsert_session` picked first_prompt with `u.is_direct_prompt`
+        # — the STRING-ONLY predicate the v9 relabel had already rejected — so
+        # a session whose first prompt carried an image, a document, or any
+        # list-shaped content got the wrong one (or none): 132 of 2,684 main
+        # sessions. The code now uses the v9 rule; this recomputes the history
+        # from `messages` (whose message_type IS the v9 rule, and which v9's
+        # own relabel backfill already corrected) rather than re-reading 2,000
+        # JSONL files.
+        #
+        # Per-session and idempotent: the earliest non-meta, non-sidechain
+        # prompt wins, and the UPDATE is IS DISTINCT FROM-guarded, so a session
+        # whose stored value already agrees is not rewritten. Main sessions
+        # only — a CHILD row ("<parent>:<agent>") does not match
+        # messages.session_id; refresh those with `csd backfill-subagents`.
+        "key": "v10_first_prompt",
+        "desc": "sessions.first_prompt: recomputed with the v9 prompt rule",
+        "sql": """
+            WITH batch AS (
+                SELECT session_id, is_subagent, first_prompt FROM sessions
+                WHERE session_id > %(after)s ORDER BY session_id LIMIT %(limit)s
+            ), want AS (
+                SELECT b.session_id, m.prompt_text
+                FROM batch b
+                JOIN LATERAL (
+                    SELECT prompt_text FROM messages
+                    WHERE session_id = b.session_id
+                      AND role = 'user' AND message_type = 'prompt'
+                      AND NOT is_meta AND NOT is_sidechain
+                      AND prompt_text IS NOT NULL
+                    ORDER BY ts NULLS LAST, uuid
+                    LIMIT 1
+                ) m ON true
+                WHERE NOT b.is_subagent
+            ), upd AS (
+                UPDATE sessions s SET first_prompt = w.prompt_text
+                FROM want w
+                WHERE s.session_id = w.session_id
+                  AND s.first_prompt IS DISTINCT FROM w.prompt_text
+                RETURNING 1
+            )
+            SELECT (SELECT max(session_id) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)        AS scanned,
+                   (SELECT count(*) FROM upd)          AS updated
+        """,
+    },
+    {
+        # v9 added `session_kind` to BOTH messages and sessions and backfilled
+        # only messages, so `sessions.session_kind` was NULL on every row in the
+        # archive — the column existed, the index existed, and nothing ever
+        # answered "which sessions are background sessions?".
+        #
+        # `sessionKind` is CONSTANT per session (measured across every record
+        # type that carries it), which is what makes this recoverable from
+        # `messages` instead of a re-parse. Fills only where the session column
+        # IS NULL — it never overwrites a value ingest derived.
+        # `content_blocks.caller` is new in v10, and content_blocks are only
+        # ever rewritten by a re-sync of their source file — so without this,
+        # the column would stay NULL on the whole back catalogue. It IS
+        # recoverable: `messages.raw` holds the assistant record verbatim,
+        # caller and all.
+        #
+        # Matched on tool_use_id, NOT on block_index. Before v9 an unrecognised
+        # content block was dropped and every LATER block in the message shifted
+        # down one index, so the historical `block_index` does not reliably
+        # address the raw array; `tool_use_id` is stable and unique within a
+        # message either way.
+        #
+        # The CASE around jsonb_array_elements is load-bearing: a set-returning
+        # function in a LATERAL is evaluated before the WHERE clause could
+        # filter non-array content, and `jsonb_array_elements` on a string
+        # errors out.
+        "key": "v10_content_block_caller",
+        "desc": "content_blocks.caller from messages.raw (matched on tool_use_id)",
+        "sql": """
+            WITH batch AS (
+                SELECT uuid, raw FROM messages
+                WHERE uuid > %(after)s ORDER BY uuid LIMIT %(limit)s
+            ), blk AS (
+                SELECT b.uuid AS message_uuid,
+                       e->>'id'    AS tool_use_id,
+                       e->'caller' AS caller
+                FROM batch b,
+                     LATERAL jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(b.raw->'message'->'content') = 'array'
+                              THEN b.raw->'message'->'content'
+                              ELSE '[]'::jsonb END) e
+                WHERE e->>'type' = 'tool_use'
+                  AND e ? 'caller'
+                  AND coalesce(e->>'id', '') <> ''
+            ), upd AS (
+                UPDATE content_blocks cb SET caller = blk.caller
+                FROM blk
+                WHERE cb.message_uuid = blk.message_uuid
+                  AND cb.tool_use_id  = blk.tool_use_id
+                  AND cb.block_type   = 'tool_use'
+                  AND cb.caller IS NULL
+                RETURNING 1
+            )
+            SELECT (SELECT max(uuid) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)  AS scanned,
+                   (SELECT count(*) FROM upd)    AS updated
+        """,
+    },
+    {
+        "key": "v10_session_kind",
+        "desc": "sessions.session_kind from the constant messages.session_kind",
+        "sql": """
+            WITH batch AS (
+                SELECT session_id, session_kind FROM sessions
+                WHERE session_id > %(after)s ORDER BY session_id LIMIT %(limit)s
+            ), want AS (
+                SELECT b.session_id, m.session_kind
+                FROM batch b
+                JOIN LATERAL (
+                    SELECT session_kind FROM messages
+                    WHERE session_id = b.session_id AND session_kind IS NOT NULL
+                    LIMIT 1
+                ) m ON true
+                WHERE b.session_kind IS NULL
+            ), upd AS (
+                UPDATE sessions s SET session_kind = w.session_kind
+                FROM want w
+                WHERE s.session_id = w.session_id
+                  AND s.session_kind IS NULL
+                RETURNING 1
+            )
+            SELECT (SELECT max(session_id) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)        AS scanned,
+                   (SELECT count(*) FROM upd)          AS updated
+        """,
+    },
 ]
 
 
@@ -945,7 +1184,10 @@ SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        -- background session, its fork parent, and the harness's own cost.
        s.cwd, s.current_cwd, s.session_kind,
        s.forked_from_session_id, s.forked_from_uuid, s.fork_context_length,
-       s.worktree_session, s.reported_cost_usd
+       -- schema v10: worktree_session is the last BINDING ever seen;
+       -- worktree_active is the current STATE (null = never in one, false =
+       -- left it — the exit COALESCE could never express).
+       s.worktree_session, s.worktree_active, s.reported_cost_usd
 FROM sessions s
 LEFT JOIN projects p ON s.project_id = p.project_id
 ORDER BY s.modified_at DESC NULLS LAST;
@@ -1134,7 +1376,10 @@ ORDER BY last_activity DESC NULLS LAST;
 --     NULL cost terms (sum() skips them) and are counted via `unpriced` so the
 --     rollups never silently undercount.
 --   * writes recorded only as a lump cache_creation (legacy rows lacking the
---     ephemeral 5m/1h split) are priced at the 5m rate (the API default TTL).
+--     ephemeral 5m/1h split) surface as `write_untiered_tokens` and are priced
+--     at the 5m rate (the API default TTL). They are folded into the
+--     `cache_write_5m_*` terms in this view and in every rollup over it, so
+--     `write_untiered_tokens` is reported but never billed separately.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW v_message_cost AS
 WITH base AS (
@@ -1204,9 +1449,23 @@ GROUP BY model
 ORDER BY total_cost DESC NULLS LAST;
 
 -- Daily spend (caching lens), USD.
-CREATE OR REPLACE VIEW v_token_cost_daily AS
+--
+-- schema v10: `messages` / `priced_messages` / `unpriced_messages`, matching
+-- v_token_cost_by_model. An unpriced row (no model_pricing pattern — a
+-- non-Anthropic model, or a new Claude family before its rates are seeded)
+-- contributes NULL cost terms that sum() silently skips, so this view read as
+-- a complete daily total while quietly omitting spend. It now says so.
+-- No cost arithmetic changed.
+--
+-- DROP first, per this file's convention for a view whose column list grows:
+-- CREATE OR REPLACE cannot reconcile new columns against an older definition.
+DROP VIEW IF EXISTS v_token_cost_daily;
+CREATE VIEW v_token_cost_daily AS
 SELECT date_trunc('day', ts)::date AS day,
        count(DISTINCT session_id) AS sessions,
+       count(*) AS messages,
+       count(*) FILTER (WHERE NOT unpriced) AS priced_messages,
+       count(*) FILTER (WHERE unpriced) AS unpriced_messages,
        round(sum(input_cost), 4)                              AS input_cost,
        round(sum(cache_write_5m_cost + cache_write_1h_cost), 4) AS cache_write_cost,
        round(sum(cache_read_cost), 4)                         AS cache_read_cost,
@@ -1298,6 +1557,73 @@ LEFT JOIN projects p ON p.project_id = s.project_id
 WHERE NOT s.is_subagent
   AND (s.reported_cost_usd IS NOT NULL OR c.computed_cost_usd IS NOT NULL)
 ORDER BY abs(coalesce(s.reported_cost_usd, 0) - coalesce(c.computed_cost_usd, 0)) DESC;
+
+-- ---------------------------------------------------------------------------
+-- v_duplicate_blocks (schema v10) — the HISTORICAL cross-file duplication of a
+-- message's content_blocks / tool_results, made visible.
+--
+-- `messages` inserts ON CONFLICT (uuid) DO NOTHING, so a record present in two
+-- transcripts (a resumed/forked session re-writing the same uuids, a sidechain
+-- copied into a second file) yields ONE message row. `content_blocks` and
+-- `tool_results` have no uniqueness at all and `clear_file_data` deletes only by
+-- `source_file`, so the SECOND file's blocks/results were appended beside the
+-- first file's — 2.7% of recent assistant messages, 3,339 duplicated
+-- (message_uuid, tool_use_id) pairs across 300 recent sessions. That inflated
+-- sessions.tool_use_count / error_count.
+--
+-- Since v10 the ingest path no longer creates these (sync skips block/result
+-- rows for a message whose row is owned by a DIFFERENT source_file), and
+-- recompute_session_aggregates counts DISTINCT tool_use_id / distinct error
+-- rows so the aggregates are right despite the history. Nothing is deleted
+-- automatically: existing duplicates are data, and a bulk DELETE is exactly the
+-- long-transaction shape that once convoyed this database for ~9h.
+--
+-- OPERATOR CLEANUP RECIPE (deliberate, off the sweep's hot path, in batches —
+-- run it yourself when you want the heap back; keep the row owned by the file
+-- that owns the message row):
+--
+--   -- 1. Look before you delete.
+--   SELECT kind, count(*) AS messages, sum(row_count) AS rows
+--   FROM v_duplicate_blocks GROUP BY 1;
+--
+--   -- 2. Delete, in bounded batches, only the rows whose source_file is NOT
+--   --    the one that owns the message. Repeat until it reports 0.
+--   WITH doomed AS (
+--       SELECT cb.block_id
+--       FROM content_blocks cb
+--       JOIN messages m ON m.uuid = cb.message_uuid
+--       WHERE cb.source_file <> m.source_file
+--       LIMIT 20000
+--   )
+--   DELETE FROM content_blocks c USING doomed d WHERE c.block_id = d.block_id;
+--   -- (same shape for tool_results, keyed result_id)
+--
+--   -- 3. Then re-run aggregates:  csd query "SELECT 1"  is not enough —
+--   --    use `csd ingest` (which ends in recompute_session_aggregates), or
+--   --    call SessionArchive.recompute_session_aggregates() directly.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_duplicate_blocks AS
+SELECT message_uuid, session_id, kind, source_files, row_count
+FROM (
+    SELECT cb.message_uuid,
+           min(cb.session_id)                 AS session_id,
+           'content_blocks'::text             AS kind,
+           count(DISTINCT cb.source_file)     AS source_files,
+           count(*)                           AS row_count
+    FROM content_blocks cb
+    GROUP BY cb.message_uuid
+    HAVING count(DISTINCT cb.source_file) > 1
+    UNION ALL
+    SELECT tr.message_uuid,
+           min(tr.session_id),
+           'tool_results'::text,
+           count(DISTINCT tr.source_file),
+           count(*)
+    FROM tool_results tr
+    GROUP BY tr.message_uuid
+    HAVING count(DISTINCT tr.source_file) > 1
+) d
+ORDER BY row_count DESC, message_uuid;
 
 -- Phase-4 work queue: pending-only sessions the sweep should summarize next.
 -- This replaces the recent-by-mtime walk (which is ~80% already-summarized —
@@ -1427,11 +1753,12 @@ class SessionArchive:
     def run_backfills(self, max_seconds: float = BACKFILL_MAX_SECONDS,
                       batch_rows: int = BACKFILL_BATCH_ROWS,
                       log=None) -> dict:
-        """Advance the one-time schema-v9 data backfills. Bounded and resumable.
+        """Advance the one-time schema data backfills. Bounded and resumable.
 
-        Walks the messages PK in committed batches (see the BACKFILLS comment
-        for why it is not one big UPDATE), spending at most `max_seconds` per
-        call. A backfill that reaches the end of the table is marked `done` in
+        Walks a table's PK in committed batches (`messages.uuid` or
+        `sessions.session_id` — whichever the backfill's own SQL orders by; see
+        the BACKFILLS comment for why it is not one big UPDATE), spending at
+        most `max_seconds` per call. A backfill that reaches the end of the table is marked `done` in
         `metadata` and never walked again; one that runs out of budget resumes
         from its stored cursor on the next sweep tick.
 
@@ -1554,18 +1881,75 @@ class SessionArchive:
             )
         conn.commit()
 
+    def message_uuids_owned_elsewhere(self, uuids: list[str],
+                                      source_file: str) -> set[str]:
+        """Of `uuids`, those whose `messages` row belongs to a DIFFERENT file.
+
+        The de-duplication seam (schema v10). `messages` inserts ON CONFLICT
+        (uuid) DO NOTHING, so a record present in two transcripts keeps the row
+        the FIRST file wrote — but `content_blocks` / `tool_results` had no
+        uniqueness, and `clear_file_data` deletes only by `source_file`, so the
+        second file appended a second set of blocks/results beside the first.
+
+        Chosen fix: SKIP, not delete-then-insert-by-message_uuid. Deleting by
+        message_uuid inside this file's transaction would remove rows another
+        file OWNS (rows that file's own `clear_file_data` is responsible for),
+        breaking the per-file clear invariant the whole ingest path rests on —
+        and those rows would then never come back until that other file's mtime
+        changed. Skipping keeps exactly one rule: a message's child rows belong
+        to the file that owns the message row, and are rewritten only when THAT
+        file is re-synced.
+        """
+        if not uuids:
+            return set()
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT uuid FROM messages "
+                "WHERE uuid = ANY(%s) AND source_file IS DISTINCT FROM %s",
+                (list({u for u in uuids if u}), source_file),
+            )
+            return {r[0] for r in cur.fetchall()}
+
     # -- projects / sessions ------------------------------------------------
 
-    def get_or_create_project(self, encoded_path: str, decoded_path: str) -> int:
+    def get_or_create_project(self, encoded_path: str, decoded_path: str,
+                              decoded_from: str = "encoded") -> int:
+        """Upsert a project row, UPGRADING a guessed path when ground truth arrives.
+
+        `decoded_from` is 'cwd' when `decoded_path` came from a transcript's own
+        `cwd` (which re-encodes to this exact directory name — the only reliable
+        inversion of an encoding that maps both `/` and `.` to `-`), else
+        'encoded' for the naive decode.
+
+        The conflict path used to update only `last_seen_at`, so the FIRST
+        insert's guess was permanent: a project first seen without a usable cwd
+        hint kept `/Users/andrew//claude` forever even after a later transcript
+        said otherwise. Now a 'cwd' resolution overwrites the stored path and
+        name, and an 'encoded' guess never overwrites anything — the upgrade is
+        one-way, so this can never downgrade ground truth back to a guess.
+        `encoded_path` remains the unique key and is never derived.
+        """
         conn = self.connect()
         name = Path(decoded_path).name
         with conn.cursor() as cur:
             cur.execute(
-                """INSERT INTO projects(encoded_path, decoded_path, project_name)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (encoded_path) DO UPDATE SET last_seen_at = now()
+                """INSERT INTO projects(encoded_path, decoded_path, project_name,
+                                        decoded_from)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (encoded_path) DO UPDATE SET
+                     last_seen_at = now(),
+                     decoded_path = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN EXCLUDED.decoded_path
+                                         ELSE projects.decoded_path END,
+                     project_name = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN EXCLUDED.project_name
+                                         ELSE projects.project_name END,
+                     decoded_from = CASE WHEN EXCLUDED.decoded_from = 'cwd'
+                                         THEN 'cwd'
+                                         ELSE projects.decoded_from END
                    RETURNING project_id""",
-                (encoded_path, decoded_path, name),
+                (encoded_path, decoded_path, name, decoded_from),
             )
             pid = cur.fetchone()[0]
         conn.commit()
@@ -1586,17 +1970,37 @@ class SessionArchive:
         "reported_api_duration_ms", "reported_tool_duration_ms",
         "reported_lines_added", "reported_lines_removed", "has_unknown_model_cost",
         "session_kind",
+        # --- schema v10 (last-wins, see _SESSION_LAST_WINS_COLS) ---
+        "worktree_active",
     ]
 
     # Session columns that are JSONB and must be wrapped before being bound.
     _SESSION_JSONB_COLS = {"worktree_session", "cost_state"}
 
+    # Columns whose STATE can legitimately go back to a "negative" value, so
+    # first-non-null-wins is wrong for them. `worktree_active` is the case that
+    # forced this: leaving a worktree is signalled by `worktreeSession: null`,
+    # and under COALESCE-only semantics an exit could never be recorded (see
+    # the v10 migration comment). The derivation emits a value ONLY for a file
+    # that actually observed a `worktree-state` record, so the write is
+    # last-observation-wins rather than blind last-writer-wins: a re-upsert
+    # from a source with no such record (the subagent backfill, a second file)
+    # leaves the stored state alone instead of erasing it.
+    _SESSION_LAST_WINS_COLS = {"worktree_active"}
+
     def _session_upsert_sql(self) -> str:
         cols = self._SESSION_COLS
         # COALESCE(EXCLUDED.col, sessions.col) so a later file lacking a field
-        # doesn't wipe a value an earlier file set.
+        # doesn't wipe a value an earlier file set. The last-wins columns are
+        # written by explicit rule instead: the newly OBSERVED value replaces
+        # the stored one, including a `false` that a COALESCE-shaped rule would
+        # be indistinguishable from but a future non-boolean column would not.
         updates = ", ".join(
-            f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})" for c in cols if c != "session_id"
+            (f"{c}=CASE WHEN EXCLUDED.{c} IS NOT NULL THEN EXCLUDED.{c} "
+             f"ELSE sessions.{c} END"
+             if c in self._SESSION_LAST_WINS_COLS
+             else f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})")
+            for c in cols if c != "session_id"
         )
         placeholders = ", ".join(["%s"] * len(cols))
         return (f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "
@@ -1657,9 +2061,10 @@ class SessionArchive:
         cols = ["message_uuid", "session_id", "block_index", "block_type", "content",
                 "char_count", "signature", "tool_use_id", "tool_name", "tool_input",
                 "tool_type", "mcp_server", "source_file", "source_line",
-                "block_payload"]   # schema v9: verbatim payload of an unknown block
+                "block_payload",   # schema v9: verbatim payload of an unknown block
+                "caller"]          # schema v10: tool_use.caller, verbatim
         self._batch_insert("content_blocks", cols, rows,
-                           {"tool_input", "block_payload"})
+                           {"tool_input", "block_payload", "caller"})
 
     def insert_tool_results(self, rows: list[dict]) -> None:
         cols = ["message_uuid", "session_id", "tool_use_id", "content_text", "tldr",
@@ -1668,9 +2073,11 @@ class SessionArchive:
         self._batch_insert("tool_results", cols, rows, {"tool_use_result"})
 
     def insert_attachments(self, rows: list[dict]) -> None:
+        # schema v10: `raw` — the whole record, like every other flow table.
         cols = ["uuid", "session_id", "parent_uuid", "ts", "attachment_type",
-                "attachment", "is_sidechain", "source_file", "source_line"]
-        self._batch_insert("attachments", cols, rows, {"attachment"}, conflict="uuid")
+                "attachment", "is_sidechain", "source_file", "source_line", "raw"]
+        self._batch_insert("attachments", cols, rows, {"attachment", "raw"},
+                           conflict="uuid")
 
     def insert_system_events(self, rows: list[dict]) -> None:
         cols = ["uuid", "session_id", "parent_uuid", "ts", "subtype", "level", "content",
@@ -1827,6 +2234,12 @@ class SessionArchive:
           messages.session_id, so the first UPDATE can't touch them; the second
           statement fills them from messages keyed (session_id, agent_id) —
           for a child, total_* == own_*.
+
+        Schema v10: tool_use_count counts DISTINCT tool_use_id and error_count
+        counts DISTINCT (message_uuid, tool_use_id), not rows. Blocks and
+        results were duplicated across source files before v10 (see
+        v_duplicate_blocks); the identity counts are correct either way, and
+        the historical rows are left in place rather than deleted.
         """
         conn = self.connect()
         with conn.cursor() as cur:
@@ -1848,16 +2261,30 @@ class SessionArchive:
                         count(*) FILTER (WHERE NOT is_sidechain) AS own_message_count
                     FROM messages GROUP BY session_id
                 ),
+                -- DISTINCT (schema v10): a message present in two transcripts
+                -- has ONE messages row but historically got TWO sets of blocks
+                -- / results (see v_duplicate_blocks). Counting rows therefore
+                -- inflated tool_use_count / error_count. Counting the tool_use
+                -- IDENTITY instead is correct with or without the history.
+                -- The coalesce keeps a tool_use block with no id countable
+                -- (block_id is unique), instead of silently vanishing from
+                -- count(DISTINCT).
                 tu AS (
-                    SELECT cb.session_id, count(*) AS cnt,
-                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    SELECT cb.session_id,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id)) AS cnt,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id))
+                               FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM content_blocks cb
                     LEFT JOIN messages m ON m.uuid = cb.message_uuid
                     WHERE cb.block_type='tool_use' GROUP BY cb.session_id
                 ),
                 err AS (
-                    SELECT tr.session_id, count(*) AS cnt,
-                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    SELECT tr.session_id,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id)) AS cnt,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id))
+                               FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM tool_results tr
                     LEFT JOIN messages m ON m.uuid = tr.message_uuid
                     WHERE tr.is_error GROUP BY tr.session_id
@@ -1925,14 +2352,18 @@ class SessionArchive:
                     GROUP BY 1, 2
                 ),
                 ct AS (
-                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    -- DISTINCT for the same reason as `tu` above.
+                    SELECT m.session_id AS parent, m.agent_id,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id)) AS cnt
                     FROM content_blocks cb
                     JOIN messages m ON m.uuid = cb.message_uuid
                     WHERE cb.block_type='tool_use' AND m.agent_id IS NOT NULL
                     GROUP BY 1, 2
                 ),
                 ce AS (
-                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    SELECT m.session_id AS parent, m.agent_id,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id)) AS cnt
                     FROM tool_results tr
                     JOIN messages m ON m.uuid = tr.message_uuid
                     WHERE tr.is_error AND m.agent_id IS NOT NULL

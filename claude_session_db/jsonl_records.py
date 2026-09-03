@@ -92,13 +92,26 @@ class TextBlock:
 
 @dataclass
 class ToolUseCaller:
-    """Caller information for tool use."""
+    """Caller information for tool use (`tool_use.caller`).
+
+    `type` is the promoted scalar ("direct" today — 146,392 of 146,393 blocks
+    in the corpus, and the only value ever observed). `raw` is the block's own
+    caller object kept VERBATIM, because the whole point of the escape hatch is
+    that the next value will not be a bare type: it is written to
+    `content_blocks.caller` as JSONB (schema v10; before that the field was
+    parsed here and then dropped on 100% of tool_use blocks).
+
+    `raw` is EMPTY when the block carried no `caller` key at all — the default
+    below is a reading convenience, and synthesising it into the archive would
+    be inventing data the transcript does not contain.
+    """
 
     type: str  # "direct", etc.
+    raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ToolUseCaller":
-        return cls(type=data.get("type", "direct"))
+        return cls(type=data.get("type", "direct"), raw=data)
 
 
 @dataclass
@@ -112,12 +125,16 @@ class ToolUseBlock:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ToolUseBlock":
-        caller_data = data.get("caller", {"type": "direct"})
+        # An absent `caller` reads as "direct" but keeps an EMPTY `raw`, so the
+        # archive can tell "the transcript said direct" from "the transcript
+        # said nothing".
+        caller_data = data.get("caller")
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
             input=data.get("input", {}),
-            caller=ToolUseCaller.from_dict(caller_data),
+            caller=ToolUseCaller.from_dict(caller_data if isinstance(caller_data, dict)
+                                           else {}),
         )
 
     @property
@@ -146,7 +163,7 @@ class UnknownBlock:
     message shifted down one `block_index`, silently corrupting the ordering of
     blocks that were kept.
 
-    Claude Code v2.1.247 started emitting `fallback`
+    Claude Code started emitting `fallback` at v2.1.215
     (`{"type":"fallback","from":{"model":…},"to":{"model":…}}` — the marker for
     a server-side model fallback, which is exactly the kind of thing a cost or
     reliability lens wants) and csd threw all of them away. There will be a next
@@ -343,7 +360,7 @@ class Usage:
     #                      [{"type":"message","model":"claude-fable-5",...},
     #                       {"type":"fallback_message","model":"claude-opus-4-8",...}]
     #                    So the message's top-level `model` is not the only
-    #                    model that billed for it — the same event the v2.1.247
+    #                    model that billed for it — the same event the v2.1.215
     #                    `fallback` CONTENT BLOCK marks, recorded twice.
     thinking_tokens: Optional[int] = None
     server_tool_use: Optional[Any] = None
@@ -1901,6 +1918,38 @@ SESSION_RECORD_TYPES = {
     "fork-context-ref",
 }
 
+# Record types that have a dedicated destination AND are ALSO archived verbatim
+# in `session_records` (schema v10).
+#
+# The promoted columns are lossy in two different ways, and both were silent:
+#
+#   * FIELDS DROPPED. `bridge-session` kept only `bridgeSessionId` and threw
+#     away lastSequenceNum / ownerAccountUuid / ownerOrganizationUuid /
+#     noHistoryBackfill; `queue-operation` has no column for `reason`;
+#     `last-prompt` has none for `explicit`. The archive claims to be lossless
+#     and for these it was not.
+#   * HISTORY DROPPED. The seven session-metadata types are latest-wins onto a
+#     single `sessions` column, so every earlier value — every title the model
+#     ever gave the session, every prior mode, every superseded last-prompt —
+#     existed only in the JSONL. The per-record history is now retained.
+#
+# These rows carry `is_modelled = true`, exactly like the routed types, so they
+# never appear in the "what does csd not model yet" census or trip the
+# unmodelled wire. They are an ADDITION to the promoted columns, never a
+# replacement: nothing about the `sessions` / `queue_operations` write changed.
+SESSION_RECORD_ALSO_ARCHIVED = {
+    # the seven latest-wins session-metadata types (-> sessions.<col>)
+    "ai-title",
+    "custom-title",
+    "last-prompt",
+    "permission-mode",
+    "mode",
+    "bridge-session",
+    "agent-name",
+    # -> queue_operations (which has no column for `reason`)
+    "queue-operation",
+}
+
 
 @dataclass
 class AgentLifecycleRecord:
@@ -1983,11 +2032,11 @@ class JSONLParser:
             "unknown": [],
         }
 
-        # Record types folded into session_meta via SessionMetaRecord
-        _META_TYPES = {
-            "ai-title", "custom-title", "last-prompt",
-            "permission-mode", "mode", "bridge-session", "agent-name",
-        }
+        # Record types folded into session_meta via SessionMetaRecord. Taken
+        # from the class's own field map so the two can never drift (these are
+        # also the seven latest-wins types archived verbatim — see
+        # SESSION_RECORD_ALSO_ARCHIVED).
+        _META_TYPES = set(SessionMetaRecord._VALUE_FIELDS)
 
         with open(file_path) as f:
             for line_num, line in enumerate(f, 1):
@@ -2028,6 +2077,17 @@ class JSONLParser:
                         records["session_record"].append(
                             SessionRecord.from_dict(data, line_num, modelled=False))
                         records["unknown"].append((line_num, record_type))
+
+                    # Schema v10: a type with a dedicated destination whose
+                    # promoted columns are LOSSY (dropped fields, or a
+                    # latest-wins column that keeps no history) is ALSO archived
+                    # verbatim. `is_modelled = true`, so it never reads as "csd
+                    # does not model this" and never trips the unmodelled wire.
+                    # At most one session_record per line either way, so
+                    # (source_file, source_line) stays a valid key.
+                    if record_type in SESSION_RECORD_ALSO_ARCHIVED:
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=True))
 
                 except json.JSONDecodeError as e:
                     print(f"Warning: Invalid JSON at {file_path}:{line_num}: {e}")

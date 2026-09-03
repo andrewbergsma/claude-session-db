@@ -239,7 +239,10 @@ def test_jsonb_session_columns_are_wrapped():
 
 def test_cost_drift_view_exists_and_separates_the_explanations():
     v = postgres.VIEWS_SQL
-    assert "CREATE OR REPLACE VIEW v_session_cost_drift" in v
+    # DROP-then-CREATE, not CREATE OR REPLACE: the latter cannot add a column
+    # to an existing view (see the v_session_overview precedent in the file).
+    assert "DROP VIEW IF EXISTS v_session_cost_drift;" in v
+    assert "CREATE VIEW v_session_cost_drift AS" in v
     assert "computed_cost_usd" in v and "reported_cost_usd" in v
     assert "drift_usd" in v and "drift_pct" in v
     # an unpriced model is the FIRST thing to check when the two disagree

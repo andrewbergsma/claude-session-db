@@ -14,7 +14,7 @@ Phase 3 of claudecode:design/claude-session-db-postgres-archive.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -61,12 +61,39 @@ class SyncStats:
     file_snapshots: int = 0
     pr_links: int = 0
     agent_tasks: int = 0
+    session_records: int = 0
     overflow_results: int = 0
     task_outputs: int = 0
     errors: int = 0
 
+    # --- the unmodelled-record tripwire -----------------------------------
+    # The parser has always collected `records["unknown"]` and nothing has ever
+    # read it, so eleven record types Claude Code added between v2.1.161 and
+    # v2.1.258 were dropped in silence. These two fields are what makes a NEW
+    # record type visible on the next sweep instead of on the next audit.
+    # `unknown` counts records; `unknown_types` is the census by type.
+    # (Since schema v9 these are also CAPTURED, in `session_records` — the
+    # counter now says "we do not model this yet", not "we lost this".)
+    unknown: int = 0
+    unknown_types: dict = field(default_factory=dict)
+
+    def note_unknown(self, record_type: str, n: int = 1) -> None:
+        self.unknown += n
+        self.unknown_types[record_type] = self.unknown_types.get(record_type, 0) + n
+
+    def unknown_census(self, limit: int = 8) -> str:
+        """`type×n, type×n` ordered by frequency — empty string when there are
+        none, so callers can append it unconditionally."""
+        if not self.unknown_types:
+            return ""
+        items = sorted(self.unknown_types.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{t}×{n:,}" for t, n in items[:limit])
+        if len(items) > limit:
+            shown += f", +{len(items) - limit} more"
+        return shown
+
     def __str__(self) -> str:
-        return (
+        out = (
             "Sync complete:\n"
             f"  Files: {self.files_found} found, {self.files_synced} synced, "
             f"{self.files_skipped} skipped\n"
@@ -77,9 +104,15 @@ class SyncStats:
             f"  System events: {self.system_events:,}\n"
             f"  Queue ops: {self.queue_operations:,}  File snapshots: {self.file_snapshots:,}\n"
             f"  PR links: {self.pr_links}  Agent tasks: {self.agent_tasks}\n"
+            f"  Session records: {self.session_records:,}\n"
             f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
+        if self.unknown:
+            out += (f"\n  UNMODELLED record types: {self.unknown:,} records — "
+                    f"{self.unknown_census(20)}\n"
+                    f"    (captured verbatim in session_records; no dedicated table yet)")
+        return out
 
     def oneline(self) -> str:
         """Compact single-line summary — only non-zero record counts (errors always)."""
@@ -88,12 +121,16 @@ class SyncStats:
             ("results", self.tool_results), ("attach", self.attachments),
             ("sysevents", self.system_events), ("queueops", self.queue_operations),
             ("snapshots", self.file_snapshots), ("prs", self.pr_links),
-            ("agents", self.agent_tasks), ("taskout", self.task_outputs),
+            ("agents", self.agent_tasks), ("sessrec", self.session_records),
+            ("taskout", self.task_outputs),
         ]
         parts = [f"{n:,} {label}" for label, n in counts if n]
         body = ", ".join(parts) if parts else "no new records"
-        return (f"Synced {self.files_synced}/{self.files_found} files · "
+        line = (f"Synced {self.files_synced}/{self.files_found} files · "
                 f"{body} ({self.errors} errors)")
+        if self.unknown:
+            line += f" · UNMODELLED {self.unknown:,}: {self.unknown_census()}"
+        return line
 
 
 class SessionSync:
@@ -350,6 +387,15 @@ class SessionSync:
                 "source_file": source_file,
                 "source_line": None,
             })
+
+        # The tripwire. `records["unknown"]` is [(line_num, record_type)] for
+        # every record type csd has NO handling for at all. It has existed
+        # since the first parser and nothing has ever read it, which is how
+        # eleven Claude Code record types were dropped in silence between
+        # v2.1.161 and v2.1.258. Counting it here puts a new type on the very
+        # next sweep line and on the sweep heartbeat.
+        for _line_num, record_type in records.get("unknown", []):
+            stats.note_unknown(record_type)
 
         for al in records.get("agent_lifecycle", []):
             agent_rows.append({

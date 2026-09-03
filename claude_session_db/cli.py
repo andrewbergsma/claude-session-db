@@ -191,21 +191,32 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
         click.echo(f"sweep: {res.reason}", err=True)
 
     try:
-        _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
+        stats = _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
     except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
         guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
         click.echo(f"sweep: FAILED — {type(exc).__name__}: {exc}", err=True)
         guard.release()
         raise SystemExit(1)
     else:
-        guard.heartbeat(ok=True)
+        # The unmodelled-record-type tripwire rides the heartbeat so it reaches
+        # `csd sweep-health`, which is deliberately DB-free and could not
+        # otherwise see it. ok stays True — a new record type is a signal to
+        # act on, not a sweep failure.
+        census = stats.unknown_census(6) if stats is not None else ""
+        guard.heartbeat(ok=True,
+                        detail=(f"unmodelled record types: {census}" if census else ""))
     finally:
         guard.release()
 
 
 def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
-               no_ingest: bool, quiet: bool) -> None:
-    """The actual sweep body, wrapped by the liveness guard in `sweep()`."""
+               no_ingest: bool, quiet: bool):
+    """The actual sweep body, wrapped by the liveness guard in `sweep()`.
+
+    Returns the SyncStats of the ingest phase (None when --no-ingest), so the
+    caller can put the unmodelled-record-type census on the heartbeat.
+    """
+    stats = None
     if not no_ingest:
         # verbose=False: suppress the "Found N files" preamble + per-file lines;
         # the one-line summary below carries the only signal worth keeping.
@@ -217,7 +228,7 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
         rows = a.query(_SWEEP_HEAD_SQL, (window,))
     if not rows:
         click.echo(f"No sessions active in the last {window} min.")
-        return
+        return stats
 
     def render(r) -> str:
         idle_min = int(r["idle_min"] or 0)
@@ -240,6 +251,7 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
     remaining = len(done) - len(shown_done)
     if remaining > 0:
         click.echo(f"  … +{remaining} quiesced (run `csd recent` to list)")
+    return stats
 
 
 @main.command(name="sweep-health")
@@ -280,6 +292,14 @@ def sweep_health(ctx: click.Context, stale_intervals: int) -> None:
     status = "STALE" if age > threshold else "ok"
     click.echo(f"heartbeat: {status} (age={age:.0f}s, threshold={threshold}s, "
                f"last_ok={hb.get('ok')}){when}")
+    # The unmodelled-record-type tripwire rides the heartbeat detail on an OK
+    # run (this watcher is DB-free, so the census cannot reach it any other
+    # way). It is a NOTICE, never an exit code: a new Claude Code record type
+    # is captured verbatim in `session_records` and wants a dedicated table,
+    # but the sweep itself is healthy.
+    detail = (hb or {}).get("detail") or ""
+    if hb and hb.get("ok") is not False and detail:
+        click.echo(f"notice: {detail[:300]}")
     if status == "STALE" or (hb and hb.get("ok") is False):
         raise SystemExit(1)
 

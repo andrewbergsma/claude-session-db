@@ -37,7 +37,9 @@ ASSISTANT = {
                                "ephemeral_1h_input_tokens": 0},
             "output_tokens_details": {"thinking_tokens": 150},
             "server_tool_use": {"web_search_requests": 2},
-            "iterations": 3, "service_tier": "standard",
+            "iterations": [{"type": "message", "model": "claude-opus-5",
+                            "input_tokens": 10, "output_tokens": 200}],
+            "service_tier": "standard",
             "inference_geo": "us", "speed": "standard"},
     },
 }
@@ -60,7 +62,57 @@ def test_usage_subfields_are_promoted():
     u = AssistantMessage.from_dict(ASSISTANT).usage
     assert u.thinking_tokens == 150
     assert u.server_tool_use == {"web_search_requests": 2}
-    assert u.iterations == 3
+    assert u.iterations == [{"type": "message", "model": "claude-opus-5",
+                             "input_tokens": 10, "output_tokens": 200}]
+    assert u.iteration_count == 1
+
+
+# A real fallback, verbatim from the corpus: the turn STARTED on fable-5 and
+# finished on opus-4-8, and both billed. The message's top-level `model` names
+# only the first.
+FALLBACK_ITERATIONS = [
+    {"type": "message", "model": "claude-fable-5", "input_tokens": 2,
+     "output_tokens": 251, "cache_read_input_tokens": 139868,
+     "cache_creation_input_tokens": 6716},
+    {"type": "fallback_message", "model": "claude-opus-4-8", "input_tokens": 2,
+     "output_tokens": 1366, "cache_read_input_tokens": 139868,
+     "cache_creation_input_tokens": 4845},
+]
+
+
+def test_iterations_is_an_array_not_a_count():
+    """The bug the live migration caught: `iterations` was modelled as an
+    INTEGER, and `usage->>'iterations'` on the real array blew up the backfill
+    with `invalid input syntax for type integer`. It is an array of
+    per-iteration usage objects."""
+    u = Usage.from_dict({"input_tokens": 1, "output_tokens": 1,
+                         "iterations": FALLBACK_ITERATIONS})
+    assert u.iterations == FALLBACK_ITERATIONS
+    assert u.iteration_count == 2
+
+
+def test_fallback_models_are_recoverable():
+    """A second model billed for this message. `v_message_cost` prices the
+    whole thing at the top-level model, so this list being non-empty means that
+    price is wrong for part of the turn."""
+    u = Usage.from_dict({"input_tokens": 1, "output_tokens": 1,
+                         "iterations": FALLBACK_ITERATIONS})
+    assert u.fallback_models == ["claude-opus-4-8"]
+
+
+def test_no_fallback_yields_no_fallback_models():
+    u = Usage.from_dict({"input_tokens": 1, "output_tokens": 1,
+                         "iterations": [{"type": "message",
+                                         "model": "claude-opus-5"}]})
+    assert u.fallback_models == []
+    assert u.iteration_count == 1
+
+
+def test_iterations_absent_is_none_not_empty():
+    u = Usage.from_dict({"input_tokens": 1, "output_tokens": 1})
+    assert u.iterations is None
+    assert u.iteration_count is None
+    assert u.fallback_models == []
 
 
 def test_usage_subfields_absent_are_none_not_zero():
@@ -91,7 +143,8 @@ def test_raw_usage_is_still_kept_whole():
 
 
 @pytest.mark.parametrize("col", ["effort", "session_kind", "thinking_tokens",
-                                 "server_tool_use", "iterations"])
+                                 "server_tool_use", "iterations",
+                                 "iteration_count"])
 def test_column_declared_in_migration(col):
     assert col in postgres.SCHEMA_SQL
 
@@ -100,10 +153,11 @@ def test_message_columns_are_bound_on_insert():
     import inspect
     src = inspect.getsource(postgres.SessionArchive.insert_messages)
     for col in ("effort", "session_kind", "thinking_tokens", "server_tool_use",
-                "iterations"):
+                "iterations", "iteration_count"):
         assert f'"{col}"' in src, f"{col} declared but never bound"
     # a raw dict bound to a JSONB column is a psycopg ProgrammingError
     assert '"server_tool_use"' in src.split("jsonb_cols")[1]
+    assert '"iterations"' in src.split("jsonb_cols")[1]
 
 
 def test_migration_is_guarded_and_adds_only():
@@ -149,7 +203,8 @@ def test_backfill_reads_the_documented_json_paths():
     assert "raw->>'sessionKind'" in sql
     assert "'output_tokens_details'" in sql and "'thinking_tokens'" in sql
     assert "usage->'server_tool_use'" in sql
-    assert "usage->>'iterations'" in sql
+    assert "b.usage->'iterations'" in sql
+    assert "jsonb_array_length" in sql
 
 
 def test_backfill_placeholders_are_psycopg_safe():

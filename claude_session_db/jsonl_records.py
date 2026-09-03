@@ -337,10 +337,17 @@ class Usage:
     #                    — how much of the output was reasoning, not answer.
     #   server_tool_use  server-side tool invocations (web search/fetch), 64%.
     #                    Shape varies, so it stays a dict.
-    #   iterations       agentic iterations for the turn, 64%.
+    #   iterations       an ARRAY, not a count (64%). Each element is a
+    #                    per-iteration usage object with its OWN `model` and
+    #                    `type`, and that is where a model FALLBACK is recorded:
+    #                      [{"type":"message","model":"claude-fable-5",...},
+    #                       {"type":"fallback_message","model":"claude-opus-4-8",...}]
+    #                    So the message's top-level `model` is not the only
+    #                    model that billed for it — the same event the v2.1.247
+    #                    `fallback` CONTENT BLOCK marks, recorded twice.
     thinking_tokens: Optional[int] = None
     server_tool_use: Optional[Any] = None
-    iterations: Optional[int] = None
+    iterations: Optional[list] = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -360,10 +367,31 @@ class Usage:
             speed=data.get("speed"),
             thinking_tokens=thinking if isinstance(thinking, int) else None,
             server_tool_use=data.get("server_tool_use"),
-            iterations=(data.get("iterations")
-                        if isinstance(data.get("iterations"), int) else None),
+            iterations=(data["iterations"]
+                        if isinstance(data.get("iterations"), list) else None),
             raw=data,
         )
+
+    @property
+    def iteration_count(self) -> Optional[int]:
+        """How many API iterations produced this message. >1 exactly when the
+        turn fell back to another model mid-message."""
+        return len(self.iterations) if self.iterations is not None else None
+
+    @property
+    def fallback_models(self) -> list[str]:
+        """Models OTHER than the first that billed for this message.
+
+        Non-empty only on a fallback. `v_message_cost` prices the whole message
+        at the top-level model, so a non-empty list here means that price is
+        wrong for part of the turn.
+        """
+        if not self.iterations:
+            return []
+        seen = [it.get("model") for it in self.iterations
+                if isinstance(it, dict) and it.get("model")]
+        first = seen[0] if seen else None
+        return [m for m in seen[1:] if m != first]
 
     @property
     def ephemeral_5m_tokens(self) -> int:

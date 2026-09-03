@@ -246,3 +246,10 @@ def test_cost_drift_view_exists_and_separates_the_explanations():
     assert "unpriced_messages" in v
     # the harness's own per-model breakdown, for attributing the gap
     assert "reported_model_usage" in v
+    # the defect this view found on its first run: one API response can appear
+    # as several `messages` rows, so v_message_cost sums it more than once
+    assert "api_message_ratio" in v
+    assert "distinct_api_messages" in v
+    # the other two attributable causes
+    assert "sidechain_messages" in v
+    assert "fallback_messages" in v

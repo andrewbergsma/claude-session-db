@@ -612,6 +612,7 @@ class SessionSync:
             "thinking_tokens": u.thinking_tokens,
             "server_tool_use": u.server_tool_use,
             "iterations": u.iterations,
+            "iteration_count": u.iteration_count,
             "effort": msg.effort,
             "session_kind": msg.session_kind,
             "is_sidechain": msg.is_sidechain,

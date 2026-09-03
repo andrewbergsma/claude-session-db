@@ -343,16 +343,37 @@ BEGIN
             --   server_tool_use  usage.server_tool_use (64%) — server-side tool
             --                    invocations (web search/fetch), billed
             --                    separately from tokens. JSONB: shape varies.
-            --   iterations       usage.iterations (64%).
+            --   iterations       usage.iterations (64%) — an ARRAY, not a
+            --                    count. Each element is a per-iteration usage
+            --                    object carrying its OWN `model` and `type`.
+            --                    This is where a model FALLBACK is recorded:
+            --                        [{"type":"message","model":"claude-fable-5",…},
+            --                         {"type":"fallback_message",
+            --                          "model":"claude-opus-4-8",…}]
+            --                    i.e. the message's top-level `model` is NOT
+            --                    the only model that billed for it. v_message_cost
+            --                    prices the whole message at the top-level model
+            --                    and therefore mis-prices a fallback turn; the
+            --                    array is archived so a future view can split it.
+            --                    (Same event as the v2.1.247 `fallback` CONTENT
+            --                    BLOCK — recorded twice, in two places.)
+            --   iteration_count  jsonb_array_length(iterations); 1 normally,
+            --                    >1 exactly when a fallback occurred.
             ADD COLUMN thinking_tokens INTEGER,
             ADD COLUMN server_tool_use JSONB,
-            ADD COLUMN iterations      INTEGER;
+            ADD COLUMN iterations      JSONB,
+            ADD COLUMN iteration_count INTEGER;
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_messages_effort ON messages(effort)
     WHERE effort IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_session_kind ON messages(session_kind)
     WHERE session_kind IS NOT NULL;
+-- Partial: the fallback lens. iteration_count > 1 iff the turn fell back to
+-- another model mid-message, which is both rare and the case v_message_cost
+-- gets wrong.
+CREATE INDEX IF NOT EXISTS idx_messages_fallback ON messages(iteration_count)
+    WHERE iteration_count > 1;
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
@@ -830,7 +851,10 @@ BACKFILLS = [
                     thinking_tokens = nullif(b.usage->'output_tokens_details'
                                              ->>'thinking_tokens', '')::int,
                     server_tool_use = b.usage->'server_tool_use',
-                    iterations      = nullif(b.usage->>'iterations', '')::int
+                    iterations      = CASE WHEN jsonb_typeof(b.usage->'iterations') = 'array'
+                                           THEN b.usage->'iterations' END,
+                    iteration_count = CASE WHEN jsonb_typeof(b.usage->'iterations') = 'array'
+                                           THEN jsonb_array_length(b.usage->'iterations') END
                 FROM batch b
                 WHERE m.uuid = b.uuid
                   AND (m.effort          IS DISTINCT FROM b.raw->>'effort'
@@ -839,7 +863,8 @@ BACKFILLS = [
                        nullif(b.usage->'output_tokens_details'->>'thinking_tokens', '')::int
                     OR m.server_tool_use IS DISTINCT FROM b.usage->'server_tool_use'
                     OR m.iterations      IS DISTINCT FROM
-                       nullif(b.usage->>'iterations', '')::int)
+                       CASE WHEN jsonb_typeof(b.usage->'iterations') = 'array'
+                            THEN b.usage->'iterations' END)
                 RETURNING 1
             )
             SELECT (SELECT max(uuid) FROM batch)   AS next_cursor,
@@ -1198,25 +1223,50 @@ ORDER BY day DESC;
 -- Two independent numbers that ought to agree, and until v9 only one of them
 -- existed. `computed_cost_usd` sums v_message_cost (tokens from the transcript
 -- x the model_pricing rates); `reported_cost_usd` is `cost-state.totalCostUSD`,
--- the harness's own running total. A gap means one of three things, and the
--- view is built so you can tell which:
+-- the harness's own running total. The view carries what is needed to ATTRIBUTE
+-- a gap rather than merely display one:
+--
+--   * `api_message_ratio` > 1 — THE BIG ONE, and this view found it on its
+--     first run. One API response can appear as SEVERAL `messages` rows with
+--     distinct uuids but the same `message.id`, so v_message_cost sums the same
+--     usage object more than once. A real session measured 1,756 assistant rows
+--     against 905 distinct api_message_ids — a ratio of 1.94, and a computed
+--     cost almost exactly double the harness's. Treat any session with a ratio
+--     meaningfully above 1.0 as over-counted by roughly that factor.
+--     (Deduplicating v_message_cost by api_message_id is the fix, and it is
+--     deliberately NOT done here: it changes every historical cost number in
+--     the archive and deserves its own change with its own verification.)
 --   * `unpriced_messages` > 0 — a model with no model_pricing pattern. This is
---     the failure the Claude 5 seed just fixed, and the reason the view exists.
+--     the failure the Claude 5 seed fixed, and the original reason for the view.
+--   * sidechain roll-up — assistant rows for SUBAGENTS share the parent's
+--     session_id (source is never re-shaped), so `computed` includes child
+--     spend. Whether `cost-state` does is not documented by Claude Code.
 --   * fast mode — Opus 5 fast bills 10/50 instead of 5/25 and is NOT
 --     distinguishable from the transcript, so a fast-heavy session reads LOW.
+--   * model FALLBACK — `usage.iterations` shows a turn can bill partly to a
+--     second model (see messages.iteration_count > 1); v_message_cost prices
+--     the whole message at the top-level `model`.
 --   * long-context (>200K) premiums, which the flat per-model rates ignore.
 --
 -- Sessions with no cost-state record yet (never re-synced since v9, or an
 -- older Claude Code) have a NULL reported side and a NULL drift — never a
 -- fake zero.
-CREATE OR REPLACE VIEW v_session_cost_drift AS
+-- DROP first, per this file's convention for a view whose column list can
+-- grow: CREATE OR REPLACE cannot reconcile a new column against an older
+-- definition and fails with "cannot change name of view column".
+DROP VIEW IF EXISTS v_session_cost_drift;
+CREATE VIEW v_session_cost_drift AS
 WITH computed AS (
-    SELECT session_id,
-           round(sum(total_cost), 6) AS computed_cost_usd,
+    SELECT c.session_id,
+           round(sum(c.total_cost), 6) AS computed_cost_usd,
            count(*) AS priced_messages,
-           count(*) FILTER (WHERE unpriced) AS unpriced_messages
-    FROM v_message_cost
-    GROUP BY session_id
+           count(*) FILTER (WHERE c.unpriced) AS unpriced_messages,
+           count(DISTINCT m.api_message_id) AS distinct_api_messages,
+           count(*) FILTER (WHERE m.is_sidechain) AS sidechain_messages,
+           count(*) FILTER (WHERE m.iteration_count > 1) AS fallback_messages
+    FROM v_message_cost c
+    JOIN messages m ON m.uuid = c.uuid
+    GROUP BY c.session_id
 )
 SELECT s.session_id,
        p.project_name,
@@ -1229,6 +1279,12 @@ SELECT s.session_id,
              / nullif(s.reported_cost_usd, 0), 2)           AS drift_pct,
        c.priced_messages,
        c.unpriced_messages,
+       c.distinct_api_messages,
+       -- >1.0 means v_message_cost summed the same API response more than once
+       round(c.priced_messages::numeric
+             / nullif(c.distinct_api_messages, 0), 3) AS api_message_ratio,
+       c.sidechain_messages,
+       c.fallback_messages,
        s.has_unknown_model_cost,
        -- the harness's own per-model breakdown, for attributing a drift
        s.cost_state -> 'modelUsage' AS reported_model_usage,
@@ -1589,10 +1645,11 @@ class SessionArchive:
             "speed", "usage", "is_sidechain", "agent_id", "slug", "cwd", "git_branch",
             "cc_version", "entrypoint", "forked_from", "source_file", "source_line", "raw",
             # schema v9
-            "effort", "session_kind", "thinking_tokens", "server_tool_use", "iterations",
+            "effort", "session_kind", "thinking_tokens", "server_tool_use",
+            "iterations", "iteration_count",
         ]
         jsonb_cols = {"stop_details", "diagnostics", "usage", "forked_from", "raw",
-                      "server_tool_use"}
+                      "server_tool_use", "iterations"}
         self._batch_insert("messages", cols, rows, jsonb_cols,
                            conflict="uuid")
 

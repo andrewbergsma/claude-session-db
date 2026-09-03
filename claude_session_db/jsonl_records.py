@@ -163,7 +163,7 @@ class UnknownBlock:
     message shifted down one `block_index`, silently corrupting the ordering of
     blocks that were kept.
 
-    Claude Code v2.1.247 started emitting `fallback`
+    Claude Code started emitting `fallback` at v2.1.215
     (`{"type":"fallback","from":{"model":…},"to":{"model":…}}` — the marker for
     a server-side model fallback, which is exactly the kind of thing a cost or
     reliability lens wants) and csd threw all of them away. There will be a next
@@ -360,7 +360,7 @@ class Usage:
     #                      [{"type":"message","model":"claude-fable-5",...},
     #                       {"type":"fallback_message","model":"claude-opus-4-8",...}]
     #                    So the message's top-level `model` is not the only
-    #                    model that billed for it — the same event the v2.1.247
+    #                    model that billed for it — the same event the v2.1.215
     #                    `fallback` CONTENT BLOCK marks, recorded twice.
     thinking_tokens: Optional[int] = None
     server_tool_use: Optional[Any] = None

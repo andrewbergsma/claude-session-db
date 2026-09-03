@@ -420,7 +420,7 @@ BEGIN
             --                    prices the whole message at the top-level model
             --                    and therefore mis-prices a fallback turn; the
             --                    array is archived so a future view can split it.
-            --                    (Same event as the v2.1.247 `fallback` CONTENT
+            --                    (Same event as the v2.1.215 `fallback` CONTENT
             --                    BLOCK — recorded twice, in two places.)
             --   iteration_count  jsonb_array_length(iterations); 1 normally,
             --                    >1 exactly when a fallback occurred.
@@ -502,8 +502,9 @@ END $$;
 -- `parse_content_block` returned None for any block type it did not recognise,
 -- and sync skips a None — so an unrecognised block was DROPPED, and every later
 -- block in the same message shifted down one `block_index`, silently corrupting
--- the ordering of the blocks that WERE kept. Claude Code v2.1.247's `fallback`
--- block ({"type":"fallback","from":{"model":…},"to":{"model":…}} — a
+-- the ordering of the blocks that WERE kept. Claude Code's `fallback` block
+-- (first observed at v2.1.215) —
+-- {"type":"fallback","from":{"model":…},"to":{"model":…}}, a
 -- server-side model fallback, precisely what a cost or reliability lens wants)
 -- went that way. Unknown blocks are now stored under their REAL block_type with
 -- the payload verbatim here.

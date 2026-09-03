@@ -4,7 +4,7 @@
 tool_use, and `sync._insert_records` skips a None. Two losses, one of them
 silent and worse than the obvious one:
 
-  1. the block itself was dropped. Claude Code v2.1.247's `fallback` block —
+  1. the block itself was dropped. Claude Code's `fallback` block (v2.1.215+) —
      `{"type":"fallback","from":{"model":…},"to":{"model":…}}`, the marker for a
      server-side model fallback, exactly what a cost or reliability lens wants —
      went that way.
@@ -116,3 +116,14 @@ def test_schema_has_the_payload_column_and_it_is_bound():
     src = inspect.getsource(postgres.SessionArchive.insert_content_blocks)
     assert '"block_payload"' in src
     assert "block_payload" in src.split("_batch_insert")[1]   # in the JSONB set
+
+
+def test_the_fallback_block_is_dated_to_its_first_observation():
+    """It was dated to v2.1.247 — the release csd happened to notice it in.
+    A corpus scan puts the earliest `fallback` block at v2.1.215, and the wrong
+    date makes every "when did this start" question answer wrong."""
+    from claude_session_db import jsonl_records, postgres
+    doc = jsonl_records.UnknownBlock.__doc__
+    assert "v2.1.215" in doc
+    assert "2.1.247" not in doc
+    assert "2.1.247" not in postgres.SCHEMA_SQL

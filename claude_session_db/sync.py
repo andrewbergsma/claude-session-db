@@ -127,7 +127,7 @@ class SyncStats:
 
     # --- the unmodelled-record tripwire -----------------------------------
     # The parser has always collected `records["unknown"]` and nothing has ever
-    # read it, so eleven record types Claude Code added between v2.1.161 and
+    # read it, so the TEN record types Claude Code added between v2.1.161 and
     # v2.1.258 were dropped in silence. These two fields are what makes a NEW
     # record type visible on the next sweep instead of on the next audit.
     # `unknown` counts records; `unknown_types` is the census by type.
@@ -525,7 +525,7 @@ class SessionSync:
         # The tripwire. `records["unknown"]` is [(line_num, record_type)] for
         # every record type csd has NO handling for at all. It has existed
         # since the first parser and nothing has ever read it, which is how
-        # eleven Claude Code record types were dropped in silence between
+        # ten Claude Code record types were dropped in silence between
         # v2.1.161 and v2.1.258. Counting it here puts a new type on the very
         # next sweep line and on the sweep heartbeat.
         for _line_num, record_type in records.get("unknown", []):

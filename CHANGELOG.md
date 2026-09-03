@@ -130,9 +130,16 @@ rewritten outside a documented resumable backfill. Full schema reference:
   (batched, `LIMIT 20000`, delete only rows whose `source_file` differs from the
   owning message's) is documented beside the view definition in `postgres.py`.
 
+### Changed
+- **"eleven" record types reconciled to ten** in `sync.py`, the tripwire tests
+  and `CLAUDE.md` — `SESSION_RECORD_TYPES` has always had ten members, and the
+  3.23.0 entry above is corrected to match.
+- **The `fallback` content block is dated to v2.1.215**, its first observation
+  in the corpus, not v2.1.247 (the release csd happened to notice it in).
+
 ## [3.23.0] - 2026-09-02
 
-The **Claude Code v2.1.161-258 impact release** — schema **v9**. Eleven record
+The **Claude Code v2.1.161-258 impact release** — schema **v9**. Ten record
 types, six model families, a fork mechanism and a `/cd` had arrived in the
 transcripts since the last audit, and the archive was silently poorer for all of
 them. Full schema reference: [`DATA_MODEL.md`](DATA_MODEL.md).

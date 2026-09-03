@@ -2,7 +2,7 @@
 
 `JSONLParser.parse_file` has always collected `records["unknown"]` as
 `[(line_num, record_type)]`, and until schema v9 **nothing read it**. That is
-precisely how Claude Code v2.1.161-258 could add eleven record types — atis-latch,
+precisely how Claude Code v2.1.161-258 could add ten record types — atis-latch,
 worktree-state, relocated, file-history-delta, history-suppression, frame-link,
 cost-state, artifact-autoreact-ledger, artifact-comment-monitor,
 fork-context-ref — and have csd drop every one of them without a single line of

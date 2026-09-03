@@ -633,8 +633,27 @@ does not duplicate it. `SCHEMA_VERSION` lives in `postgres.py`; the current
 version is **9** (Claude Code v2.1.161-258 impact release, 3.23.0), recorded in
 the `metadata` table and re-applied idempotently by `initialize()`.
 
+**`SCHEMA_VERSION` is not the table inventory.** It gates view recreation
+(`views_version != SCHEMA_VERSION`) and `postgres.BACKFILLS` — but
+`CREATE TABLE IF NOT EXISTS` runs unconditionally, so a table can arrive without
+the version moving. `summarize_attempts` and `task_outputs` both did. Read the
+catalog, not the marker.
+
+**v10 is in flight** (`SCHEMA_VERSION = 10`, commit pending): `attachments.raw`,
+`content_blocks.caller`, `sessions.worktree_active` (last-wins, so a worktree
+EXIT can finally be recorded), `projects.decoded_from`; backfills
+`v10_first_prompt`, `v10_session_kind`, `v10_content_block_caller`; a new
+`v_duplicate_blocks` view and unpriced counters on `v_token_cost_daily`. Details
+in `DATA_MODEL.md` §9.
+
+**Arrows are not foreign keys.** The schema declares exactly **four** FKs —
+`sessions.project_id`, `file_backups.snapshot_id` (CASCADE),
+`summary_state.session_id` (CASCADE), `summary_passes.session_id` (CASCADE).
+Every other `→` in the docs is a logical reference the database does not
+enforce; ingest order, not a constraint, is what keeps it consistent.
+
 **The never-drop convention.** Claude Code adds session-scoped record types
-without warning; eleven arrived between v2.1.161 and v2.1.258 and were parsed
+without warning; **ten** arrived between v2.1.161 and v2.1.258 and were parsed
 into `records["unknown"]` and dropped, because nothing read that list. Since v9
 there are exactly two legitimate destinations for a new record type:
 
@@ -690,8 +709,14 @@ guarded, and failure-isolated. A single long `UPDATE` is the exact
 - **Sync signal is `*.jsonl` mtime** (`st_mtime_ns`), NOT sessions-index.json
   (which covers <25% of projects and is stale).
 - **JSONB escape-hatch** columns (`raw`, `usage`, `tool_input`,
-  `tool_use_result`, `attachment`, `stop_details`, `diagnostics`) absorb JSONL
-  field drift without a migration.
+  `tool_use_result`, `attachment`, `stop_details`, `diagnostics`, `payload`,
+  `block_payload`, `cost_state`, `worktree_session`) absorb JSONL field drift
+  without a migration — **on the tables that have one**. Only `messages`,
+  `system_events` and `session_records` keep the WHOLE record. Through v9,
+  `attachments` keeps only the `attachment` object, and `queue_operations` /
+  `pr_links` / `file_history` / `agent_tasks` keep only promoted columns; a
+  field added to those record types is dropped, not hidden. v10 adds
+  `attachments.raw`.
 - Transcripts are **telemetry**, not knowledge entries — kept in a separate DB;
   cross-link only via `session_id`.
 

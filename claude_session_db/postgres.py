@@ -235,6 +235,39 @@ BEGIN
             ADD COLUMN session_kind TEXT;
     END IF;
 END $$;
+-- Migration (idempotent, guarded): schema v10 session columns.
+--
+-- `worktree_active` — the worktree EXIT signal, which was unrecordable.
+-- `worktree-state` carries `worktreeSession: null` when a session LEAVES its
+-- worktree (38% of the records in the live archive), and the session upsert
+-- COALESCEs, so a null payload could never clear `worktree_session`: once a
+-- session had entered a worktree the archive said it was still in one, forever.
+-- Encoding the state as a boolean makes the exit expressible:
+--
+--   NULL   no `worktree-state` record has ever been seen for this session
+--   true   the LAST such record carried a worktreeSession object (in a worktree)
+--   false  the LAST such record carried `worktreeSession: null` (exited)
+--
+-- Written last-wins (see `_SESSION_LAST_WINS_COLS`), NOT "first non-null wins";
+-- `worktree_session` deliberately keeps its old meaning — the last BINDING ever
+-- seen — so the path/branch of the worktree the session was in is not lost when
+-- it leaves.
+--
+-- Guarded by a catalog check so the ACCESS EXCLUSIVE ALTER fires once, not on
+-- every sweep tick.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'sessions'
+          AND column_name = 'worktree_active'
+    ) THEN
+        ALTER TABLE sessions ADD COLUMN worktree_active BOOLEAN;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_sessions_worktree_active
+    ON sessions(worktree_active) WHERE worktree_active IS NOT NULL;
+
 CREATE INDEX IF NOT EXISTS idx_sessions_forked_from
     ON sessions(forked_from_session_id) WHERE forked_from_session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_sessions_current_cwd ON sessions(current_cwd);
@@ -1030,7 +1063,10 @@ SELECT s.session_id, p.project_name, p.decoded_path AS project_path,
        -- background session, its fork parent, and the harness's own cost.
        s.cwd, s.current_cwd, s.session_kind,
        s.forked_from_session_id, s.forked_from_uuid, s.fork_context_length,
-       s.worktree_session, s.reported_cost_usd
+       -- schema v10: worktree_session is the last BINDING ever seen;
+       -- worktree_active is the current STATE (null = never in one, false =
+       -- left it — the exit COALESCE could never express).
+       s.worktree_session, s.worktree_active, s.reported_cost_usd
 FROM sessions s
 LEFT JOIN projects p ON s.project_id = p.project_id
 ORDER BY s.modified_at DESC NULLS LAST;
@@ -1769,17 +1805,37 @@ class SessionArchive:
         "reported_api_duration_ms", "reported_tool_duration_ms",
         "reported_lines_added", "reported_lines_removed", "has_unknown_model_cost",
         "session_kind",
+        # --- schema v10 (last-wins, see _SESSION_LAST_WINS_COLS) ---
+        "worktree_active",
     ]
 
     # Session columns that are JSONB and must be wrapped before being bound.
     _SESSION_JSONB_COLS = {"worktree_session", "cost_state"}
 
+    # Columns whose STATE can legitimately go back to a "negative" value, so
+    # first-non-null-wins is wrong for them. `worktree_active` is the case that
+    # forced this: leaving a worktree is signalled by `worktreeSession: null`,
+    # and under COALESCE-only semantics an exit could never be recorded (see
+    # the v10 migration comment). The derivation emits a value ONLY for a file
+    # that actually observed a `worktree-state` record, so the write is
+    # last-observation-wins rather than blind last-writer-wins: a re-upsert
+    # from a source with no such record (the subagent backfill, a second file)
+    # leaves the stored state alone instead of erasing it.
+    _SESSION_LAST_WINS_COLS = {"worktree_active"}
+
     def _session_upsert_sql(self) -> str:
         cols = self._SESSION_COLS
         # COALESCE(EXCLUDED.col, sessions.col) so a later file lacking a field
-        # doesn't wipe a value an earlier file set.
+        # doesn't wipe a value an earlier file set. The last-wins columns are
+        # written by explicit rule instead: the newly OBSERVED value replaces
+        # the stored one, including a `false` that a COALESCE-shaped rule would
+        # be indistinguishable from but a future non-boolean column would not.
         updates = ", ".join(
-            f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})" for c in cols if c != "session_id"
+            (f"{c}=CASE WHEN EXCLUDED.{c} IS NOT NULL THEN EXCLUDED.{c} "
+             f"ELSE sessions.{c} END"
+             if c in self._SESSION_LAST_WINS_COLS
+             else f"{c}=COALESCE(EXCLUDED.{c}, sessions.{c})")
+            for c in cols if c != "session_id"
         )
         placeholders = ", ".join(["%s"] * len(cols))
         return (f"INSERT INTO sessions ({', '.join(cols)}) VALUES ({placeholders}) "

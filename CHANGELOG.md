@@ -58,6 +58,18 @@ rewritten outside a documented resumable backfill. Full schema reference:
   where the session column IS NULL (never overwriting a value ingest derived).
   `sync._derive_session_kind`'s docstring — which claimed there was
   deliberately no per-message column — is corrected.
+- **`sessions.worktree_active` (new column) — the worktree EXIT is recordable.**
+  `worktree-state` signals leaving a worktree with `worktreeSession: null` (38%
+  of the records in the live archive) and the session upsert COALESCEs, so the
+  null could never clear `worktree_session`: a session that had ever entered a
+  worktree read as still inside it forever. The state now lives in an explicit
+  boolean — NULL = no `worktree-state` record ever seen, `true` = the last one
+  carried a session object, `false` = the last one was null — written
+  last-observation-wins via the new `_SESSION_LAST_WINS_COLS` rule rather than
+  COALESCE. `worktree_session` is unchanged and keeps its "last binding ever
+  seen" meaning. The second payload shape (`enteredExisting: true`, with no
+  `originalBranch`/`originalHeadCommit`) is accepted as a binding like any
+  other. Both columns are exposed on `v_session_overview`.
 - **`sessions.tool_use_count` / `error_count` count identities, not rows.**
   `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
   `block_id` fallback so an id-less block is not silently dropped by

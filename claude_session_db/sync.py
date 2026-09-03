@@ -857,13 +857,37 @@ class SessionSync:
             out["current_cwd"] = current_cwd
 
         # -- worktree binding (worktree-state) -----------------------------
-        # Kept verbatim as JSONB: 8 keys today (originalCwd, preEnterOriginalCwd,
-        # worktreePath, worktreeName, worktreeBranch, originalBranch,
-        # originalHeadCommit, sessionId) and the JSONB escape hatch is how this
-        # archive absorbs field drift without a migration.
+        # THREE payload shapes, all real, all handled:
+        #   a) the full binding — originalCwd, preEnterOriginalCwd,
+        #      worktreePath, worktreeName, worktreeBranch, originalBranch,
+        #      originalHeadCommit, sessionId;
+        #   b) `enteredExisting: true` — the session joined a worktree that
+        #      already existed, so there is no originalBranch/originalHeadCommit
+        #      to record. It is a binding like any other and must not be
+        #      rejected for the missing keys;
+        #   c) `worktreeSession: null` — the EXIT signal, 38% of the records.
+        #
+        # The binding is kept verbatim as JSONB (the escape hatch absorbs field
+        # drift without a migration) and keeps its "last binding ever seen"
+        # meaning. The exit lives in the separate boolean `worktree_active`,
+        # because a COALESCE-ing upsert can never write a null payload and so
+        # could never say a session had LEFT (schema v10; a session that had
+        # ever entered a worktree read as still inside it forever).
+        #
+        # Two different "latest" questions, so two passes: the STATE is the last
+        # worktree-state record of any shape; the BINDING is the last one that
+        # actually carried an object. Taking both off `latest` would drop the
+        # binding the moment a session exited.
         wt = latest.get("worktree-state")
-        if isinstance(wt, dict) and isinstance(wt.get("worktreeSession"), dict):
-            out["worktree_session"] = wt["worktreeSession"]
+        if isinstance(wt, dict) and "worktreeSession" in wt:
+            out["worktree_active"] = isinstance(wt["worktreeSession"], dict)
+            for rec in reversed(records.get("session_record", [])):
+                if rec.kind != "worktree-state":
+                    continue
+                ws = (rec.raw or {}).get("worktreeSession")
+                if isinstance(ws, dict):
+                    out["worktree_session"] = ws
+                    break
 
         # -- Claude Code's own cost ledger (cost-state) --------------------
         # The harness's number, kept beside csd's computed one so the two can be

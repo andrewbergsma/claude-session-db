@@ -27,10 +27,10 @@ csd query "SELECT skill, sum(output_tokens) FROM v_token_by_attribution GROUP BY
 
 ## ✨ Why it's different
 
-- **🔒 Lossless by design.** Content blocks and tool results are stored **verbatim** — no truncation. The largest results are pulled from `tool-results/*.txt` and `*.json` overflow files. `tldr` is a *nullable derived sibling*, never a replacement.
+- **🔒 Lossless by design — with three named exceptions.** Content blocks and tool results are stored **verbatim**, never truncated; the largest results are pulled from `tool-results/*.txt` and `*.json` overflow files, and `tldr` is a *nullable derived sibling*, never a replacement. Where a `raw` escape hatch exists (`messages`, `system_events`, `session_records`) the whole record is kept. **Three families have no hatch through schema v9** and are genuinely lossy: `attachments` (keeps only the `attachment` object), the promoted-columns-only tables (`queue_operations`, `pr_links`, `file_history`, `agent_tasks`), and the seven latest-wins session-metadata types, which collapse into one `sessions` column each. All three are documented in [`DATA_MODEL.md`](DATA_MODEL.md), and v10 closes two of them.
 - **💰 Full token economics.** Every assistant message captures input + output + cache_read + cache_creation + ephemeral, plus the raw `usage` JSONB. Per-skill / per-MCP / per-agent absorption falls out of `v_token_by_attribution`.
-- **🧩 JSONB escape-hatch everywhere.** `raw`, `usage`, `tool_input`, `tool_use_result`, `attachment`, `stop_details`, `diagnostics` columns absorb JSONL field drift **without a migration**.
-- **⚡ Incremental & idempotent.** Sync keys off `*.jsonl` mtime (`st_mtime_ns`), not the stale sessions-index. Re-ingesting is safe — messages are keyed by `uuid`, child rows cleared per source file.
+- **🧩 JSONB escape-hatch on every table that has one.** `raw`, `usage`, `tool_input`, `tool_use_result`, `attachment`, `stop_details`, `diagnostics`, `payload`, `block_payload`, `cost_state`, `worktree_session` absorb JSONL field drift **without a migration** — which is exactly why the three tables *without* a hatch are worth knowing by name (above).
+- **⚡ Incremental & idempotent.** Sync keys off `*.jsonl` mtime (`st_mtime_ns`), not the stale sessions-index. Re-ingesting is safe: per-file tables are cleared by `source_file` and re-inserted, so a re-sync corrects them. Note that `messages` / `attachments` / `system_events` are `ON CONFLICT (uuid) DO NOTHING` rather than upserts — an existing row whose source file is gone is only correctable by a backfill.
 - **🚨 Nothing is dropped in silence.** A session-scoped record type `csd` doesn't model yet still lands **verbatim** in `session_records`, flagged `is_modelled = false` — and the same sweep that stored it says so, on its summary line, its heartbeat, `csd sweep-health` and `csd stats`. New Claude Code record types show up on the next sweep, not on the next audit.
 - **🛡️ Hardened background sweep.** A launchd-timed `csd sweep` with a liveness guard, heartbeat/error detection, and an idle-transaction reaper — built after a real lock-convoy once starved the schedule for ~9h.
 
@@ -85,15 +85,19 @@ csd recent 10
 
 ## 📊 What you can query
 
-**20 tables** capture the full transcript graph — `sessions`, `messages`, `content_blocks`, `tool_results`, `agent_tasks`, `attachments`, `file_history`, `pr_links`, `session_records`, and more — each with its raw JSONB escape-hatch.
+**21 tables** capture the full transcript graph — `sessions`, `messages`, `content_blocks`, `tool_results`, `agent_tasks`, `attachments`, `file_history`, `pr_links`, `session_records`, and more. Three of them carry a raw JSONB escape-hatch for the whole record (`messages.raw`, `system_events.raw`, `session_records.payload`); the rest keep promoted columns and a per-field hatch where one exists.
 
-On top sit **analytic views**, ready to `SELECT` from:
+On top sit **16 analytic views**, ready to `SELECT` from — the ones worth knowing by name:
 
 | View | Lens |
 |---|---|
 | `v_session_overview` | One row per session — counts, tokens, errors, precomputed |
 | `v_token_by_attribution` | Token absorption per skill / MCP / agent |
+| `v_message_cost` | The reusable per-message costing base every spend view is built on |
 | `v_token_cost_by_model` · `v_token_cost_daily` | Spend through the caching lens |
+| `v_token_usage_by_model` | Tokens and cache-hit % per model |
+| `v_error_summary` | Every failed tool result, classified |
+| `v_unsummarized` | The roll-up work queue — pending, non-subagent sessions |
 | `v_daily_usage` · `v_project_activity` | Activity over time and across projects |
 | `v_error_by_class` · `v_error_recovery` | Where things fail, and how they recover |
 | `v_tool_usage` | Tool-call frequency and cost |

@@ -919,6 +919,52 @@ BACKFILLS = [
                    (SELECT count(*) FROM upd)    AS updated
         """,
     },
+    {
+        # `sync._upsert_session` picked first_prompt with `u.is_direct_prompt`
+        # — the STRING-ONLY predicate the v9 relabel had already rejected — so
+        # a session whose first prompt carried an image, a document, or any
+        # list-shaped content got the wrong one (or none): 132 of 2,684 main
+        # sessions. The code now uses the v9 rule; this recomputes the history
+        # from `messages` (whose message_type IS the v9 rule, and which v9's
+        # own relabel backfill already corrected) rather than re-reading 2,000
+        # JSONL files.
+        #
+        # Per-session and idempotent: the earliest non-meta, non-sidechain
+        # prompt wins, and the UPDATE is IS DISTINCT FROM-guarded, so a session
+        # whose stored value already agrees is not rewritten. Main sessions
+        # only — a CHILD row ("<parent>:<agent>") does not match
+        # messages.session_id; refresh those with `csd backfill-subagents`.
+        "key": "v10_first_prompt",
+        "desc": "sessions.first_prompt: recomputed with the v9 prompt rule",
+        "sql": """
+            WITH batch AS (
+                SELECT session_id, is_subagent, first_prompt FROM sessions
+                WHERE session_id > %(after)s ORDER BY session_id LIMIT %(limit)s
+            ), want AS (
+                SELECT b.session_id, m.prompt_text
+                FROM batch b
+                JOIN LATERAL (
+                    SELECT prompt_text FROM messages
+                    WHERE session_id = b.session_id
+                      AND role = 'user' AND message_type = 'prompt'
+                      AND NOT is_meta AND NOT is_sidechain
+                      AND prompt_text IS NOT NULL
+                    ORDER BY ts NULLS LAST, uuid
+                    LIMIT 1
+                ) m ON true
+                WHERE NOT b.is_subagent
+            ), upd AS (
+                UPDATE sessions s SET first_prompt = w.prompt_text
+                FROM want w
+                WHERE s.session_id = w.session_id
+                  AND s.first_prompt IS DISTINCT FROM w.prompt_text
+                RETURNING 1
+            )
+            SELECT (SELECT max(session_id) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)        AS scanned,
+                   (SELECT count(*) FROM upd)          AS updated
+        """,
+    },
 ]
 
 
@@ -1496,11 +1542,12 @@ class SessionArchive:
     def run_backfills(self, max_seconds: float = BACKFILL_MAX_SECONDS,
                       batch_rows: int = BACKFILL_BATCH_ROWS,
                       log=None) -> dict:
-        """Advance the one-time schema-v9 data backfills. Bounded and resumable.
+        """Advance the one-time schema data backfills. Bounded and resumable.
 
-        Walks the messages PK in committed batches (see the BACKFILLS comment
-        for why it is not one big UPDATE), spending at most `max_seconds` per
-        call. A backfill that reaches the end of the table is marked `done` in
+        Walks a table's PK in committed batches (`messages.uuid` or
+        `sessions.session_id` — whichever the backfill's own SQL orders by; see
+        the BACKFILLS comment for why it is not one big UPDATE), spending at
+        most `max_seconds` per call. A backfill that reaches the end of the table is marked `done` in
         `metadata` and never walked again; one that runs out of budget resumes
         from its stored cursor on the next sweep tick.
 

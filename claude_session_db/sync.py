@@ -794,6 +794,28 @@ class SessionSync:
     # -- session metadata derivation ---------------------------------------
 
     @staticmethod
+    def _first_prompt(users: list) -> Optional[str]:
+        """The session's first real user prompt, by the v9 classification rule.
+
+        A user record is one of exactly two things — an answer to a tool call,
+        or a prompt — and the only positive evidence for the first is a
+        `tool_result` block (`UserMessage.is_tool_result`). `is_direct_prompt`
+        is NOT that rule: it is True only for bare STRING content, so every
+        prompt carrying an image, a document, or any list-shaped content
+        answered False and was skipped here. `messages.message_type` was fixed
+        for exactly this in v9 (`v9_relabel_list_content_prompts`) and
+        `first_prompt` was left behind on the string-only predicate — 132 of
+        2,684 main sessions carried the wrong first prompt as a result.
+
+        `prompt_text` already joins every text block of a list-shaped prompt in
+        order, so a multi-block prompt is not truncated to its first paragraph.
+        """
+        for u in users:
+            if not u.is_tool_result and not u.is_meta and u.prompt_text:
+                return u.prompt_text
+        return None
+
+    @staticmethod
     def _derive_from_session_records(records: dict, ctx_last=None) -> dict:
         """Derive the schema-v9 `sessions` columns from the generic records.
 
@@ -898,10 +920,9 @@ class SessionSync:
         users = records.get("user", [])
         assts = records.get("assistant", [])
         # The sidechain seed prompt (the Agent dispatch prompt) is the child's
-        # first_prompt — the same shape as a main session's first real prompt.
-        first_prompt = next((u.prompt_text for u in users
-                             if u.is_direct_prompt and not u.is_meta and u.prompt_text),
-                            None)
+        # first_prompt — the same shape as a main session's first real prompt,
+        # and picked by the same v9 rule (see _first_prompt).
+        first_prompt = self._first_prompt(users)
         ctx = next((m for m in users + assts), None)
         ts_list = [m.timestamp for m in users + assts if getattr(m, "timestamp", None)]
 
@@ -942,12 +963,8 @@ class SessionSync:
         users = records.get("user", [])
         assts = records.get("assistant", [])
 
-        # First real user prompt
-        first_prompt = None
-        for u in users:
-            if u.is_direct_prompt and not u.is_meta and u.prompt_text:
-                first_prompt = u.prompt_text
-                break
+        # First real user prompt (v9 rule — see _first_prompt)
+        first_prompt = self._first_prompt(users)
 
         # Context fields from any conversation record
         ctx = next((m for m in users + assts), None)

@@ -41,6 +41,16 @@ rewritten outside a documented resumable backfill. Full schema reference:
   deleting by `message_uuid` would destroy rows another file's per-file
   clear/insert cycle owns and they would not come back until that file's mtime
   changed. `SyncStats.duplicate_rows_skipped` reports it.
+- **`sessions.first_prompt` uses the v9 prompt rule.** `sync` still picked it
+  with `u.is_direct_prompt` — the STRING-ONLY predicate the v9 relabel had
+  already rejected — so a session whose first prompt carried an image, a
+  document or any list-shaped content stored the *second* prompt, or none: 132
+  of 2,684 main sessions. Both derivation sites (main session and sidechain
+  child) now share `SessionSync._first_prompt`, which classifies on the
+  `tool_result`-block rule and takes `prompt_text` (every text block, in order).
+  New resumable backfill **`v10_first_prompt`** recomputes the history from
+  `messages` — per-session, `IS DISTINCT FROM`-guarded, main sessions only
+  (refresh child rows with `csd backfill-subagents`).
 - **`sessions.tool_use_count` / `error_count` count identities, not rows.**
   `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
   `block_id` fallback so an id-less block is not silently dropped by

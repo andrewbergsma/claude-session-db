@@ -19,6 +19,43 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.0] - Unreleased
+
+The **code-defect batch** — schema **v10**. An adversarial review of the live
+archive on 2026-09-02 found eight defects: duplicated child rows, a predicate
+the v9 relabel had already rejected, two never-populated columns, three fields
+dropped on ingest, a frozen project path and a silently incomplete cost view.
+All schema changes are additive and idempotent; no existing row is deleted or
+rewritten outside a documented resumable backfill. Full schema reference:
+[`DATA_MODEL.md`](DATA_MODEL.md).
+
+### Fixed
+- **`content_blocks` / `tool_results` no longer duplicate across source files.**
+  `messages` inserts `ON CONFLICT (uuid) DO NOTHING`, so a record present in two
+  transcripts keeps ONE message row — but the child tables have no uniqueness
+  and `clear_file_data` deletes only by `source_file`, so the second file
+  appended a SECOND set of blocks and results beside the first (2.7% of recent
+  assistant messages; 3,339 duplicated `(message_uuid, tool_use_id)` pairs
+  across 300 recent sessions). Ingest now **skips** block/result rows for a
+  message whose row is owned by a different file — skip, not delete, because
+  deleting by `message_uuid` would destroy rows another file's per-file
+  clear/insert cycle owns and they would not come back until that file's mtime
+  changed. `SyncStats.duplicate_rows_skipped` reports it.
+- **`sessions.tool_use_count` / `error_count` count identities, not rows.**
+  `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
+  `block_id` fallback so an id-less block is not silently dropped by
+  `count(DISTINCT)`) and `DISTINCT (message_uuid, tool_use_id)` for errors, on
+  both the main-session and the child-session statement. The aggregates are
+  therefore correct despite the historical duplicates.
+
+### Added
+- **`v_duplicate_blocks`** — the historical duplication made visible:
+  `(message_uuid, session_id, kind, source_files, row_count)` for every message
+  whose blocks or results span more than one `source_file`. Historical
+  duplicates are **not** deleted automatically; the operator cleanup recipe
+  (batched, `LIMIT 20000`, delete only rows whose `source_file` differs from the
+  owning message's) is documented beside the view definition in `postgres.py`.
+
 ## [3.23.0] - 2026-09-02
 
 The **Claude Code v2.1.161-258 impact release** — schema **v9**. Eleven record

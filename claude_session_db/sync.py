@@ -121,6 +121,9 @@ class SyncStats:
     overflow_results: int = 0
     task_outputs: int = 0
     errors: int = 0
+    # Block/result rows NOT written because their message row is owned by a
+    # different source file (schema v10 cross-file de-duplication).
+    duplicate_rows_skipped: int = 0
 
     # --- the unmodelled-record tripwire -----------------------------------
     # The parser has always collected `records["unknown"]` and nothing has ever
@@ -173,6 +176,11 @@ class SyncStats:
             f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
+        if self.duplicate_rows_skipped:
+            out += (f"\n  Duplicate block/result rows skipped: "
+                    f"{self.duplicate_rows_skipped:,}\n"
+                    f"    (their message row is owned by another source file;"
+                    f" see v_duplicate_blocks)")
         if self.unknown:
             out += (f"\n  UNMODELLED record types: {self.unknown:,} records — "
                     f"{self.unknown_census(20)}\n"
@@ -512,8 +520,37 @@ class SessionSync:
                 "source_file": source_file,
             })
 
-        # Batched inserts
+        # Batched inserts. Messages FIRST: the block/result de-duplication below
+        # asks the archive who owns each message row, and this file's own
+        # messages have to be in place before that question means anything.
         self.archive.insert_messages(msg_rows)
+
+        # De-duplicate across source files (schema v10). `messages` upserts ON
+        # CONFLICT (uuid) DO NOTHING, so a record present in two transcripts
+        # keeps ONE message row — owned by whichever file wrote it first — but
+        # content_blocks/tool_results had no uniqueness and clear_file_data
+        # deletes only by source_file, so the second file appended a SECOND set
+        # of blocks and results. 2.7% of recent assistant messages carried
+        # them, and they inflated sessions.tool_use_count / error_count.
+        #
+        # The rule, consistent with per-file clear semantics: a message's child
+        # rows belong to the file that owns the message row. Rows for a message
+        # owned elsewhere are skipped, not written and not deleted — deleting
+        # them here would destroy rows another file's clear/insert cycle owns.
+        owned_elsewhere = self.archive.message_uuids_owned_elsewhere(
+            [r["message_uuid"] for r in cb_rows] +
+            [r["message_uuid"] for r in tr_rows],
+            source_file,
+        )
+        if owned_elsewhere:
+            n_cb, n_tr = len(cb_rows), len(tr_rows)
+            cb_rows = [r for r in cb_rows if r["message_uuid"] not in owned_elsewhere]
+            tr_rows = [r for r in tr_rows if r["message_uuid"] not in owned_elsewhere]
+            skipped = (n_cb - len(cb_rows)) + (n_tr - len(tr_rows))
+            stats.duplicate_rows_skipped += skipped
+            self.log(f"    skipped {skipped:,} block/result rows for "
+                     f"{len(owned_elsewhere):,} messages owned by another file")
+
         self.archive.insert_content_blocks(cb_rows)
         self.archive.insert_tool_results(tr_rows)
         self.archive.insert_attachments(att_rows)

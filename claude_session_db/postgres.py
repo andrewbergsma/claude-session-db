@@ -29,10 +29,12 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 9  # + session_records catch-all, fork/relocation/worktree/cost-state
-                    #   session columns, messages.effort/session_kind, usage sub-fields,
-                    #   Claude 5 pricing, prompt/tool_result relabel. See DATA_MODEL.md
-                    #   "Migration history".
+SCHEMA_VERSION = 10  # v9 + the 2026-09-02 code-defect batch: cross-file block/
+                     #   result de-duplication (+ v_duplicate_blocks), DISTINCT
+                     #   aggregates, sessions.worktree_active, attachments.raw,
+                     #   content_blocks.caller, projects.decoded_from, priced/
+                     #   unpriced counts on v_token_cost_daily, and the
+                     #   v10_* backfills. See DATA_MODEL.md "Migration history".
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -1299,6 +1301,73 @@ WHERE NOT s.is_subagent
   AND (s.reported_cost_usd IS NOT NULL OR c.computed_cost_usd IS NOT NULL)
 ORDER BY abs(coalesce(s.reported_cost_usd, 0) - coalesce(c.computed_cost_usd, 0)) DESC;
 
+-- ---------------------------------------------------------------------------
+-- v_duplicate_blocks (schema v10) — the HISTORICAL cross-file duplication of a
+-- message's content_blocks / tool_results, made visible.
+--
+-- `messages` inserts ON CONFLICT (uuid) DO NOTHING, so a record present in two
+-- transcripts (a resumed/forked session re-writing the same uuids, a sidechain
+-- copied into a second file) yields ONE message row. `content_blocks` and
+-- `tool_results` have no uniqueness at all and `clear_file_data` deletes only by
+-- `source_file`, so the SECOND file's blocks/results were appended beside the
+-- first file's — 2.7% of recent assistant messages, 3,339 duplicated
+-- (message_uuid, tool_use_id) pairs across 300 recent sessions. That inflated
+-- sessions.tool_use_count / error_count.
+--
+-- Since v10 the ingest path no longer creates these (sync skips block/result
+-- rows for a message whose row is owned by a DIFFERENT source_file), and
+-- recompute_session_aggregates counts DISTINCT tool_use_id / distinct error
+-- rows so the aggregates are right despite the history. Nothing is deleted
+-- automatically: existing duplicates are data, and a bulk DELETE is exactly the
+-- long-transaction shape that once convoyed this database for ~9h.
+--
+-- OPERATOR CLEANUP RECIPE (deliberate, off the sweep's hot path, in batches —
+-- run it yourself when you want the heap back; keep the row owned by the file
+-- that owns the message row):
+--
+--   -- 1. Look before you delete.
+--   SELECT kind, count(*) AS messages, sum(row_count) AS rows
+--   FROM v_duplicate_blocks GROUP BY 1;
+--
+--   -- 2. Delete, in bounded batches, only the rows whose source_file is NOT
+--   --    the one that owns the message. Repeat until it reports 0.
+--   WITH doomed AS (
+--       SELECT cb.block_id
+--       FROM content_blocks cb
+--       JOIN messages m ON m.uuid = cb.message_uuid
+--       WHERE cb.source_file <> m.source_file
+--       LIMIT 20000
+--   )
+--   DELETE FROM content_blocks c USING doomed d WHERE c.block_id = d.block_id;
+--   -- (same shape for tool_results, keyed result_id)
+--
+--   -- 3. Then re-run aggregates:  csd query "SELECT 1"  is not enough —
+--   --    use `csd ingest` (which ends in recompute_session_aggregates), or
+--   --    call SessionArchive.recompute_session_aggregates() directly.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW v_duplicate_blocks AS
+SELECT message_uuid, session_id, kind, source_files, row_count
+FROM (
+    SELECT cb.message_uuid,
+           min(cb.session_id)                 AS session_id,
+           'content_blocks'::text             AS kind,
+           count(DISTINCT cb.source_file)     AS source_files,
+           count(*)                           AS row_count
+    FROM content_blocks cb
+    GROUP BY cb.message_uuid
+    HAVING count(DISTINCT cb.source_file) > 1
+    UNION ALL
+    SELECT tr.message_uuid,
+           min(tr.session_id),
+           'tool_results'::text,
+           count(DISTINCT tr.source_file),
+           count(*)
+    FROM tool_results tr
+    GROUP BY tr.message_uuid
+    HAVING count(DISTINCT tr.source_file) > 1
+) d
+ORDER BY row_count DESC, message_uuid;
+
 -- Phase-4 work queue: pending-only sessions the sweep should summarize next.
 -- This replaces the recent-by-mtime walk (which is ~80% already-summarized —
 -- see claudecode:lesson/recent-by-mtime-backlog-is-mostly-already-summarized).
@@ -1553,6 +1622,36 @@ class SessionArchive:
                 "DELETE FROM file_history WHERE source_file = %s", (source_file,)
             )
         conn.commit()
+
+    def message_uuids_owned_elsewhere(self, uuids: list[str],
+                                      source_file: str) -> set[str]:
+        """Of `uuids`, those whose `messages` row belongs to a DIFFERENT file.
+
+        The de-duplication seam (schema v10). `messages` inserts ON CONFLICT
+        (uuid) DO NOTHING, so a record present in two transcripts keeps the row
+        the FIRST file wrote — but `content_blocks` / `tool_results` had no
+        uniqueness, and `clear_file_data` deletes only by `source_file`, so the
+        second file appended a second set of blocks/results beside the first.
+
+        Chosen fix: SKIP, not delete-then-insert-by-message_uuid. Deleting by
+        message_uuid inside this file's transaction would remove rows another
+        file OWNS (rows that file's own `clear_file_data` is responsible for),
+        breaking the per-file clear invariant the whole ingest path rests on —
+        and those rows would then never come back until that other file's mtime
+        changed. Skipping keeps exactly one rule: a message's child rows belong
+        to the file that owns the message row, and are rewritten only when THAT
+        file is re-synced.
+        """
+        if not uuids:
+            return set()
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT uuid FROM messages "
+                "WHERE uuid = ANY(%s) AND source_file IS DISTINCT FROM %s",
+                (list({u for u in uuids if u}), source_file),
+            )
+            return {r[0] for r in cur.fetchall()}
 
     # -- projects / sessions ------------------------------------------------
 
@@ -1827,6 +1926,12 @@ class SessionArchive:
           messages.session_id, so the first UPDATE can't touch them; the second
           statement fills them from messages keyed (session_id, agent_id) —
           for a child, total_* == own_*.
+
+        Schema v10: tool_use_count counts DISTINCT tool_use_id and error_count
+        counts DISTINCT (message_uuid, tool_use_id), not rows. Blocks and
+        results were duplicated across source files before v10 (see
+        v_duplicate_blocks); the identity counts are correct either way, and
+        the historical rows are left in place rather than deleted.
         """
         conn = self.connect()
         with conn.cursor() as cur:
@@ -1848,16 +1953,30 @@ class SessionArchive:
                         count(*) FILTER (WHERE NOT is_sidechain) AS own_message_count
                     FROM messages GROUP BY session_id
                 ),
+                -- DISTINCT (schema v10): a message present in two transcripts
+                -- has ONE messages row but historically got TWO sets of blocks
+                -- / results (see v_duplicate_blocks). Counting rows therefore
+                -- inflated tool_use_count / error_count. Counting the tool_use
+                -- IDENTITY instead is correct with or without the history.
+                -- The coalesce keeps a tool_use block with no id countable
+                -- (block_id is unique), instead of silently vanishing from
+                -- count(DISTINCT).
                 tu AS (
-                    SELECT cb.session_id, count(*) AS cnt,
-                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    SELECT cb.session_id,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id)) AS cnt,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id))
+                               FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM content_blocks cb
                     LEFT JOIN messages m ON m.uuid = cb.message_uuid
                     WHERE cb.block_type='tool_use' GROUP BY cb.session_id
                 ),
                 err AS (
-                    SELECT tr.session_id, count(*) AS cnt,
-                           count(*) FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
+                    SELECT tr.session_id,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id)) AS cnt,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id))
+                               FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM tool_results tr
                     LEFT JOIN messages m ON m.uuid = tr.message_uuid
                     WHERE tr.is_error GROUP BY tr.session_id
@@ -1925,14 +2044,18 @@ class SessionArchive:
                     GROUP BY 1, 2
                 ),
                 ct AS (
-                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    -- DISTINCT for the same reason as `tu` above.
+                    SELECT m.session_id AS parent, m.agent_id,
+                           count(DISTINCT coalesce(nullif(cb.tool_use_id, ''),
+                                                   'blk:' || cb.block_id)) AS cnt
                     FROM content_blocks cb
                     JOIN messages m ON m.uuid = cb.message_uuid
                     WHERE cb.block_type='tool_use' AND m.agent_id IS NOT NULL
                     GROUP BY 1, 2
                 ),
                 ce AS (
-                    SELECT m.session_id AS parent, m.agent_id, count(*) AS cnt
+                    SELECT m.session_id AS parent, m.agent_id,
+                           count(DISTINCT (tr.message_uuid, tr.tool_use_id)) AS cnt
                     FROM tool_results tr
                     JOIN messages m ON m.uuid = tr.message_uuid
                     WHERE tr.is_error AND m.agent_id IS NOT NULL

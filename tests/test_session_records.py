@@ -2,7 +2,7 @@
 
 Before schema v9, a session-scoped record type with no dedicated table was
 collected into `records["unknown"]` and then dropped: the archive claims to be
-LOSSLESS, and for eleven record types added by Claude Code v2.1.161-258 it
+LOSSLESS, and for ten record types added by Claude Code v2.1.161-258 it
 simply was not. This file pins the routing, the payload fidelity, the natural
 key, and the modelled/unmodelled split that keeps the tripwire from crying wolf
 about types csd already handles.
@@ -207,5 +207,5 @@ def test_table_is_cleared_per_source_file():
     assert "session_records" in postgres.PER_FILE_TABLES
 
 
-def test_schema_version_is_9():
-    assert postgres.SCHEMA_VERSION == 9
+def test_schema_version_is_10():
+    assert postgres.SCHEMA_VERSION == 10

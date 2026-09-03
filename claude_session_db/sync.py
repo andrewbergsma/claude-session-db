@@ -179,7 +179,7 @@ class SessionSync:
             if rebuild:
                 self.log("Rebuilding schema (DROP + CREATE)...")
                 self.archive.drop_all()
-            self.archive.initialize()
+            self.archive.initialize(backfill_log=self.log)
 
             files = self.enumerate_files()
             stats.files_found = len(files)
@@ -468,7 +468,8 @@ class SessionSync:
             "git_branch": msg.git_branch,
             "cc_version": msg.version,
             "entrypoint": msg.entrypoint,
-            "forked_from": msg.forked_from,
+            "session_kind": msg.session_kind,
+            "forked_from": msg.forked_from,   # legacy; dead since CC v2.1.212
             "source_file": source_file,
             "source_line": None,
             "raw": msg.raw,
@@ -507,6 +508,12 @@ class SessionSync:
             "inference_geo": u.inference_geo,
             "speed": u.speed,
             "usage": u.raw or None,
+            # schema v9: promoted usage sub-fields + the top-level effort level
+            "thinking_tokens": u.thinking_tokens,
+            "server_tool_use": u.server_tool_use,
+            "iterations": u.iterations,
+            "effort": msg.effort,
+            "session_kind": msg.session_kind,
             "is_sidechain": msg.is_sidechain,
             "agent_id": msg.agent_id,
             "slug": msg.slug,

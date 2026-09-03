@@ -294,12 +294,65 @@ CREATE TABLE IF NOT EXISTS messages (
     git_branch   TEXT,
     cc_version   TEXT,
     entrypoint   TEXT,
+    -- LEGACY. `forkedFrom` was a top-level {sessionId, messageUuid} on user /
+    -- assistant records; Claude Code stopped emitting it at v2.1.212. Kept
+    -- because pre-2.1.212 sessions carry real values here and the archive does
+    -- not drop columns. The live replacement is the `fork-context-ref` record
+    -- -> sessions.forked_from_session_id / _uuid / fork_context_length.
     forked_from  JSONB,
 
     source_file TEXT NOT NULL,
     source_line INTEGER,
     raw         JSONB
 );
+
+-- Migration (idempotent, guarded): schema v9 message columns.
+--
+-- Plain nullable columns, NOT generated columns over `usage`/`raw`. Postgres 16
+-- has only STORED generated columns, and adding one rewrites the whole table —
+-- a multi-GB ACCESS EXCLUSIVE rewrite of 1.3M rows inside the 5-minute sweep's
+-- initialize(). ADD COLUMN without a default is O(1); the historical values are
+-- filled by the resumable, self-committing cursor backfills in run_backfills().
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'messages'
+          AND column_name = 'effort'
+    ) THEN
+        ALTER TABLE messages
+            -- Top-level `effort` on assistant records ("high", ...). Present on
+            -- 98.5% of them (235,687 of 239,367 in a 30-day scan) and, until
+            -- v9, visible only inside `raw`. This is the effort level the turn
+            -- actually ran at — the single biggest per-turn cost/quality lever,
+            -- and it was unqueryable.
+            ADD COLUMN effort TEXT,
+
+            -- `sessionKind` ("bg"). Constant per session in the corpus, so
+            -- `sessions.session_kind` is the primary home; this mirror exists
+            -- so a message-level query does not need the join, and so a FUTURE
+            -- session that does vary is not silently flattened.
+            ADD COLUMN session_kind TEXT,
+
+            -- usage sub-fields. The full `usage` object is already archived as
+            -- JSONB; these three are promoted because they are the ones the
+            -- cost/behaviour lenses actually group by.
+            --   thinking_tokens  usage.output_tokens_details.thinking_tokens
+            --                    (55% of assistant records) — how much of the
+            --                    output was reasoning rather than answer.
+            --   server_tool_use  usage.server_tool_use (64%) — server-side tool
+            --                    invocations (web search/fetch), billed
+            --                    separately from tokens. JSONB: shape varies.
+            --   iterations       usage.iterations (64%).
+            ADD COLUMN thinking_tokens INTEGER,
+            ADD COLUMN server_tool_use JSONB,
+            ADD COLUMN iterations      INTEGER;
+    END IF;
+END $$;
+CREATE INDEX IF NOT EXISTS idx_messages_effort ON messages(effort)
+    WHERE effort IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_messages_session_kind ON messages(session_kind)
+    WHERE session_kind IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);
@@ -708,6 +761,71 @@ CREATE INDEX IF NOT EXISTS idx_summary_passes_status ON summary_passes(status);
 # Additive: appended rather than inlined so the DDL has one home (above) that
 # summarize.py can execute on its own.
 SCHEMA_SQL += SUMMARY_PASSES_DDL
+
+
+# --- one-time, resumable data backfills (schema v9) --------------------------
+#
+# A new column is O(1) to ADD but its 1.3M historical rows are not. A single
+# `UPDATE messages SET ... WHERE ...` would hold one transaction for minutes
+# inside a sweep tick — precisely the `idle in transaction` shape that once
+# convoyed the whole database for ~9h (lesson
+# csd-sweep-idle-in-transaction-lock-convoy) — and would bloat the heap.
+#
+# So each backfill WALKS THE PRIMARY KEY in bounded batches, commits each batch,
+# and stores its cursor in `metadata`. Properties that matter:
+#   * resumable   — a sweep that runs out of its time budget continues on the
+#                   next tick from the stored cursor;
+#   * bounded     — BACKFILL_MAX_SECONDS per initialize() call, so ingest is
+#                   never delayed by more than that;
+#   * ordered     — `uuid > cursor ORDER BY uuid` uses the PK index, so the
+#                   whole pass is O(n log n), not O(n^2 / batch) as a repeated
+#                   `WHERE col IS NULL` scan would be;
+#   * idempotent  — every statement is `IS DISTINCT FROM`-guarded, so re-running
+#                   one writes nothing, and a completed backfill is marked done
+#                   in `metadata` and never re-walked;
+#   * additive    — every one of them only ever fills a NULL or corrects a value
+#                   the same source data already implies. Nothing is deleted,
+#                   no row is removed, no column is rewritten wholesale.
+#
+# Each entry supplies SQL taking %(after)s / %(limit)s and returning one row
+# (next_cursor, scanned, updated).
+BACKFILL_BATCH_ROWS = 20_000
+BACKFILL_MAX_SECONDS = 20.0
+
+BACKFILLS = [
+    {
+        "key": "v9_message_effort_usage",
+        "desc": "messages.effort / session_kind / thinking_tokens / "
+                "server_tool_use / iterations from raw+usage",
+        "sql": """
+            WITH batch AS (
+                SELECT uuid, raw, usage FROM messages
+                WHERE uuid > %(after)s ORDER BY uuid LIMIT %(limit)s
+            ), upd AS (
+                UPDATE messages m SET
+                    effort          = b.raw->>'effort',
+                    session_kind    = b.raw->>'sessionKind',
+                    thinking_tokens = nullif(b.usage->'output_tokens_details'
+                                             ->>'thinking_tokens', '')::int,
+                    server_tool_use = b.usage->'server_tool_use',
+                    iterations      = nullif(b.usage->>'iterations', '')::int
+                FROM batch b
+                WHERE m.uuid = b.uuid
+                  AND (m.effort          IS DISTINCT FROM b.raw->>'effort'
+                    OR m.session_kind    IS DISTINCT FROM b.raw->>'sessionKind'
+                    OR m.thinking_tokens IS DISTINCT FROM
+                       nullif(b.usage->'output_tokens_details'->>'thinking_tokens', '')::int
+                    OR m.server_tool_use IS DISTINCT FROM b.usage->'server_tool_use'
+                    OR m.iterations      IS DISTINCT FROM
+                       nullif(b.usage->>'iterations', '')::int)
+                RETURNING 1
+            )
+            SELECT (SELECT max(uuid) FROM batch)   AS next_cursor,
+                   (SELECT count(*) FROM batch)    AS scanned,
+                   (SELECT count(*) FROM upd)      AS updated
+        """,
+    },
+]
 
 
 VIEWS_SQL = """
@@ -1134,7 +1252,7 @@ class SessionArchive:
 
     # -- schema -------------------------------------------------------------
 
-    def initialize(self) -> None:
+    def initialize(self, backfill_log=None) -> None:
         conn = self.connect()
         with conn.cursor() as cur:
             # Tables/indexes: IF NOT EXISTS, cheap and low-conflict — run every time
@@ -1160,6 +1278,88 @@ class SessionArchive:
                     (str(SCHEMA_VERSION),),
                 )
         conn.commit()
+        # Historical data for the new v9 columns. Bounded + resumable, and it
+        # commits its own batches — so it deliberately runs AFTER the DDL commit
+        # above rather than inside that transaction.
+        self.run_backfills(log=backfill_log)
+
+    # -- backfills ----------------------------------------------------------
+
+    def _meta_get(self, key: str) -> Optional[str]:
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM metadata WHERE key = %s", (key,))
+            row = cur.fetchone()
+        return row[0] if row else None
+
+    def _meta_set(self, key: str, value: str) -> None:
+        conn = self.connect()
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO metadata(key, value) VALUES (%s, %s) "
+                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                (key, value),
+            )
+
+    def run_backfills(self, max_seconds: float = BACKFILL_MAX_SECONDS,
+                      batch_rows: int = BACKFILL_BATCH_ROWS,
+                      log=None) -> dict:
+        """Advance the one-time schema-v9 data backfills. Bounded and resumable.
+
+        Walks the messages PK in committed batches (see the BACKFILLS comment
+        for why it is not one big UPDATE), spending at most `max_seconds` per
+        call. A backfill that reaches the end of the table is marked `done` in
+        `metadata` and never walked again; one that runs out of budget resumes
+        from its stored cursor on the next sweep tick.
+
+        Returns {key: {updated, scanned, done}}. Never raises: a failure rolls
+        back that backfill's batch, is reported, and does not stop ingest —
+        this runs inside `initialize()`, on the sweep's hot path.
+        """
+        import time as _t
+        emit = log if callable(log) else (lambda _m: None)
+        conn = self.connect()
+        deadline = _t.monotonic() + max_seconds
+        report: dict[str, dict] = {}
+
+        for spec in BACKFILLS:
+            key, done_key = spec["key"], f"backfill:{spec['key']}:done"
+            cursor_key = f"backfill:{spec['key']}:cursor"
+            state = {"updated": 0, "scanned": 0, "done": False}
+            report[key] = state
+            try:
+                if self._meta_get(done_key) == "1":
+                    state["done"] = True
+                    conn.commit()
+                    continue
+                cursor = self._meta_get(cursor_key) or ""
+                while _t.monotonic() < deadline:
+                    with conn.cursor() as cur:
+                        cur.execute("SET LOCAL statement_timeout = '120s'")
+                        cur.execute(spec["sql"],
+                                    {"after": cursor, "limit": batch_rows})
+                        next_cursor, scanned, updated = cur.fetchone()
+                    state["scanned"] += int(scanned or 0)
+                    state["updated"] += int(updated or 0)
+                    if not scanned:
+                        self._meta_set(done_key, "1")
+                        state["done"] = True
+                        conn.commit()
+                        emit(f"  backfill {key}: complete "
+                             f"({state['updated']:,} rows updated)")
+                        break
+                    cursor = next_cursor or cursor
+                    self._meta_set(cursor_key, cursor)
+                    conn.commit()          # bound the transaction to one batch
+                else:
+                    conn.commit()
+                    emit(f"  backfill {key}: paused at {cursor[:8]}… "
+                         f"({state['updated']:,} updated so far; resumes next run)")
+            except psycopg.Error as exc:
+                conn.rollback()
+                state["error"] = f"{type(exc).__name__}: {exc}"
+                emit(f"  backfill {key}: ERROR {state['error']} (will retry)")
+        return report
 
     def ensure_gate_objects(self, lock_timeout_ms: int = 15_000) -> bool:
         """Cheap self-heal for the reconcile path: ensure summary_state +
@@ -1321,8 +1521,11 @@ class SessionArchive:
             "ephemeral_5m_tokens", "ephemeral_1h_tokens", "service_tier", "inference_geo",
             "speed", "usage", "is_sidechain", "agent_id", "slug", "cwd", "git_branch",
             "cc_version", "entrypoint", "forked_from", "source_file", "source_line", "raw",
+            # schema v9
+            "effort", "session_kind", "thinking_tokens", "server_tool_use", "iterations",
         ]
-        jsonb_cols = {"stop_details", "diagnostics", "usage", "forked_from", "raw"}
+        jsonb_cols = {"stop_details", "diagnostics", "usage", "forked_from", "raw",
+                      "server_tool_use"}
         self._batch_insert("messages", cols, rows, jsonb_cols,
                            conflict="uuid")
 

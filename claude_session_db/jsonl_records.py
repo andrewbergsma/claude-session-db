@@ -292,11 +292,26 @@ class Usage:
     service_tier: str = "standard"
     inference_geo: str = "not_available"
     speed: Optional[str] = None
+    # Promoted usage sub-fields (schema v9). The whole `usage` object is still
+    # kept in `raw`; these three are surfaced because they are what the cost and
+    # behaviour lenses group by, and reaching into JSONB for every query is how
+    # a field stays effectively unqueryable.
+    #   thinking_tokens  output_tokens_details.thinking_tokens (55% of records)
+    #                    — how much of the output was reasoning, not answer.
+    #   server_tool_use  server-side tool invocations (web search/fetch), 64%.
+    #                    Shape varies, so it stays a dict.
+    #   iterations       agentic iterations for the turn, 64%.
+    thinking_tokens: Optional[int] = None
+    server_tool_use: Optional[Any] = None
+    iterations: Optional[int] = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Usage":
         cache_data = data.get("cache_creation")
+        details = data.get("output_tokens_details")
+        thinking = (details.get("thinking_tokens")
+                    if isinstance(details, dict) else None)
         return cls(
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -306,6 +321,10 @@ class Usage:
             service_tier=data.get("service_tier", "standard"),
             inference_geo=data.get("inference_geo", "not_available"),
             speed=data.get("speed"),
+            thinking_tokens=thinking if isinstance(thinking, int) else None,
+            server_tool_use=data.get("server_tool_use"),
+            iterations=(data.get("iterations")
+                        if isinstance(data.get("iterations"), int) else None),
             raw=data,
         )
 
@@ -380,6 +399,14 @@ class AssistantMessage:
     # Context / threading (added 2026-06 re-audit)
     entrypoint: Optional[str] = None
     agent_id: Optional[str] = None
+
+    # Top-level `effort` (schema v9). Present on 98.5% of assistant records
+    # (235,687 of 239,367 in a 30-day scan) and, until v9, readable only by
+    # digging into `raw`. It is the effort level the turn actually ran at — the
+    # single biggest per-turn cost/quality lever there is.
+    effort: Optional[str] = None
+    # `sessionKind` ("bg" = background session).
+    session_kind: Optional[str] = None
 
     # Attribution system (NEW — which agent/skill/mcp/plugin produced this message)
     attribution_agent: Optional[str] = None
@@ -471,6 +498,8 @@ class AssistantMessage:
             error=data.get("error"),
             entrypoint=data.get("entrypoint"),
             agent_id=data.get("agentId"),
+            effort=data.get("effort"),
+            session_kind=data.get("sessionKind"),
             attribution_agent=data.get("attributionAgent"),
             attribution_skill=data.get("attributionSkill"),
             attribution_mcp_server=data.get("attributionMcpServer"),
@@ -561,6 +590,9 @@ class UserMessage:
     prompt_id: Optional[str] = None
     agent_id: Optional[str] = None
     origin: Optional[Any] = None
+    session_kind: Optional[str] = None
+    # LEGACY: Claude Code stopped emitting `forkedFrom` at v2.1.212. The live
+    # replacement is the `fork-context-ref` record (-> sessions.forked_from_*).
     forked_from: Optional[dict] = None
     raw: dict = field(default_factory=dict, repr=False)
 
@@ -674,6 +706,7 @@ class UserMessage:
             prompt_id=data.get("promptId"),
             agent_id=data.get("agentId"),
             origin=data.get("origin"),
+            session_kind=data.get("sessionKind"),
             forked_from=data.get("forkedFrom"),
             raw=data,
         )

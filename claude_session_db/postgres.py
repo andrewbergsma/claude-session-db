@@ -370,7 +370,8 @@ CREATE TABLE IF NOT EXISTS content_blocks (
     message_uuid TEXT NOT NULL,
     session_id  TEXT,
     block_index INTEGER NOT NULL,
-    block_type  TEXT NOT NULL,           -- thinking | text | tool_use
+    block_type  TEXT NOT NULL,           -- thinking | text | tool_use | the block's own type
+                                        --   (v9: unknown types are kept verbatim, see block_payload)
     content     TEXT,                    -- full thinking/text (no truncation)
     char_count  INTEGER,
     signature   TEXT,
@@ -387,6 +388,27 @@ CREATE INDEX IF NOT EXISTS idx_cb_type ON content_blocks(block_type);
 CREATE INDEX IF NOT EXISTS idx_cb_tool ON content_blocks(tool_name);
 CREATE INDEX IF NOT EXISTS idx_cb_tool_use_id ON content_blocks(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_cb_source_file ON content_blocks(source_file);
+
+-- Migration (idempotent, guarded): schema v9 content-block payload.
+--
+-- `parse_content_block` returned None for any block type it did not recognise,
+-- and sync skips a None — so an unrecognised block was DROPPED, and every later
+-- block in the same message shifted down one `block_index`, silently corrupting
+-- the ordering of the blocks that WERE kept. Claude Code v2.1.247's `fallback`
+-- block ({"type":"fallback","from":{"model":…},"to":{"model":…}} — a
+-- server-side model fallback, precisely what a cost or reliability lens wants)
+-- went that way. Unknown blocks are now stored under their REAL block_type with
+-- the payload verbatim here.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'content_blocks'
+          AND column_name = 'block_payload'
+    ) THEN
+        ALTER TABLE content_blocks ADD COLUMN block_payload JSONB;
+    END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS tool_results (
     result_id    BIGSERIAL PRIMARY KEY,
@@ -1577,8 +1599,10 @@ class SessionArchive:
     def insert_content_blocks(self, rows: list[dict]) -> None:
         cols = ["message_uuid", "session_id", "block_index", "block_type", "content",
                 "char_count", "signature", "tool_use_id", "tool_name", "tool_input",
-                "tool_type", "mcp_server", "source_file", "source_line"]
-        self._batch_insert("content_blocks", cols, rows, {"tool_input"})
+                "tool_type", "mcp_server", "source_file", "source_line",
+                "block_payload"]   # schema v9: verbatim payload of an unknown block
+        self._batch_insert("content_blocks", cols, rows,
+                           {"tool_input", "block_payload"})
 
     def insert_tool_results(self, rows: list[dict]) -> None:
         cols = ["message_uuid", "session_id", "tool_use_id", "content_text", "tldr",

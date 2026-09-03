@@ -26,6 +26,7 @@ from .jsonl_records import (
     ThinkingBlock,
     TextBlock,
     ToolUseBlock,
+    UnknownBlock,
 )
 from .postgres import SessionArchive, resolve_dsn
 from .subagent import load_external_tool_results, read_agent_meta
@@ -541,7 +542,7 @@ class SessionSync:
             "message_uuid": message_uuid, "session_id": session_id, "block_index": idx,
             "block_type": "", "content": None, "char_count": None, "signature": None,
             "tool_use_id": None, "tool_name": None, "tool_input": None,
-            "tool_type": None, "mcp_server": None,
+            "tool_type": None, "mcp_server": None, "block_payload": None,
             "source_file": source_file, "source_line": None,
         }
         if isinstance(blk, ThinkingBlock):
@@ -560,6 +561,13 @@ class SessionSync:
             row["tool_input"] = blk.input
             row["tool_type"] = blk.tool_type
             row["mcp_server"] = blk.mcp_server
+        elif isinstance(blk, UnknownBlock):
+            # Kept under its OWN type (e.g. "fallback"), payload verbatim. The
+            # block used to be dropped, which also shifted every later
+            # block_index in the message.
+            row["block_type"] = blk.block_type
+            row["block_payload"] = blk.payload
+            row["char_count"] = blk.char_count
         return row
 
     def _tool_result_row(self, msg: UserMessage, blk, owning_session_id: str,

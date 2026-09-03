@@ -137,12 +137,49 @@ class ToolUseBlock:
         return None
 
 
+@dataclass
+class UnknownBlock:
+    """Any assistant content block that is not thinking / text / tool_use.
+
+    The parser used to return None for these, and `sync` skips a None — so an
+    unrecognised block was DROPPED, and worse, every later block in the same
+    message shifted down one `block_index`, silently corrupting the ordering of
+    blocks that were kept.
+
+    Claude Code v2.1.247 started emitting `fallback`
+    (`{"type":"fallback","from":{"model":…},"to":{"model":…}}` — the marker for
+    a server-side model fallback, which is exactly the kind of thing a cost or
+    reliability lens wants) and csd threw all of them away. There will be a next
+    one; this branch is so that it costs nothing.
+
+    The block is kept VERBATIM under its own real type.
+    """
+
+    block_type: str
+    payload: dict
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UnknownBlock":
+        return cls(block_type=data.get("type") or "unknown", payload=data)
+
+    @property
+    def char_count(self) -> int:
+        return len(json.dumps(self.payload, default=str))
+
+
 # Type alias for assistant content blocks
-ContentBlock = ThinkingBlock | TextBlock | ToolUseBlock
+ContentBlock = ThinkingBlock | TextBlock | ToolUseBlock | UnknownBlock
 
 
 def parse_content_block(data: dict) -> Optional[ContentBlock]:
-    """Parse a content block based on its type."""
+    """Parse a content block based on its type.
+
+    Never returns None for a dict: an unrecognised type becomes an
+    `UnknownBlock` carrying the payload verbatim. Returning None used to drop
+    the block AND shift every subsequent block_index in the message.
+    """
+    if not isinstance(data, dict):
+        return None
     block_type = data.get("type")
     if block_type == "thinking":
         return ThinkingBlock.from_dict(data)
@@ -150,7 +187,7 @@ def parse_content_block(data: dict) -> Optional[ContentBlock]:
         return TextBlock.from_dict(data)
     elif block_type == "tool_use":
         return ToolUseBlock.from_dict(data)
-    return None
+    return UnknownBlock.from_dict(data)
 
 
 # =============================================================================

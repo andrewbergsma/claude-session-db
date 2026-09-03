@@ -388,6 +388,20 @@ class SessionSync:
                 "source_line": None,
             })
 
+        # Generic session-scoped records (schema v9): the ten modelled types
+        # with no dedicated table, plus anything csd has never seen. Verbatim
+        # payloads, keyed (source_file, source_line) — nothing is dropped.
+        sr_rows: list[dict] = [{
+            "session_id": rec.session_id or owning_session_id,
+            "record_type": rec.kind,
+            "ts": rec.timestamp,
+            "agent_id": rec.agent_id,
+            "is_modelled": rec.modelled,
+            "payload": rec.raw,
+            "source_file": source_file,
+            "source_line": rec.line_num,
+        } for rec in records.get("session_record", [])]
+
         # The tripwire. `records["unknown"]` is [(line_num, record_type)] for
         # every record type csd has NO handling for at all. It has existed
         # since the first parser and nothing has ever read it, which is how
@@ -415,6 +429,7 @@ class SessionSync:
         self.archive.insert_queue_operations(qo_rows)
         self.archive.insert_pr_links(pr_rows)
         self.archive.insert_agent_tasks(agent_rows)
+        self.archive.insert_session_records(sr_rows)
 
         # File-history snapshots need per-row generated ids
         for snap in records.get("file_history", []):
@@ -429,6 +444,7 @@ class SessionSync:
         stats.queue_operations += len(qo_rows)
         stats.pr_links += len(pr_rows)
         stats.agent_tasks += len(agent_rows)
+        stats.session_records += len(sr_rows)
 
     def _user_row(self, msg: UserMessage, owning_session_id: str, source_file: str) -> dict:
         return {

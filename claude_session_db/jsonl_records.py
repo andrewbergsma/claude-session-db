@@ -1683,6 +1683,104 @@ class PrLinkRecord:
 
 
 @dataclass
+class SessionRecord:
+    """A session-scoped record with NO dedicated table of its own.
+
+    Claude Code v2.1.161-258 added a long tail of small, session-keyed record
+    types. Each is real data (a relocation, a fork's parent pointer, the
+    harness's own cost ledger) but none warrants its own table, and the parser
+    used to drop every one of them on the floor — `records["unknown"]` was
+    write-only.
+
+    This is the catch-all: the payload is kept VERBATIM as JSONB, the type is
+    kept as `kind`, and the row is addressed by (source_file, line_num) so a
+    re-sync is idempotent without needing a uuid the record does not have.
+
+    `modelled` distinguishes the two populations that share the table:
+      True  — a type csd knows about and deliberately routes here
+              (`SESSION_RECORD_TYPES` below).
+      False — a type csd has never seen. Captured all the same (nothing is
+              dropped any more), and ALSO reported through the SyncStats
+              tripwire so it shows up on the next sweep.
+    """
+
+    kind: str                       # record `type`
+    session_id: str
+    line_num: int
+    timestamp: Optional[datetime] = None
+    agent_id: Optional[str] = None
+    modelled: bool = True
+    raw: dict = field(default_factory=dict, repr=False)
+
+    # Where each type carries its own timestamp. Types absent here have none in
+    # the record at all (atis-latch, worktree-state, relocated, cost-state,
+    # artifact-*) and get a NULL ts rather than an invented one.
+    _TS_FIELDS = ("timestamp", "ts")
+
+    @classmethod
+    def from_dict(cls, data: dict, line_num: int, modelled: bool = True) -> "SessionRecord":
+        ts = None
+        for f in cls._TS_FIELDS:
+            v = data.get(f)
+            if isinstance(v, str) and v:
+                try:
+                    ts = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                except ValueError:
+                    ts = None
+                break
+        # worktree-state nests its sessionId inside worktreeSession as well as
+        # carrying it at top level; the top level is authoritative.
+        sid = data.get("sessionId") or ""
+        if not sid and isinstance(data.get("worktreeSession"), dict):
+            sid = data["worktreeSession"].get("sessionId") or ""
+        return cls(
+            kind=data.get("type", ""),
+            session_id=sid,
+            line_num=line_num,
+            timestamp=ts,
+            agent_id=data.get("agentId"),
+            modelled=modelled,
+            raw=data,
+        )
+
+
+# Record types routed to the generic `session_records` table. All ten were
+# confirmed present in a 30-day scan of ~/.claude/projects (2,015 files); the
+# payload of each is documented per-type in DATA_MODEL.md.
+#
+#   atis-latch                 {atis, sessionId}                            6,077
+#   worktree-state             {worktreeSession{...}, sessionId}              816
+#   relocated                  {relocatedCwd, sessionId}                      733
+#   file-history-delta         {backup, messageId, snapshotMessageId,         638
+#                               trackingPath, timestamp}
+#   history-suppression        {cause, ts, vetoedAgainstAccountUuid,          291
+#                               sessionId}
+#   frame-link                 {frameUrl, path, title, artifactCount,         241
+#                               timestamp, sessionId}
+#   cost-state                 {totalCostUSD, modelUsage, ...}                107
+#   artifact-autoreact-ledger  {artifacts, accountUuid, v, sessionId}          56
+#   artifact-comment-monitor   {artifacts, v, sessionId}                       20
+#   fork-context-ref           {parentSessionId, parentLastUuid,                8
+#                               contextLength, agentId}
+#
+# Several of these ALSO feed dedicated `sessions` columns (fork lineage,
+# relocation, worktree binding, cost-state); the generic row stays regardless,
+# so the derived column can be recomputed from the archive without a re-parse.
+SESSION_RECORD_TYPES = {
+    "atis-latch",
+    "worktree-state",
+    "relocated",
+    "file-history-delta",
+    "history-suppression",
+    "frame-link",
+    "cost-state",
+    "artifact-autoreact-ledger",
+    "artifact-comment-monitor",
+    "fork-context-ref",
+}
+
+
+@dataclass
 class AgentLifecycleRecord:
     """A `started` or `result` agent-lifecycle record.
 
@@ -1752,7 +1850,15 @@ class JSONLParser:
             "session_meta": [],   # ai-title, custom-title, last-prompt, mode, etc.
             "pr_link": [],
             "agent_lifecycle": [],  # started, result
-            "unknown": [],        # record types we don't model (kept as raw line nums)
+            # Generic session-scoped records with no dedicated table: the ten
+            # SESSION_RECORD_TYPES plus anything csd has never seen. Payloads
+            # verbatim — nothing is dropped.
+            "session_record": [],
+            # The TRIPWIRE. Types with no handling AT ALL, as [(line_num, type)].
+            # Read by SyncStats so a new Claude Code record type surfaces on the
+            # next sweep instead of on the next audit. Types in
+            # SESSION_RECORD_TYPES are modelled and deliberately absent here.
+            "unknown": [],
         }
 
         # Record types folded into session_meta via SessionMetaRecord
@@ -1792,7 +1898,13 @@ class JSONLParser:
                         records["pr_link"].append(PrLinkRecord.from_dict(data))
                     elif record_type in ("started", "result"):
                         records["agent_lifecycle"].append(AgentLifecycleRecord.from_dict(data))
+                    elif record_type in SESSION_RECORD_TYPES:
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=True))
                     else:
+                        # Captured verbatim (nothing is dropped) AND reported.
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=False))
                         records["unknown"].append((line_num, record_type))
 
                 except json.JSONDecodeError as e:

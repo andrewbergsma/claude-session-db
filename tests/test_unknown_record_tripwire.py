@@ -79,3 +79,15 @@ def test_parser_still_reports_a_genuinely_new_type(tmp_path):
     records = JSONLParser(tmp_path).parse_file(path)
     assert records["unknown"] == [(2, "a-type-from-the-future")]
 
+
+
+def test_modelled_types_do_not_trip_the_wire(tmp_path):
+    """The ten types routed to session_records in v9 are MODELLED — they must
+    not re-report as unknown on every sweep, or the signal is pure noise."""
+    path = _write(tmp_path, [
+        {"type": "atis-latch", "atis": "abc", "sessionId": "s1"},
+        {"type": "relocated", "sessionId": "s1", "relocatedCwd": "/tmp/x"},
+        {"type": "cost-state", "sessionId": "s1", "totalCostUSD": 1.0},
+    ])
+    records = JSONLParser(tmp_path).parse_file(path)
+    assert records["unknown"] == []

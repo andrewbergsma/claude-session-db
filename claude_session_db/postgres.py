@@ -29,7 +29,10 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 # Schema version
-SCHEMA_VERSION = 8  # + summary_passes: repeatable (delta) session summarization
+SCHEMA_VERSION = 9  # + session_records catch-all, fork/relocation/worktree/cost-state
+                    #   session columns, messages.effort/session_kind, usage sub-fields,
+                    #   Claude 5 pricing, prompt/tool_result relabel. See DATA_MODEL.md
+                    #   "Migration history".
 
 DEFAULT_DB_NAME = "claude_sessions"
 
@@ -406,6 +409,52 @@ CREATE TABLE IF NOT EXISTS task_outputs (
     captured_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (session_id, task_name)
 );
+
+-- ---------------------------------------------------------------------------
+-- session_records (schema v9) — the CATCH-ALL for session-scoped record types
+-- with no dedicated table.
+--
+-- Claude Code v2.1.161-258 added a long tail of small, sessionId-keyed records.
+-- Each is real data, none warrants its own table, and every one of them used to
+-- be DROPPED: the parser collected them into `records["unknown"]` and nothing
+-- ever read it. This table ends that class of loss — the payload lands here
+-- VERBATIM as JSONB, and a type csd has never seen lands here too rather than
+-- on the floor.
+--
+-- Key: (source_file, source_line). These records carry no uuid, so the file +
+-- line IS the natural key. Transcripts are append-only, so it is stable; and
+-- `clear_file_data` already wipes a file's rows before re-insert, so the ON
+-- CONFLICT below is belt-and-braces on top of that.
+--
+-- `is_modelled` splits the two populations sharing the table:
+--   true  — one of jsonl_records.SESSION_RECORD_TYPES; csd knows the shape and
+--           deliberately routes it here.
+--   false — a type csd has NEVER seen. Also counted by the SyncStats tripwire,
+--           so `SELECT record_type, count(*) FROM session_records
+--           WHERE NOT is_modelled GROUP BY 1` is the standing "what is new in
+--           Claude Code" query.
+--
+-- Several of these types ALSO feed derived `sessions` columns (fork lineage,
+-- current_cwd, worktree_session, cost_state). The generic row is kept
+-- regardless, so a derivation can be changed and recomputed from the archive
+-- without re-parsing 500K JSONL records.
+CREATE TABLE IF NOT EXISTS session_records (
+    session_id  TEXT,
+    record_type TEXT NOT NULL,
+    ts          TIMESTAMPTZ,            -- from `timestamp`/`ts` where the type has one; else NULL
+    agent_id    TEXT,                   -- fork-context-ref and other agent-scoped types
+    is_modelled BOOLEAN NOT NULL DEFAULT true,
+    payload     JSONB NOT NULL,         -- the record VERBATIM
+    source_file TEXT NOT NULL,
+    source_line INTEGER NOT NULL,
+    PRIMARY KEY (source_file, source_line)
+);
+CREATE INDEX IF NOT EXISTS idx_sr_session ON session_records(session_id);
+CREATE INDEX IF NOT EXISTS idx_sr_type ON session_records(record_type);
+CREATE INDEX IF NOT EXISTS idx_sr_ts ON session_records(ts);
+-- Partial: the standing "what did Claude Code just add" probe.
+CREATE INDEX IF NOT EXISTS idx_sr_unmodelled ON session_records(record_type)
+    WHERE NOT is_modelled;
 
 -- Agent lifecycle (started / result) — keyed by content hash `key`
 CREATE TABLE IF NOT EXISTS agent_tasks (
@@ -904,6 +953,7 @@ ORDER BY o.modified_at DESC NULLS LAST;
 PER_FILE_TABLES = [
     "messages", "content_blocks", "tool_results", "attachments",
     "system_events", "queue_operations", "pr_links", "agent_tasks",
+    "session_records",
 ]
 
 
@@ -1174,6 +1224,18 @@ class SessionArchive:
         cols = ["key", "agent_id", "started", "result", "source_file"]
         self._batch_insert("agent_tasks", cols, rows, {"result"}, conflict="key",
                            conflict_update=["agent_id", "started", "result", "source_file"])
+
+    def insert_session_records(self, rows: list[dict]) -> None:
+        """Generic session-scoped records (schema v9). Keyed (source_file,
+        source_line) — these records carry no uuid, and the transcript is
+        append-only so the line number is stable. DO UPDATE rather than DO
+        NOTHING so a --force re-sync refreshes a payload in place."""
+        cols = ["session_id", "record_type", "ts", "agent_id", "is_modelled",
+                "payload", "source_file", "source_line"]
+        self._batch_insert("session_records", cols, rows, {"payload"},
+                           conflict="source_file, source_line",
+                           conflict_update=["session_id", "record_type", "ts",
+                                            "agent_id", "is_modelled", "payload"])
 
     def get_task_output_mtimes(self, session_id: str) -> dict[str, int]:
         """task_name -> file_mtime_ns already captured for a session (the
@@ -1454,6 +1516,37 @@ class SessionArchive:
         conn.commit()
         return rows
 
+    def session_record_census(self) -> list[dict]:
+        """`session_records` broken down by type — the standing "what record
+        types is Claude Code emitting that csd does not model" query.
+
+        Returns [{record_type, is_modelled, n, last_seen}] newest-heaviest
+        first. Never raises: on a pre-v9 archive (no table yet) it returns [],
+        so callers can print it unconditionally.
+        """
+        conn = self.connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('statement_timeout', %s, true)",
+                            (str(ANALYTIC_TIMEOUT_MS),))
+                cur.execute("SELECT to_regclass('public.session_records')")
+                if cur.fetchone()[0] is None:
+                    conn.commit()
+                    return []
+                cur.execute(
+                    """SELECT record_type, is_modelled, count(*) AS n, max(ts) AS last_seen
+                       FROM session_records
+                       GROUP BY 1, 2
+                       ORDER BY is_modelled, n DESC"""
+                )
+                cols = [d.name for d in cur.description]
+                rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+            conn.commit()
+            return rows
+        except psycopg.Error:
+            conn.rollback()
+            return []
+
     def statistics(self, exact: bool = False) -> dict:
         """Per-table row counts + database size.
 
@@ -1465,7 +1558,7 @@ class SessionArchive:
         tables = ["projects", "sessions", "messages", "content_blocks", "tool_results",
                   "attachments", "system_events", "file_history", "file_backups",
                   "queue_operations", "pr_links", "agent_tasks", "task_outputs",
-                  "sync_state"]
+                  "session_records", "sync_state"]
         stats: dict[str, Any] = {}
         conn = self.connect()
         with conn.cursor() as cur:

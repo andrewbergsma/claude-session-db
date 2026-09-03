@@ -312,11 +312,30 @@ def stats(ctx: click.Context, exact: bool) -> None:
     """Show table row counts and database size."""
     with SessionArchive(ctx.obj["dsn"]) as a:
         s = a.statistics(exact=exact)
+        census = a.session_record_census()
     width = max(len(k) for k in s)
     for k, v in s.items():
         click.echo(f"  {k:<{width}}  {v:>14,}" if isinstance(v, int) else f"  {k:<{width}}  {v:>14}")
     if not exact:
         click.echo("  (row counts are catalog estimates; pass --exact for precise counts)")
+
+    # The unmodelled-record-type tripwire, DB side. The sweep line and the
+    # heartbeat report what the LAST sync saw; this reports the whole archive,
+    # so a type that arrived weeks ago and has not recurred is still visible.
+    if census:
+        modelled = [r for r in census if r["is_modelled"]]
+        unmodelled = [r for r in census if not r["is_modelled"]]
+        click.echo("\n  session_records by type (generic catch-all):")
+        for r in modelled:
+            click.echo(f"    {r['record_type']:<28} {r['n']:>10,}")
+        if unmodelled:
+            click.echo("\n  ⚠ UNMODELLED record types — captured verbatim, no dedicated"
+                       " table yet:")
+            for r in unmodelled:
+                seen = f"  last {r['last_seen']:%Y-%m-%d}" if r["last_seen"] else ""
+                click.echo(f"    {r['record_type']:<28} {r['n']:>10,}{seen}")
+            click.echo("    (inspect: csd query \"SELECT payload FROM session_records"
+                       " WHERE NOT is_modelled LIMIT 5\")")
 
 
 @main.command()

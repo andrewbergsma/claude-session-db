@@ -677,6 +677,7 @@ class SessionSync:
             "block_type": "", "content": None, "char_count": None, "signature": None,
             "tool_use_id": None, "tool_name": None, "tool_input": None,
             "tool_type": None, "mcp_server": None, "block_payload": None,
+            "caller": None,
             "source_file": source_file, "source_line": None,
         }
         if isinstance(blk, ThinkingBlock):
@@ -695,6 +696,9 @@ class SessionSync:
             row["tool_input"] = blk.input
             row["tool_type"] = blk.tool_type
             row["mcp_server"] = blk.mcp_server
+            # schema v10: verbatim, and NULL when the block carried no caller
+            # at all (parsed since forever, written by nobody until now).
+            row["caller"] = blk.caller.raw or None
         elif isinstance(blk, UnknownBlock):
             # Kept under its OWN type (e.g. "fallback"), payload verbatim. The
             # block used to be dropped, which also shifted every later

@@ -445,6 +445,28 @@ CREATE INDEX IF NOT EXISTS idx_cb_tool ON content_blocks(tool_name);
 CREATE INDEX IF NOT EXISTS idx_cb_tool_use_id ON content_blocks(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_cb_source_file ON content_blocks(source_file);
 
+-- Migration (idempotent, guarded): schema v10 `content_blocks.caller`.
+--
+-- `jsonl_records.ToolUseBlock` has always parsed `tool_use.caller` into a
+-- `ToolUseCaller`, and `sync._content_block_row` never wrote it — so it was
+-- dropped on 100% of tool_use blocks. Kept VERBATIM as JSONB (the value is
+-- `{"type":"direct"}` on every block in the corpus today, which is exactly the
+-- kind of field that suddenly is not).
+--
+-- Deliberately UNINDEXED: one value covers ~100% of rows, so an index on it
+-- would be paid for on every insert and used by nothing. Add one when a query
+-- needs it.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'content_blocks'
+          AND column_name = 'caller'
+    ) THEN
+        ALTER TABLE content_blocks ADD COLUMN caller JSONB;
+    END IF;
+END $$;
+
 -- Migration (idempotent, guarded): schema v9 content-block payload.
 --
 -- `parse_content_block` returned None for any block type it did not recognise,
@@ -1027,6 +1049,55 @@ BACKFILLS = [
         # type that carries it), which is what makes this recoverable from
         # `messages` instead of a re-parse. Fills only where the session column
         # IS NULL — it never overwrites a value ingest derived.
+        # `content_blocks.caller` is new in v10, and content_blocks are only
+        # ever rewritten by a re-sync of their source file — so without this,
+        # the column would stay NULL on the whole back catalogue. It IS
+        # recoverable: `messages.raw` holds the assistant record verbatim,
+        # caller and all.
+        #
+        # Matched on tool_use_id, NOT on block_index. Before v9 an unrecognised
+        # content block was dropped and every LATER block in the message shifted
+        # down one index, so the historical `block_index` does not reliably
+        # address the raw array; `tool_use_id` is stable and unique within a
+        # message either way.
+        #
+        # The CASE around jsonb_array_elements is load-bearing: a set-returning
+        # function in a LATERAL is evaluated before the WHERE clause could
+        # filter non-array content, and `jsonb_array_elements` on a string
+        # errors out.
+        "key": "v10_content_block_caller",
+        "desc": "content_blocks.caller from messages.raw (matched on tool_use_id)",
+        "sql": """
+            WITH batch AS (
+                SELECT uuid, raw FROM messages
+                WHERE uuid > %(after)s ORDER BY uuid LIMIT %(limit)s
+            ), blk AS (
+                SELECT b.uuid AS message_uuid,
+                       e->>'id'    AS tool_use_id,
+                       e->'caller' AS caller
+                FROM batch b,
+                     LATERAL jsonb_array_elements(
+                         CASE WHEN jsonb_typeof(b.raw->'message'->'content') = 'array'
+                              THEN b.raw->'message'->'content'
+                              ELSE '[]'::jsonb END) e
+                WHERE e->>'type' = 'tool_use'
+                  AND e ? 'caller'
+                  AND coalesce(e->>'id', '') <> ''
+            ), upd AS (
+                UPDATE content_blocks cb SET caller = blk.caller
+                FROM blk
+                WHERE cb.message_uuid = blk.message_uuid
+                  AND cb.tool_use_id  = blk.tool_use_id
+                  AND cb.block_type   = 'tool_use'
+                  AND cb.caller IS NULL
+                RETURNING 1
+            )
+            SELECT (SELECT max(uuid) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)  AS scanned,
+                   (SELECT count(*) FROM upd)    AS updated
+        """,
+    },
+    {
         "key": "v10_session_kind",
         "desc": "sessions.session_kind from the constant messages.session_kind",
         "sql": """
@@ -1915,9 +1986,10 @@ class SessionArchive:
         cols = ["message_uuid", "session_id", "block_index", "block_type", "content",
                 "char_count", "signature", "tool_use_id", "tool_name", "tool_input",
                 "tool_type", "mcp_server", "source_file", "source_line",
-                "block_payload"]   # schema v9: verbatim payload of an unknown block
+                "block_payload",   # schema v9: verbatim payload of an unknown block
+                "caller"]          # schema v10: tool_use.caller, verbatim
         self._batch_insert("content_blocks", cols, rows,
-                           {"tool_input", "block_payload"})
+                           {"tool_input", "block_payload", "caller"})
 
     def insert_tool_results(self, rows: list[dict]) -> None:
         cols = ["message_uuid", "session_id", "tool_use_id", "content_text", "tldr",

@@ -92,13 +92,26 @@ class TextBlock:
 
 @dataclass
 class ToolUseCaller:
-    """Caller information for tool use."""
+    """Caller information for tool use (`tool_use.caller`).
+
+    `type` is the promoted scalar ("direct" today — 146,392 of 146,393 blocks
+    in the corpus, and the only value ever observed). `raw` is the block's own
+    caller object kept VERBATIM, because the whole point of the escape hatch is
+    that the next value will not be a bare type: it is written to
+    `content_blocks.caller` as JSONB (schema v10; before that the field was
+    parsed here and then dropped on 100% of tool_use blocks).
+
+    `raw` is EMPTY when the block carried no `caller` key at all — the default
+    below is a reading convenience, and synthesising it into the archive would
+    be inventing data the transcript does not contain.
+    """
 
     type: str  # "direct", etc.
+    raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "ToolUseCaller":
-        return cls(type=data.get("type", "direct"))
+        return cls(type=data.get("type", "direct"), raw=data)
 
 
 @dataclass
@@ -112,12 +125,16 @@ class ToolUseBlock:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ToolUseBlock":
-        caller_data = data.get("caller", {"type": "direct"})
+        # An absent `caller` reads as "direct" but keeps an EMPTY `raw`, so the
+        # archive can tell "the transcript said direct" from "the transcript
+        # said nothing".
+        caller_data = data.get("caller")
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
             input=data.get("input", {}),
-            caller=ToolUseCaller.from_dict(caller_data),
+            caller=ToolUseCaller.from_dict(caller_data if isinstance(caller_data, dict)
+                                           else {}),
         )
 
     @property

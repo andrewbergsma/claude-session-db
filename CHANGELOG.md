@@ -97,6 +97,15 @@ rewritten outside a documented resumable backfill. Full schema reference:
   replacement, and invisible to the unmodelled census. Still exactly one
   `session_records` row per JSONL line, so `(source_file, source_line)` remains
   the key.
+- **`content_blocks.caller` (new column).** `ToolUseBlock` has always parsed
+  `tool_use.caller`, and `sync._content_block_row` never wrote it — dropped on
+  100% of tool_use blocks. Now stored verbatim as JSONB (NULL when the block
+  carried no `caller` at all, so "the transcript said direct" stays
+  distinguishable from "the transcript said nothing"), deliberately unindexed.
+  New resumable backfill **`v10_content_block_caller`** recovers the history
+  from `messages.raw`, matching on `tool_use_id` rather than `block_index` —
+  the pre-v9 dropped-block bug shifted historical indexes, so the index does
+  not address the raw array.
 - **`v_duplicate_blocks`** — the historical duplication made visible:
   `(message_uuid, session_id, kind, source_files, row_count)` for every message
   whose blocks or results span more than one `source_file`. Historical

@@ -1375,7 +1375,10 @@ ORDER BY last_activity DESC NULLS LAST;
 --     NULL cost terms (sum() skips them) and are counted via `unpriced` so the
 --     rollups never silently undercount.
 --   * writes recorded only as a lump cache_creation (legacy rows lacking the
---     ephemeral 5m/1h split) are priced at the 5m rate (the API default TTL).
+--     ephemeral 5m/1h split) surface as `write_untiered_tokens` and are priced
+--     at the 5m rate (the API default TTL). They are folded into the
+--     `cache_write_5m_*` terms in this view and in every rollup over it, so
+--     `write_untiered_tokens` is reported but never billed separately.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW v_message_cost AS
 WITH base AS (
@@ -1445,9 +1448,23 @@ GROUP BY model
 ORDER BY total_cost DESC NULLS LAST;
 
 -- Daily spend (caching lens), USD.
-CREATE OR REPLACE VIEW v_token_cost_daily AS
+--
+-- schema v10: `messages` / `priced_messages` / `unpriced_messages`, matching
+-- v_token_cost_by_model. An unpriced row (no model_pricing pattern — a
+-- non-Anthropic model, or a new Claude family before its rates are seeded)
+-- contributes NULL cost terms that sum() silently skips, so this view read as
+-- a complete daily total while quietly omitting spend. It now says so.
+-- No cost arithmetic changed.
+--
+-- DROP first, per this file's convention for a view whose column list grows:
+-- CREATE OR REPLACE cannot reconcile new columns against an older definition.
+DROP VIEW IF EXISTS v_token_cost_daily;
+CREATE VIEW v_token_cost_daily AS
 SELECT date_trunc('day', ts)::date AS day,
        count(DISTINCT session_id) AS sessions,
+       count(*) AS messages,
+       count(*) FILTER (WHERE NOT unpriced) AS priced_messages,
+       count(*) FILTER (WHERE unpriced) AS unpriced_messages,
        round(sum(input_cost), 4)                              AS input_cost,
        round(sum(cache_write_5m_cost + cache_write_1h_cost), 4) AS cache_write_cost,
        round(sum(cache_read_cost), 4)                         AS cache_read_cost,

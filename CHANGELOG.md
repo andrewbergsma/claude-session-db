@@ -115,6 +115,14 @@ rewritten outside a documented resumable backfill. Full schema reference:
   from `messages.raw`, matching on `tool_use_id` rather than `block_index` —
   the pre-v9 dropped-block bug shifted historical indexes, so the index does
   not address the raw array.
+- **`v_token_cost_daily` reports what it could not price.** New `messages`,
+  `priced_messages` and `unpriced_messages` columns, matching
+  `v_token_cost_by_model`. An unpriced row (no `model_pricing` pattern) yields
+  NULL cost terms that `sum()` silently skips, so the daily rollup — the one
+  `csd usage` reports from — read as a complete total while omitting spend.
+  **No cost arithmetic changed.** The `v_message_cost` DDL comment now names
+  `write_untiered_tokens`, the column the lump-`cache_creation` paragraph was
+  about.
 - **`v_duplicate_blocks`** — the historical duplication made visible:
   `(message_uuid, session_id, kind, source_files, row_count)` for every message
   whose blocks or results span more than one `source_file`. Historical

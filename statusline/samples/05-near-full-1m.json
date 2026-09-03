@@ -1,0 +1,49 @@
+{
+  "session_id": "deadbeef",
+  "transcript_path": "/nonexistent/transcript.jsonl",
+  "cwd": "/Users/andrew/GitHub/knowledge",
+  "model": {
+    "id": "claude-opus-5",
+    "display_name": "Opus 5 (1M context)"
+  },
+  "workspace": {
+    "current_dir": "/Users/andrew/GitHub/knowledge",
+    "project_dir": "/Users/andrew/GitHub/knowledge",
+    "added_dirs": []
+  },
+  "version": "2.1.259",
+  "output_style": {
+    "name": "default"
+  },
+  "context_window": {
+    "total_input_tokens": 942117,
+    "total_output_tokens": 1204,
+    "context_window_size": 1000000,
+    "used_percentage": 94.2,
+    "remaining_percentage": 5.8,
+    "current_usage": {
+      "input_tokens": 8,
+      "output_tokens": 1204,
+      "cache_creation_input_tokens": 4102,
+      "cache_read_input_tokens": 938007
+    }
+  },
+  "exceeds_200k_tokens": true,
+  "prompt_cache": {
+    "warm": true,
+    "caching_observed": true,
+    "ttl": "1h",
+    "expires_at": 4102462800,
+    "requests": 411,
+    "misses": 7,
+    "expected_rebuilds": 3,
+    "hit_ratio": 0.88,
+    "cache_write_tokens": 1200000,
+    "miss_recache_tokens": 640000,
+    "last_miss_at": 1738425230,
+    "recache_tokens_if_cold": 942117
+  },
+  "effort": {
+    "level": "max"
+  }
+}

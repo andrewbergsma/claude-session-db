@@ -462,6 +462,11 @@ class SessionSync:
                 "is_sidechain": att.is_sidechain,
                 "source_file": source_file,
                 "source_line": None,
+                # schema v10: the whole record. `attachment` is only the
+                # payload sub-object; the record's own top-level fields (cwd,
+                # gitBranch, version, entrypoint, sessionKind, ...) used to be
+                # parsed and then dropped.
+                "raw": att.raw,
             })
 
         for ev in records.get("system", []):

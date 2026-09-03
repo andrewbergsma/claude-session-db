@@ -184,14 +184,20 @@ def test_a_never_seen_type_is_captured_AND_reported(tmp_path):
 
 def test_line_numbers_are_the_natural_key(tmp_path):
     """(source_file, source_line) is the PK — the records carry no uuid, so the
-    line number has to be right or a re-sync duplicates or clobbers rows."""
+    line number has to be right or a re-sync duplicates or clobbers rows.
+
+    Schema v10 also archives the session-metadata types (see
+    SESSION_RECORD_ALSO_ARCHIVED), so `ai-title` now yields a row too — still
+    exactly ONE row per line, which is what the key requires."""
     recs = _parse(tmp_path, [
         {"type": "ai-title", "sessionId": "s", "aiTitle": "t"},
         SAMPLES["atis-latch"],
         {"type": "ai-title", "sessionId": "s", "aiTitle": "t2"},
         SAMPLES["relocated"],
+        {"type": "summary", "summary": "x", "leafUuid": "l"},   # no row at all
     ])
-    assert [r.line_num for r in recs["session_record"]] == [2, 4]
+    assert [r.line_num for r in recs["session_record"]] == [1, 2, 3, 4]
+    assert len({r.line_num for r in recs["session_record"]}) == 4
 
 
 def test_schema_declares_the_table_and_its_key():

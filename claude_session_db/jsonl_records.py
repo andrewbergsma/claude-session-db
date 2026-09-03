@@ -1901,6 +1901,38 @@ SESSION_RECORD_TYPES = {
     "fork-context-ref",
 }
 
+# Record types that have a dedicated destination AND are ALSO archived verbatim
+# in `session_records` (schema v10).
+#
+# The promoted columns are lossy in two different ways, and both were silent:
+#
+#   * FIELDS DROPPED. `bridge-session` kept only `bridgeSessionId` and threw
+#     away lastSequenceNum / ownerAccountUuid / ownerOrganizationUuid /
+#     noHistoryBackfill; `queue-operation` has no column for `reason`;
+#     `last-prompt` has none for `explicit`. The archive claims to be lossless
+#     and for these it was not.
+#   * HISTORY DROPPED. The seven session-metadata types are latest-wins onto a
+#     single `sessions` column, so every earlier value — every title the model
+#     ever gave the session, every prior mode, every superseded last-prompt —
+#     existed only in the JSONL. The per-record history is now retained.
+#
+# These rows carry `is_modelled = true`, exactly like the routed types, so they
+# never appear in the "what does csd not model yet" census or trip the
+# unmodelled wire. They are an ADDITION to the promoted columns, never a
+# replacement: nothing about the `sessions` / `queue_operations` write changed.
+SESSION_RECORD_ALSO_ARCHIVED = {
+    # the seven latest-wins session-metadata types (-> sessions.<col>)
+    "ai-title",
+    "custom-title",
+    "last-prompt",
+    "permission-mode",
+    "mode",
+    "bridge-session",
+    "agent-name",
+    # -> queue_operations (which has no column for `reason`)
+    "queue-operation",
+}
+
 
 @dataclass
 class AgentLifecycleRecord:
@@ -1983,11 +2015,11 @@ class JSONLParser:
             "unknown": [],
         }
 
-        # Record types folded into session_meta via SessionMetaRecord
-        _META_TYPES = {
-            "ai-title", "custom-title", "last-prompt",
-            "permission-mode", "mode", "bridge-session", "agent-name",
-        }
+        # Record types folded into session_meta via SessionMetaRecord. Taken
+        # from the class's own field map so the two can never drift (these are
+        # also the seven latest-wins types archived verbatim — see
+        # SESSION_RECORD_ALSO_ARCHIVED).
+        _META_TYPES = set(SessionMetaRecord._VALUE_FIELDS)
 
         with open(file_path) as f:
             for line_num, line in enumerate(f, 1):
@@ -2028,6 +2060,17 @@ class JSONLParser:
                         records["session_record"].append(
                             SessionRecord.from_dict(data, line_num, modelled=False))
                         records["unknown"].append((line_num, record_type))
+
+                    # Schema v10: a type with a dedicated destination whose
+                    # promoted columns are LOSSY (dropped fields, or a
+                    # latest-wins column that keeps no history) is ALSO archived
+                    # verbatim. `is_modelled = true`, so it never reads as "csd
+                    # does not model this" and never trips the unmodelled wire.
+                    # At most one session_record per line either way, so
+                    # (source_file, source_line) stays a valid key.
+                    if record_type in SESSION_RECORD_ALSO_ARCHIVED:
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=True))
 
                 except json.JSONDecodeError as e:
                     print(f"Warning: Invalid JSON at {file_path}:{line_num}: {e}")

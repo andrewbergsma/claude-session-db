@@ -78,6 +78,25 @@ rewritten outside a documented resumable backfill. Full schema reference:
   therefore correct despite the historical duplicates.
 
 ### Added
+- **`attachments.raw` (new column).** Every other conversation-flow table keeps
+  the whole record in a `raw` JSONB escape hatch; `attachments` kept only the
+  promoted columns plus the `attachment` sub-object, so the record's own
+  top-level fields (`cwd`, `gitBranch`, `version`, `userType`, `entrypoint`,
+  `sessionKind`, …) were parsed and dropped. Nullable, filled on ingest and by
+  a re-sync. **No backfill is possible** — the data was never written.
+- **Promoted-but-lossy record types are archived verbatim too.** A record type
+  with a dedicated destination could still lose data: `bridge-session` kept only
+  `bridgeSessionId` (dropping `lastSequenceNum`, `ownerAccountUuid`,
+  `ownerOrganizationUuid`, `noHistoryBackfill`), `queue-operation.reason` and
+  `last-prompt.explicit` had no column, and the seven latest-wins
+  session-metadata types (`ai-title`, `custom-title`, `last-prompt`, `mode`,
+  `permission-mode`, `bridge-session`, `agent-name`) collapse onto one
+  `sessions` column so every earlier value existed only in the JSONL. All eight
+  types (`SESSION_RECORD_ALSO_ARCHIVED`) now ALSO land in `session_records`,
+  verbatim, `is_modelled = true` — an addition to the promoted columns, never a
+  replacement, and invisible to the unmodelled census. Still exactly one
+  `session_records` row per JSONL line, so `(source_file, source_line)` remains
+  the key.
 - **`v_duplicate_blocks`** — the historical duplication made visible:
   `(message_uuid, session_id, kind, source_files, row_count)` for every message
   whose blocks or results span more than one `source_file`. Historical

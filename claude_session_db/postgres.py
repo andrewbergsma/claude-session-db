@@ -502,6 +502,25 @@ CREATE TABLE IF NOT EXISTS attachments (
     source_file TEXT NOT NULL,
     source_line INTEGER
 );
+-- Migration (idempotent, guarded): schema v10 `attachments.raw`.
+--
+-- Every other conversation-flow table keeps the whole record in a `raw` JSONB
+-- escape hatch; `attachments` kept only the promoted columns plus the
+-- `attachment` sub-object, so an attachment record's own top-level fields
+-- (cwd, gitBranch, version, userType, entrypoint, sessionKind, and whatever
+-- Claude Code adds next) were parsed and then dropped. Nullable, filled on
+-- ingest going forward and by a re-sync; NOT backfillable — the data was never
+-- written, so there is nothing in the archive to recover it from.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'attachments'
+          AND column_name = 'raw'
+    ) THEN
+        ALTER TABLE attachments ADD COLUMN raw JSONB;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_att_session ON attachments(session_id);
 CREATE INDEX IF NOT EXISTS idx_att_type ON attachments(attachment_type);
 CREATE INDEX IF NOT EXISTS idx_att_source_file ON attachments(source_file);
@@ -1907,9 +1926,11 @@ class SessionArchive:
         self._batch_insert("tool_results", cols, rows, {"tool_use_result"})
 
     def insert_attachments(self, rows: list[dict]) -> None:
+        # schema v10: `raw` — the whole record, like every other flow table.
         cols = ["uuid", "session_id", "parent_uuid", "ts", "attachment_type",
-                "attachment", "is_sidechain", "source_file", "source_line"]
-        self._batch_insert("attachments", cols, rows, {"attachment"}, conflict="uuid")
+                "attachment", "is_sidechain", "source_file", "source_line", "raw"]
+        self._batch_insert("attachments", cols, rows, {"attachment", "raw"},
+                           conflict="uuid")
 
     def insert_system_events(self, rows: list[dict]) -> None:
         cols = ["uuid", "session_id", "parent_uuid", "ts", "subtype", "level", "content",

@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional
 
 from .session_digest import load as load_jsonl
 from .summarize import kmcp_call, KmcpError  # noqa: F401
+from . import tool_labels
 
 # Small model: probes are narrow judgment on a few KB, not reasoning.
 DEFAULT_MODEL = os.environ.get("CSD_ANGLES_MODEL", "qwen2.5vl:7b")
@@ -334,16 +335,23 @@ def angle_git(delta: TurnDelta) -> list[dict]:
 
 
 def angle_agents(delta: TurnDelta) -> list[dict]:
-    """Subagent orchestration: Agent spawns, SendMessage continuations,
-    TaskStop. Purely extractive — status and token totals come from the
-    archived tool_result (the ledger), never the child's own narration."""
+    """Orchestration: what this turn set running, steered, watched or stopped.
+
+    Agent spawns and SendMessage continuations, plus the background-task family
+    Claude Code added in the v2.1.161-258 window (TaskCreate / TaskUpdate /
+    TaskOutput / ListAgents) — previously only TaskStop was recognised, so a
+    turn that created three background tasks and updated two of them showed a
+    single "stop" headline or nothing at all. One question, one angle.
+
+    Purely extractive — status and token totals come from the archived
+    tool_result (the ledger), never the child's own narration."""
     results = {tr.get("tool_use_id"): tr for tr in delta.tool_results
                if tr.get("tool_use_id")}
     parent = delta.session_id.split(":", 1)[0]
     out = []
     for tu in delta.tool_uses:
         name, inp = tu["name"], tu["input"]
-        if name not in ("Agent", "SendMessage", "TaskStop"):
+        if name not in tool_labels.ORCHESTRATION_TOOLS:
             continue
         tr = results.get(tu.get("id") or "")
         meta = (tr or {}).get("meta") or {}
@@ -366,8 +374,12 @@ def angle_agents(delta: TurnDelta) -> list[dict]:
             msg = (inp.get("summary") or inp.get("message")
                    or inp.get("prompt") or "")
             hl = f"send → {target} '{_one_line(str(msg), 50)}'"
-        else:  # TaskStop
-            hl = f"stop {inp.get('task_id') or inp.get('agent_id') or ''}".strip()
+        else:
+            # TaskCreate / TaskUpdate / TaskStop / TaskOutput / ListAgents.
+            # The salient field per tool lives in tool_labels, so this stream
+            # and the console chips cannot drift.
+            label, _detail = tool_labels.tool_label(name, inp)
+            hl = label or f"{name} {inp.get('agent_id') or ''}".strip()
         out.append({"headline": _one_line(hl, 110),
                     "detail": {"tool": name,
                                "input": {k: _one_line(str(v), 2000)

@@ -1,6 +1,8 @@
 # DATA_MODEL.md — the `claude_sessions` schema reference
 
 **Schema version 9** · Postgres 16 · database `claude_sessions`.
+**Items marked "v10" are the documented target state of the in-flight schema-v10
+change; the commit is pending.**
 
 This is the authoritative reference for **every table, column, view and index**
 in the archive: its type, its nullability, the JSONL field it comes from, the
@@ -43,8 +45,12 @@ Companion documents: `CLAUDE.md` (architecture and doctrine), `CHANGELOG.md`
 documents it, it does not define it).
 
 > **Provenance.** Sections 1-9 were written against the live catalog on
-> 2026-09-02 (schema v9) and against a 30-day scan of `~/.claude/projects`
-> (2,015 files, ~500K records, Claude Code v2.1.161-2.1.258). The
+> 2026-09-02 (schema v9), against a 30-day scan of `~/.claude/projects`
+> (2,015 files, ~500K records, Claude Code v2.1.161-2.1.258), and against a
+> full-archive scan (2,237 `*.jsonl` files) plus four adversarial reviews run
+> on 2026-09-02. Every figure quoted "live" was re-verified against the
+> database that day; **census counts move as the sweep ingests**, so read them
+> as an order of magnitude with a date on it, not as a constant. The
 > [field census](#appendix-a-jsonl-field-census-2026-06-01) is the earlier
 > frequency audit, kept as an appendix.
 
@@ -1380,6 +1386,12 @@ measured impact** — no such ranking survives the data:
 Present in the archive but reachable only through JSONB. Listed so "csd does not
 have it" is never confused with "csd does not have a COLUMN for it".
 
+> **This section covers only the three tables that HAVE a hatch** —
+> `messages.raw`, `system_events.raw`, `session_records.payload`. For
+> `attachments`, `queue_operations`, `pr_links`, `file_history` and
+> `agent_tasks` there is no hatch through v9, so an unpromoted field is not
+> raw-only, it is **gone**. See the [intro](#data_modelmd--the-claude_sessions-schema-reference).
+
 ### Top-level record fields → `messages.raw`
 
 | Field | On | Notes |
@@ -1399,18 +1411,37 @@ have it" is never confused with "csd does not have a COLUMN for it".
 | `isAbortedMidStream` | assistant | |
 | `supersedesUuids` | assistant | |
 | `errorDetails` | assistant | |
-| `session_id` | both | a snake_case DUPLICATE of `sessionId`, on ~7% of records |
-| `thinkingMetadata` | user | parsed into a dataclass, no column |
-| `todos` | user | parsed into a dataclass, no column |
+| `session_id` | both | a snake_case DUPLICATE of `sessionId`. **Much commoner than the old 7% figure**: 16.9% of `messages` (assistant 18.1%, user 14.8%), 23.5% of `system_events`, and highest of all on attachments — where there is no `raw` to read it from |
+| `userType` | both | **100% of user, assistant, system AND attachment records — and it has no column anywhere in the schema.** On `messages` and `system_events` it survives in `raw`; on `attachments` it is dropped outright through v9 |
+| `thinkingMetadata` | user | **LEGACY — 0 occurrences archive-wide.** Parsed into a dataclass, never written to any column |
+| `todos` | user | **LEGACY — 0 occurrences archive-wide.** Parsed into a dataclass, never written to any column |
+| `content[].caller` | assistant | **100% of `tool_use` blocks, not written anywhere through v9.** **v10** adds `content_blocks.caller` and a `v10_content_block_caller` backfill that recovers it from `messages.raw`, matched on `tool_use_id` |
 | `message.context_management` | assistant | |
 | `message.container` | assistant | error records only |
 | `message.stop_sequence` | assistant | |
 
 ### System-message subtypes and fields → `system_events.raw`
 
-Subtypes with no dedicated columns: `informational`,
-`model_refusal_fallback`, `model_consent_fallback`, `bridge_status`,
-`away_summary`, `scheduled_task_fire`, `stop_hook_summary`.
+**Every system record carries the universal fields with no column on this
+table**: `userType`, `cwd`, `gitBranch`, `version` and `entrypoint` are on
+**100%** of rows and live only in `raw`. So do `isMeta` (60.6%, no column
+anywhere), the `session_id` duplicate (23.5%), `sessionKind` (0.7%) and
+`requestId` (refusal-fallback records only).
+
+**By column coverage:**
+
+| Coverage | Subtypes |
+|---|---|
+| Fully columned | `turn_duration` (`duration_ms`, `message_count`), `api_error` (`error_*`, `retry_*`) |
+| Covered by `content` + `level` | `informational`, `local_command` |
+| Has a dedicated column | `bridge_status` → `url` |
+| **Partly** columned — the rest is raw-only | `compact_boundary`, `model_refusal_fallback`, `model_consent_fallback` |
+| **No** dedicated columns at all | `stop_hook_summary`, `away_summary` (LEGACY), `scheduled_task_fire` (LEGACY) |
+
+`compact_boundary` promotes 2 of the 8 `compactMetadata` keys (`trigger` →
+`compact_trigger`, `preTokens` → `compact_pre_tokens`). **The other six are
+raw-only**: `postTokens`, `cumulativeDroppedTokens`, `durationMs`,
+`preservedSegment`, `preservedMessages`, `preCompactDiscoveredTools`.
 
 | Field | Subtype | Notes |
 |---|---|---|
@@ -1421,18 +1452,23 @@ Subtypes with no dedicated columns: `informational`,
 | `fallbackModel` / `originalModel` | `model_refusal_fallback`, `model_consent_fallback` | |
 | `trigger`, `scope`, `direction` | `model_refusal_fallback` | |
 | `choice`, `persistedAsDefault` | `model_consent_fallback` | |
-| `pendingBackgroundAgentCount` | `turn_duration` | |
-| `pendingWorkflowCount` | various | |
+| `pendingBackgroundAgentCount` | `turn_duration` | 4,178 rows |
+| `pendingWorkflowCount` | `turn_duration` | 147 rows, last seen 2026-08-01 — **not "various"** |
+| `postTokens`, `cumulativeDroppedTokens`, `durationMs`, `preservedSegment`, `preservedMessages`, `preCompactDiscoveredTools` | `compact_boundary` | the 6 unpromoted `compactMetadata` keys |
 | `hookAdditionalContext` | `stop_hook_summary` | |
-| `hookCount`, `hookErrors`, `hookInfos`, `hasOutput`, `preventedContinuation`, `stopReason`, `toolUseID` | `stop_hook_summary` | |
+| `hookCount`, `hookErrors`, `hookInfos`, `hasOutput`, `preventedContinuation`, `stopReason`, `toolUseID` | `stop_hook_summary` | with `hookAdditionalContext`, these are **all 8** of its non-universal fields — the subtype is entirely raw-only |
 
 ### Elsewhere
 
-- **`toolUseResult`** (`tool_results.tool_use_result`) is polymorphic per tool —
-  dict 45%, list 17%, string 3%. Stored as a blob **by design**; do not
-  normalize per tool.
+- **`toolUseResult`** (`tool_results.tool_use_result`) is polymorphic per tool.
+  **Of the records that carry one** (deduped by `message_uuid` — it is a
+  record-level field copied onto every row): dict 75.5%, list 19.7%, string
+  4.8%. The old 45/17/3 split was a share of *all* rows, not of carriers.
+  Stored as a blob **by design**; do not normalize per tool.
 - **`attachment`** (`attachments.attachment`) is variable-shape per
-  `attachment.type`.
+  `attachment.type` — 41 distinct types, censused in
+  [Appendix A](#attachment-type-distribution-2026-09-02-live-db). Everything
+  *outside* this object is dropped through v9; **v10** adds `attachments.raw`.
 - **`usage`** keeps every field, including the ones not promoted to columns.
 - **`cost_state`** keeps `totalAPIDurationWithoutRetries`, `startTime` and the
   whole `modelUsage` object.
@@ -1453,7 +1489,25 @@ Schema versions 1-2 belong to the retired SQLite generations (Gen1/Gen2,
 | **6** | 2026-07-17 | `3c971d1` | Subagent visibility: child session rows keyed `<parent>:<agent>`, `idx_messages_agent`. |
 | **7** | 2026-07-17 | `26d10f7` | `own_*` aggregate columns (main-chain vs roll-up) and `v_agent_children`, the Agent spawn ledger. |
 | **8** | 2026-08-20 | `5a2d462` | `summary_passes` — the per-pass ledger and in-flight claim for repeatable (delta) summarization. |
-| **9** | 2026-09-02 | this release | The Claude Code v2.1.161-258 impact release. See below. |
+| **9** | 2026-09-02 | `03bc19d` + `f2819b7` | The Claude Code v2.1.161-258 impact release. See below. |
+| **10** | pending | pending | Losslessness and attribution repairs. See below. |
+
+### Unversioned table additions
+
+Two tables entered the schema without a `SCHEMA_VERSION` bump, so neither
+appears in the table above:
+
+| Table | Date | Commit | Note |
+|---|---|---|---|
+| `summarize_attempts` | 2026-07-03 | `e97128d` | DDL in `summarize.py::ensure_attempts_table`, **created lazily outside `initialize()`**. No FK, no index beyond the PK. |
+| `task_outputs` | 2026-07-17 | `5efcaf3` | Added inside `initialize()`, but with no version bump. |
+
+> **The version marker gates views and backfills, not the table inventory.**
+> `views_version != SCHEMA_VERSION` triggers a view rebuild and
+> `postgres.BACKFILLS` is keyed on it — but `CREATE TABLE IF NOT EXISTS` runs
+> unconditionally on every `initialize()`. A table can therefore appear without
+> the version moving, and **`metadata.schema_version` is not a reliable
+> description of which tables exist.** Read the catalog, not the marker.
 
 ### What v9 added
 
@@ -1474,9 +1528,53 @@ New table `session_records` (the catch-all + tripwire) and view
 `model_pricing` — the Claude 5 family (opus-5, sonnet-5, fable-5, fable-5-1,
 mythos-5, mythos-5-1) and the Opus 4.6/4.7/4.8 correction.
 
-Corrections to existing data: `messages.message_type` (list-content prompts
-relabelled from `tool_result` to `prompt`) and `messages.prompt_text` (filled
+Corrections to existing data, via `postgres.BACKFILLS`:
+`v9_message_effort_usage` (fills `effort`, `thinking_tokens`,
+`server_tool_use`, `iterations`, `iteration_count` from `messages.raw`) and
+`v9_relabel_list_content_prompts` (`messages.message_type`, list-content prompts
+relabelled from `tool_result` to `prompt`, plus `messages.prompt_text` filled
 for those rows).
+
+> **Both backfills touch `messages` and nothing else.** No backfill fills the
+> new `sessions` columns, `session_records` or `content_blocks.block_payload` —
+> see the [v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+> Those need a re-parse.
+
+### What v10 adds
+
+Everything below is the **target state**; the commit is pending.
+
+`SCHEMA_VERSION = 10`. New columns:
+
+| Column | Type | Purpose |
+|---|---|---|
+| `attachments.raw` | jsonb | closes the archive's largest lossy hole |
+| `content_blocks.caller` | jsonb | `content[].caller`, on 100% of `tool_use` blocks and dropped through v9 |
+| `sessions.worktree_active` | boolean | **last-wins, not COALESCE** — NULL = never seen, true = last record carried a session object, false = last record was null, i.e. the session EXITED |
+| `projects.decoded_from` | text | `cwd` \| `encoded`; the conflict path now UPGRADES `decoded_path` / `project_name` from a real `cwd` hint and never downgrades |
+
+New backfills:
+
+| Key | What it fills |
+|---|---|
+| `v10_first_prompt` | recomputes `sessions.first_prompt` under the v9 prompt rule (list-content prompts count) — **132 of 2,684 main sessions change** |
+| `v10_session_kind` | `sessions.session_kind` from `messages.session_kind` |
+| `v10_content_block_caller` | `content_blocks.caller` from `messages.raw`, matched on `tool_use_id` |
+
+Other changes:
+
+- **`first_prompt` uses the v9 prompt rule.** The v9 relabel fixed
+  `messages.message_type` but never re-derived the session-level column.
+- **A message's `content_blocks` / `tool_results` are written once** even when
+  the record appears in several source files. **Historical duplicates are not
+  deleted** — the new view **`v_duplicate_blocks`** surfaces them, and
+  `recompute_session_aggregates` now counts `DISTINCT tool_use_id` and distinct
+  errors so the aggregates are right regardless.
+- **`bridge-session`, `queue-operation`, `last-prompt` and the seven latest-wins
+  metadata types are additionally stored verbatim in `session_records`**, so
+  their history survives. They keep their modelled route and are **not** counted
+  as unmodelled.
+- **`v_token_cost_daily` gains `priced_messages` and `unpriced_messages`.**
 
 ### Migration discipline
 
@@ -1485,22 +1583,46 @@ Every migration in this schema is **additive, idempotent and guarded**:
 - Tables and indexes use `CREATE ... IF NOT EXISTS` and run on every
   `initialize()`, so the schema self-heals.
 - Column additions live in a `DO $$ … IF NOT EXISTS (SELECT 1 FROM
-  information_schema.columns …) $$` block keyed on the FIRST new column, so the
-  ACCESS EXCLUSIVE `ALTER` fires exactly once and not on every 5-minute sweep
-  tick. `ADD COLUMN` without a default is O(1) in PG11+, so no heap rewrite.
+  information_schema.columns …) $$` block keyed on **one** of the new columns,
+  so the ACCESS EXCLUSIVE `ALTER` fires exactly once and not on every 5-minute
+  sweep tick. `ADD COLUMN` without a default is O(1) in PG11+, so no heap
+  rewrite.
+
+  > **The guard column is not always the first one.** The v7 `own_*` block is
+  > keyed on `own_message_count`, which is the **fifth** column in that batch.
+  > If you add a column to an existing guarded block, it will not be created on
+  > a database that already ran the block — check the guard, then add a new
+  > block.
 - **No column is ever dropped or retyped, and no row is ever deleted.** A field
   Claude Code stops emitting becomes LEGACY, not absent.
-- Views are recreated only when `views_version` lags `SCHEMA_VERSION`. A view
+- Views are recreated whenever `views_version` **differs from**
+  `SCHEMA_VERSION` — not only when it lags, so a downgrade rebuilds too. A view
   whose column list can grow is `DROP`ped first — `CREATE OR REPLACE VIEW`
   cannot add a column and fails with *cannot change name of view column*.
 - **Data backfills are bounded, resumable and self-committing**
   (`postgres.BACKFILLS`, `SessionArchive.run_backfills`). Each walks the
   messages primary key in 20K-row committed batches with a cursor in `metadata`,
-  spends at most 20s per `initialize()` call, resumes on the next sweep, is
-  `IS DISTINCT FROM`-guarded so a re-run writes nothing, and isolates its own
-  failures so a broken backfill can never stop ingest. A single long `UPDATE`
-  would be exactly the `idle in transaction` shape that once convoyed this
-  database for ~9 hours.
+  resumes on the next sweep, and isolates its own failures so a broken backfill
+  can never stop ingest. A single long `UPDATE` would be exactly the
+  `idle in transaction` shape that once convoyed this database for ~9 hours.
+
+  The details that matter when you write one:
+
+  - **"20s" is a start gate, not a wall clock.** The runner starts **no new
+    batch** after 20s, but a call that starts a batch at 19.9s runs it to
+    completion — so a call is bounded at **20s plus one in-flight batch**, with
+    `statement_timeout = 120s` as the real ceiling.
+  - **Re-run safety is per-backfill, not automatic.**
+    `v9_message_effort_usage` is guarded by `IS DISTINCT FROM`, so a re-run
+    writes nothing. `v9_relabel_list_content_prompts` cannot use that — it is
+    guarded by a state predicate plus a `NOT EXISTS` re-check of the tool_result
+    condition.
+  - **`done` is set when a batch scans 0 rows**, not when it writes 0. A
+    write-nothing pass over remaining rows keeps going.
+  - **Re-arm a completed backfill by deleting its `metadata` keys** —
+    `backfill:<key>:done` and `backfill:<key>:cursor`. There is no other switch.
+  - A backfill covers only rows present when it ran. Rows ingested after `done`
+    is set are **not** covered; only the parser reaches those.
 
 > **Generated columns are deliberately not used.** Postgres 16 supports only
 > STORED generated columns, and adding one rewrites the entire table — a

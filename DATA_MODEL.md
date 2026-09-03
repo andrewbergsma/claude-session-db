@@ -423,7 +423,7 @@ Index: `idx_sessions_kind` (partial, NOT NULL).
 
 ---
 
-> ### ⚠ The v9 columns are nearly empty, and only re-parsing fills them
+> ### The v9 columns are nearly empty, and only re-parsing fills them
 >
 > Everything in the four blocks above — the fork columns, `current_cwd`,
 > `worktree_session`, the `cost-state` ledger, `session_kind` — plus
@@ -751,7 +751,7 @@ per-`source_file` DELETE.
 | `source_line` | integer | yes | — | always NULL |
 | `raw` | jsonb | yes | the whole record | **v10** |
 
-> ### ⚠ Through v9 this is the lossiest table in the archive
+> ### Through v9 this is the lossiest table in the archive
 >
 > `attachments` keeps the `attachment` object and **nothing else**. Everything
 > the record carries around it is discarded on ingest and is not recoverable
@@ -940,7 +940,7 @@ archive-wide in
 Fields marked *(derived)* also feed a `sessions` column.
 
 > Through v9, **1,373 of the 9,074 such records on disk** are in the table —
-> see the [v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+> see the [v9 population caveat](#the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
 > **v10** adds four more source types to this table (above), which are modelled
 > elsewhere and stored here for history.
 
@@ -1537,7 +1537,7 @@ for those rows).
 
 > **Both backfills touch `messages` and nothing else.** No backfill fills the
 > new `sessions` columns, `session_records` or `content_blocks.block_payload` —
-> see the [v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+> see the [v9 population caveat](#the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
 > Those need a re-parse.
 
 ### What v10 adds
@@ -1766,7 +1766,7 @@ above: it is the inventory of what Claude Code injects into a context window.
 
 `grep` over every `*.jsonl` in `~/.claude/projects` (2,237 files). Compare with
 the 1,373 rows actually in `session_records` — the gap is the
-[v9 population caveat](#-the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
+[v9 population caveat](#the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
 
 | Type | On disk |
 |---|---|

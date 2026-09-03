@@ -1075,9 +1075,30 @@ of 1,856 sidechain files in the scan. All fields *(derived)*. First observed at
 
 ## 6. Reference and control tables
 
+> ### The whole schema declares exactly four foreign keys
+>
+> | Constraint | On delete |
+> |---|---|
+> | `sessions.project_id` → `projects` | `NO ACTION` |
+> | `file_backups.snapshot_id` → `file_history` | **CASCADE** |
+> | `summary_state.session_id` → `sessions` | **CASCADE** |
+> | `summary_passes.session_id` → `sessions` | **CASCADE** |
+>
+> **Every other `→` in this document is a logical reference the database does
+> not enforce** — `messages.session_id`, `content_blocks.message_uuid`,
+> `tool_results.tool_use_id`, `session_records.session_id` and the rest. Ingest
+> order, not a constraint, is what keeps them consistent; an orphan is possible
+> and the database will not object.
+>
+> Deliberate absences, verified live: **0 triggers, 0 functions, 0 materialized
+> views, 1 schema (`public`), 7 sequences** (the BIGSERIAL PKs), and **0
+> generated columns**.
+
 ### `metadata`
 
-`key` (PK) / `value`, both text. Known keys:
+**Grain** one key. **PK** `key`. **Writer** `postgres.SessionArchive`
+(`initialize`, `run_backfills`). **Idempotence** upsert on `key`.
+`key` / `value`, both text. Known keys:
 
 | Key | Meaning |
 |---|---|
@@ -1088,23 +1109,29 @@ of 1,856 sidechain files in the scan. All fields *(derived)*. First observed at
 
 ### `sync_state`
 
-`file_path` (PK), `file_mtime_ns` (the sync signal, `st_mtime_ns`),
-`record_count`, `file_size`, `last_synced_at`.
+**Grain** one row per transcript file. **PK** `file_path`. **Writer**
+`sync.py::SessionSync`. **Idempotence** upsert on `file_path`; the row is what
+makes the next sync skip an unchanged file. Columns: `file_mtime_ns` (the sync
+signal, `st_mtime_ns`), `record_count`, `file_size`, `last_synced_at`.
 
 ### `model_pricing`
 
 List prices in USD per 1M tokens. **Reference data, not session facts** — the
 only non-transcript table besides `service_tier_pricing`.
 
+**Grain** one row per model-name prefix. **PK** `model_pattern`. **Writer**
+`postgres.SessionArchive.initialize` (seed) and you, by hand.
+**Idempotence** seeded `ON CONFLICT DO NOTHING`.
+
 | Column | Type | Null | Notes |
 |---|---|---|---|
-| `model_pattern` | text | no | PK. Matched `messages.model LIKE model_pattern || '%'`, **longest pattern wins** |
+| `model_pattern` | text | no | PK. Matched `messages.model LIKE model_pattern \|\| '%'`, **longest pattern wins** — mind the [`LIKE` hazard](#2-conventions-used-in-this-document) |
 | `input_per_mtok` | numeric | no | base (uncached) input |
 | `output_per_mtok` | numeric | no | |
 | `cache_write_5m_mult` | numeric | no | default 1.25 |
 | `cache_write_1h_mult` | numeric | no | default 2.0 |
 | `cache_read_mult` | numeric | no | default 0.10 |
-| `effective_from` | date | yes | |
+| `effective_from` | date | yes | **Inert.** Nothing filters on it — there is exactly one row per pattern, so it is a comment, not a temporal key. A repricing overwrites history |
 | `notes` | text | yes | |
 
 Seeded with `ON CONFLICT DO NOTHING`, so re-running `initialize()` never
@@ -1125,12 +1152,23 @@ seed.**
 | `claude-3-5-haiku` | 0.80 | 4 | 0.10 | |
 | `claude-3-opus` | 15 | 75 | 0.10 | |
 
+**Cache reads are `cache_read_mult` × the base input rate, and that multiplier
+is 0.10 on every model in the table except one family**: `claude-fable-5-1` and
+`claude-mythos-5-1` are **0.025**, a 5.1-only change. It is not a flat
+"10% of input" rule.
+
+> **`claude-sonnet-4-6` is priced by the generic `claude-sonnet-4` row** (3 / 15)
+> — 11,739 rows in this archive — and unlike the Opus 4.6/4.7/4.8 correction it
+> has **not** been verified against a `cost-state` ledger. It is an assumption,
+> not a measurement.
+
 Known limits of the flat per-model model:
 
 - **Fast mode is not distinguishable from the transcript.** Opus 5 fast bills
-  10/50 rather than 5/25, the model string is identical, and `usage.speed` is
-  absent on ~36% of records. One flat rate applies; a fast-heavy session
-  under-reports.
+  10/50 rather than 5/25, the model string is identical, and `usage.speed` has
+  **only ever held `standard`** here — `fast` has never once been written, and
+  the field is absent on 30.6% of assistant rows. One flat rate applies; a
+  fast-heavy session under-reports.
 - **No >200K long-context premium** is modelled.
 - **A model FALLBACK is priced wholly at the top-level model** (see
   `messages.iterations`).
@@ -1139,17 +1177,21 @@ Known limits of the flat per-model model:
 
 ### `service_tier_pricing`
 
-`service_tier` (PK, matches `messages.service_tier`), `multiplier` (scales the
-whole row's cost), `notes`. Seeded: `standard` 1.0, `priority` 1.0 (same
-per-token list price; committed throughput is billed separately), `batch` 0.5.
+**Grain** one row per service tier. **PK** `service_tier` (matches
+`messages.service_tier`). **Writer** `initialize` (seed). **Idempotence**
+`ON CONFLICT DO NOTHING`. Columns: `multiplier` (scales the whole row's cost),
+`notes`. Seeded: `standard` 1.0, `priority` 1.0 (same per-token list price;
+committed throughput is billed separately), `batch` 0.5.
 
 ### `summary_state`
 
-The pre-LLM gate for phase-4 roll-ups. One row per session.
+The pre-LLM gate for phase-4 roll-ups. **Grain** one row per session.
+**PK** `session_id`. **Writer** `summarize.py`. **Idempotence** upsert on
+`session_id`; deleted only by CASCADE from `sessions`.
 
 | Column | Type | Null | Notes |
 |---|---|---|---|
-| `session_id` | text | no | PK, FK → `sessions` ON DELETE CASCADE |
+| `session_id` | text | no | PK; **FK** → `sessions` `ON DELETE CASCADE` |
 | `state` | text | no | CHECK `summarized` \| `not_required` \| `pending` |
 | `reason` | text | yes | CHECK `empty` \| `meta_run` \| `trivial` \| `grown` \| `natkey` |
 | `kmcp_application` / `kmcp_path` | text | yes | where the summary entry lives |
@@ -1163,30 +1205,43 @@ pending and self-heals. Index: `idx_summary_state_state`.
 
 ### `summary_passes`
 
-Append-only ledger, one row per summarization pass; also the in-flight claim.
+Append-only ledger; also the in-flight claim. **Grain** one row per
+summarization pass. **PK** `(session_id, pass)`, `pass >= 1`; `session_id` is
+also an **FK** → `sessions` `ON DELETE CASCADE`. **Writer** `summarize.py`.
+**Idempotence** a new pass is a new row — this table is the one place the
+archive appends rather than upserts.
 
-`session_id` + `pass` (composite PK, `pass >= 1`), `application`, `path`,
+Columns: `application`, `path`,
 `message_count_at_summary`, `leaf_uuid_at_summary`, `status` (CHECK
 `in_flight` \| `written` \| `failed`), `detail`, `created_at`, `updated_at`.
 Index: `idx_summary_passes_status`.
 
 ### `summarize_attempts`
 
-Failure-isolation backoff ledger: `session_id` (PK), `attempts`,
-`last_attempt_at`, `last_error`.
+Failure-isolation backoff ledger. **Grain** one row per session. **PK**
+`session_id` — **no FK**, and no index beyond the PK. **Writer** `summarize.py`.
+**Idempotence** upsert on `session_id`. Columns: `attempts`, `last_attempt_at`,
+`last_error`.
+
+> **This table is created outside `initialize()`.** Its DDL lives in
+> `summarize.py::ensure_attempts_table` and runs lazily on first use, which is
+> why it is not gated by `SCHEMA_VERSION` and does not appear in the migration
+> table below as a versioned change. See [§9](#9-migration-history).
 
 ---
 
 ## 7. Views
 
-`csd views` lists these; `views_version` in `metadata` gates their recreation.
+`csd views` lists these; `views_version` in `metadata` gates their recreation —
+the views are rebuilt whenever `views_version != SCHEMA_VERSION`, **not only when
+it lags**, so a downgrade rebuilds too.
 
 | View | Answers |
 |---|---|
 | `v_session_overview` | one row per session, titles + aggregates + v9 context columns |
-| `v_agent_children` | the Agent SPAWN ledger: tool_use ⨝ tool_result ⨝ child session |
+| `v_agent_children` | the Agent SPAWN ledger: tool_use ⨝ tool_result ⨝ child session. Matches `block_type='tool_use' AND tool_name='Agent'` with `tool_use_result ? 'agentId'`; the child join is a **LEFT LATERAL**, so `child_session_key` is NULL when the child transcript was never archived |
 | `v_token_usage_by_model` | tokens and cache-hit % per model |
-| `v_token_by_attribution` | which skill / MCP server / agent burns tokens |
+| `v_token_by_attribution` | which skill / MCP server / agent burns tokens. Reads **`messages`, not `v_message_cost`** — it reports TOKENS, never dollars, and its `agent` column is `messages.attribution_agent` |
 | `v_tool_usage` | tool frequency and reach |
 | `v_error_summary` | every `is_error` tool_result, classified |
 | `v_error_by_class` | which failure modes recur, where, how widely |
@@ -1198,7 +1253,8 @@ Failure-isolation backoff ledger: `session_id` (PK), `attempts`,
 | `v_token_cost_by_model` | cost per model, split by caching lens |
 | `v_token_cost_daily` | daily spend |
 | `v_session_cost_drift` | **v9** — csd's computed cost vs Claude Code's reported cost |
-| `v_unsummarized` | the phase-4 work queue (pending sessions only) |
+| `v_unsummarized` | the phase-4 work queue — `summary_state.state = 'pending'` **and `NOT is_subagent`** |
+| `v_duplicate_blocks` | **v10** — messages whose `content_blocks` were written more than once (historical duplicates are not deleted) |
 
 ### `v_session_overview`
 
@@ -1212,17 +1268,42 @@ ordinary one before.
 ### `v_message_cost`
 
 The costing base. Anthropic bills the prompt as three disjoint buckets — base
-input (1x), cache writes (1.25x 5m / 2.0x 1h), cache reads (0.1x) — plus output.
-Columns: `uuid`, `session_id`, `ts`, `model`, `service_tier`, the five token
+input (1x), cache writes (1.25x 5m / 2.0x 1h), cache reads (`cache_read_mult` ×
+input, 0.1x on every model except Fable/Mythos 5.1 at 0.025x) — plus output.
+
+**It covers `role = 'assistant' AND model IS NOT NULL` only.** User rows, system
+rows and model-less assistant rows are not in it at all.
+
+Columns: `uuid`, `session_id`, `ts`, `model`, `service_tier`, **six** token
 buckets, `unpriced`, and `input_cost`, `cache_write_5m_cost`,
 `cache_write_1h_cost`, `cache_read_cost`, `output_cost`, `total_cost`.
+
+**The six token buckets, and the rename.** The view does not project the
+`messages` column names: `ephemeral_5m_tokens` → `write_5m_tokens`,
+`ephemeral_1h_tokens` → `write_1h_tokens`, plus a sixth bucket that has no
+`messages` column at all —
+
+```sql
+write_untiered_tokens = greatest(cache_creation_tokens
+                                 - ephemeral_5m_tokens
+                                 - ephemeral_1h_tokens, 0)
+```
+
+— the lump cache-creation total that was never split into a TTL tier. It is
+priced at the **5m** rate (the API default TTL) and is folded into
+`cache_write_5m_cost`, so that column is *not* `write_5m_tokens` alone.
 
 - An unpriced row (no `model_pricing` match) yields NULL cost terms — `sum()`
   skips them — and is counted via `unpriced`, so a rollup never silently
   under-counts.
-- Writes recorded only as a lump `cache_creation` (legacy rows without the
-  5m/1h split) are priced at the 5m rate, the API default TTL.
 - **It sums per ROW, and rows are not unique per API response.** See below.
+
+> **`v_token_cost_by_model` and `v_token_cost_daily` are `GROUP BY` over
+> `v_message_cost`, so they inherit the per-row API-message over-count
+> unchanged.** `v_token_cost_by_model` at least carries `unpriced_messages`;
+> **`v_token_cost_daily` has no unpriced counter at all through v9**, so a day
+> whose spend is half unpriced looks like a cheap day. **v10** adds
+> `priced_messages` and `unpriced_messages` to it.
 
 ### `v_session_cost_drift` — schema v9
 
@@ -1230,33 +1311,67 @@ Two independent numbers that ought to agree: `computed_cost_usd` (Σ
 `v_message_cost`) against `reported_cost_usd` (`cost-state.totalCostUSD`). The
 view carries what is needed to ATTRIBUTE a gap, not just display one.
 
+**Grain: one row per NON-SUBAGENT session with at least one side non-NULL**
+(`WHERE NOT is_subagent AND (reported IS NOT NULL OR computed IS NOT NULL)`),
+ordered by **absolute drift descending**.
+
 | Column | Meaning |
 |---|---|
+| `session_id`, `project_name`, `title`, `modified_at` | identity — `title` is `coalesce(custom_title, ai_title)` |
 | `computed_cost_usd`, `reported_cost_usd`, `drift_usd`, `drift_pct` | the comparison |
 | `priced_messages`, `distinct_api_messages` | row count vs distinct `api_message_id` |
 | `api_message_ratio` | `priced / distinct`. **>1.0 means over-counted by about that factor** |
 | `sidechain_messages` | subagent rows included in `computed` |
 | `fallback_messages` | rows where a second model also billed (`iteration_count > 1`) |
 | `unpriced_messages`, `has_unknown_model_cost` | coverage gaps on either side |
-| `reported_model_usage` | the harness's own per-model breakdown |
-| `reported_*_duration_ms`, `reported_lines_*` | the rest of the harness ledger |
+| `reported_model_usage` | the harness's own per-model breakdown (`cost_state -> 'modelUsage'`) |
+| `reported_total_duration_ms`, `reported_api_duration_ms`, `reported_lines_added`, `reported_lines_removed` | the rest of the harness ledger |
 
-Known causes of a gap, in order of measured impact:
+> **`reported_tool_duration_ms` exists on `sessions` but is NOT projected here.**
+> Read it from `sessions` if you need it.
+
+> **`priced_messages` is `count(*)`, not `count(*) - unpriced`.** It is every row
+> the view saw, and `unpriced_messages` is a **subset** of it, not a complement.
+> Subtract if you want the genuinely-priced count.
+
+**Read the sign.** `drift_usd = reported − computed`, so a **negative** drift
+means **csd computed MORE than the harness reported** — which is the normal
+state today. `drift_pct` is a percentage **of the reported side**
+(`100 × drift / reported`), so it is bounded above but **unbounded below**: a
+tiny reported cost against a large computed one produces an arbitrarily large
+negative percentage. It is a ratio, not a score.
+
+**Symmetric NULLs.** A session with no `cost-state` record has a NULL reported
+side and a NULL drift, never a fake zero. Equally, a session whose every message
+is unpriced sums to a NULL `computed_cost_usd` — `sum()` over all-NULL terms is
+NULL, not 0 — and therefore also a NULL drift.
+
+Known causes of a gap. They are listed by how well each is understood, **not by
+measured impact** — no such ranking survives the data:
 
 1. **`api_message_ratio` > 1** — one API response appearing as several
-   `messages` rows. Measured 1.808-2.443 on four real sessions, tracking the
-   drift closely. Deduplicating `v_message_cost` by `api_message_id` is the fix
-   and is deliberately **not** done yet: it changes every historical cost number
-   in the archive and deserves its own change with its own verification.
-2. **unpriced models** — the failure the Claude 5 seed fixed.
+   `messages` rows. Measured 1.808-2.443 on five real sessions. **The ratio
+   tracks the drift on two of the five**; on a third the sidechain roll-up
+   dominates, and on a fourth an unidentified factor does. Treat it as the
+   leading hypothesis, not the explanation.
+   Deduplicating `v_message_cost` by `api_message_id` is the *candidate* fix and
+   is deliberately not done yet — and it is **not verified to close the gap**:
+   taking the max cost per `api_message_id` lands **5-6% below** the reported
+   cost-state on Fable 5 / 5.1 sessions and about **30% below** on Opus 5.
+   It changes every historical cost number in the archive and deserves its own
+   change with its own verification.
+2. **harness-internal calls that never become `messages` rows** — the Haiku
+   title and summary calls Claude Code makes on its own behalf appear in
+   `cost-state.modelUsage` but have no transcript record at all. This pushes the
+   **reported** side UP, in the opposite direction to the over-count above, and
+   the two partly cancel.
 3. **sidechain roll-up** — subagent rows share the parent's `session_id`, so
    `computed` includes child spend; whether `cost-state` does is undocumented.
-4. **fast mode** — bills higher, not detectable (see §6).
-5. **model fallback** — priced wholly at the top-level model.
-6. **long-context premiums** — not modelled.
-
-A session with no `cost-state` record yet has a NULL reported side and a NULL
-drift, never a fake zero.
+   This dominates the drift on at least one measured session.
+4. **unpriced models** — the failure the Claude 5 seed fixed.
+5. **fast mode** — bills higher, not detectable (see §6).
+6. **model fallback** — priced wholly at the top-level model.
+7. **long-context premiums** — not modelled.
 
 ---
 

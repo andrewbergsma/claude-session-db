@@ -630,8 +630,8 @@ and `claudecode:lesson/launchd-per-label-hang-silent-starvation`.
 **Read [`DATA_MODEL.md`](DATA_MODEL.md) before touching the schema.** It is the
 authority for every table, column, view, payload shape and migration — this file
 does not duplicate it. `SCHEMA_VERSION` lives in `postgres.py`; the current
-version is **9** (Claude Code v2.1.161-258 impact release, 3.23.0), recorded in
-the `metadata` table and re-applied idempotently by `initialize()`.
+version is **10** (the code-defect batch, 3.24.0), recorded in the `metadata`
+table and re-applied idempotently by `initialize()`.
 
 **`SCHEMA_VERSION` is not the table inventory.** It gates view recreation
 (`views_version != SCHEMA_VERSION`) and `postgres.BACKFILLS` — but
@@ -639,12 +639,15 @@ the `metadata` table and re-applied idempotently by `initialize()`.
 the version moving. `summarize_attempts` and `task_outputs` both did. Read the
 catalog, not the marker.
 
-**v10 is in flight** (`SCHEMA_VERSION = 10`, commit pending): `attachments.raw`,
+**v10 shipped in 3.24.0** (2026-09-02): `attachments.raw`,
 `content_blocks.caller`, `sessions.worktree_active` (last-wins, so a worktree
 EXIT can finally be recorded), `projects.decoded_from`; backfills
 `v10_first_prompt`, `v10_session_kind`, `v10_content_block_caller`; a new
-`v_duplicate_blocks` view and unpriced counters on `v_token_cost_daily`. Details
-in `DATA_MODEL.md` §9.
+`v_duplicate_blocks` view; `messages` / `priced_messages` / `unpriced_messages`
+on `v_token_cost_daily` and `worktree_active` on `v_session_overview`; ingest
+skips block/result rows owned by another `source_file`
+(`SyncStats.duplicate_rows_skipped`); the eight `SESSION_RECORD_ALSO_ARCHIVED`
+types also land verbatim in `session_records`. Details in `DATA_MODEL.md` §9.
 
 **Arrows are not foreign keys.** The schema declares exactly **four** FKs —
 `sessions.project_id`, `file_backups.snapshot_id` (CASCADE),

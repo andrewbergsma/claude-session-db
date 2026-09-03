@@ -1,8 +1,8 @@
 # DATA_MODEL.md — the `claude_sessions` schema reference
 
-**Schema version 9** · Postgres 16 · database `claude_sessions`.
-**Items marked "v10" are the documented target state of the in-flight schema-v10
-change; the commit is pending.**
+**Schema version 10** · Postgres 16 · database `claude_sessions`.
+**Items marked "v10" shipped in `csd` 3.24.0 (2026-09-02) and are live** —
+the marker is now history, not a forecast.
 
 This is the authoritative reference for **every table, column, view and index**
 in the archive: its type, its nullability, the JSONL field it comes from, the
@@ -22,8 +22,8 @@ wrong before:
   fields](#8-raw-only-fields) lists what is present in the archive but reachable
   only through JSONB.
 
-  **Three families have no escape hatch through v9**, and are the only places
-  where this archive is genuinely lossy:
+  **Three families had no escape hatch through v9**, and were the only places
+  where this archive was genuinely lossy:
 
   - **`attachments`** keeps the `attachment` object and nothing else. The
     record's `cwd`, `gitBranch`, `version`, `entrypoint`, `userType`, `slug`,
@@ -36,8 +36,12 @@ wrong before:
     `custom-title` — collapse into one `sessions` column each. The current value
     survives; every earlier value, and the time it changed, does not.
 
-  **v10 closes two of the three:** it adds `attachments.raw`, and additionally
-  stores the metadata types verbatim in `session_records`. See
+  **v10 closes the first and the third, and half of the second:** it adds
+  `attachments.raw`; it stores the seven latest-wins metadata types verbatim in
+  `session_records`; and it does the same for `queue-operation`, the one member
+  of the second family whose record type now also lands in `session_records`
+  (`SESSION_RECORD_ALSO_ARCHIVED`, eight types in all). `pr_links`,
+  `file_history` and `agent_tasks` still keep promoted columns only. See
   [§9](#9-migration-history).
 
 Companion documents: `CLAUDE.md` (architecture and doctrine), `CHANGELOG.md`
@@ -45,7 +49,8 @@ Companion documents: `CLAUDE.md` (architecture and doctrine), `CHANGELOG.md`
 documents it, it does not define it).
 
 > **Provenance.** Sections 1-9 were written against the live catalog on
-> 2026-09-02 (schema v9), against a 30-day scan of `~/.claude/projects`
+> 2026-09-02 (schema v9) and reconciled against the merged schema-v10 code and
+> the v10 catalog the same day, against a 30-day scan of `~/.claude/projects`
 > (2,015 files, ~500K records, Claude Code v2.1.161-2.1.258), and against a
 > full-archive scan (2,237 `*.jsonl` files) plus four adversarial reviews run
 > on 2026-09-02. Every figure quoted "live" was re-verified against the
@@ -629,7 +634,7 @@ Indexes: `idx_messages_session`, `_ts`, `_role`, `_model`, `_source_file`,
 
 > **Unknown blocks are kept (v9).** `parse_content_block` used to return None for
 > anything that was not thinking/text/tool_use, and the sync skipped it — so the
-> v2.1.247 `fallback` block (`{"type":"fallback","from":{"model":…},
+> v2.1.215 `fallback` block (`{"type":"fallback","from":{"model":…},
 > "to":{"model":…}}`) was dropped, AND every later block in that message shifted
 > down one `block_index`. Unknown blocks now store under their real
 > `block_type` with the payload in `block_payload`. They are deliberately not
@@ -909,13 +914,16 @@ plus a per-`source_file` DELETE.
 append-only, so file+line is the natural key. The table is also in
 `PER_FILE_TABLES`, so a re-sync clears before re-inserting.
 
-> **v10 widens what lands here.** `bridge-session`, `queue-operation`,
-> `last-prompt` and the seven latest-wins metadata types (`ai-title`,
-> `last-prompt`, `mode`, `permission-mode`, `bridge-session`, `agent-name`,
-> `custom-title`) are **additionally** stored verbatim in `session_records`, so
-> their history survives the latest-wins column. They keep their modelled route
-> and are **not** counted as unmodelled — `is_modelled` stays `true` and the
-> tripwire below does not fire on them.
+> **v10 widens what lands here — by exactly eight record types**
+> (`jsonl_records.SESSION_RECORD_ALSO_ARCHIVED`): the seven latest-wins
+> session-metadata types `ai-title`, `custom-title`, `last-prompt`,
+> `permission-mode`, `mode`, `bridge-session`, `agent-name`, plus
+> `queue-operation` (whose `reason` field had no column). They are
+> **additionally** stored verbatim in `session_records`, so their history
+> survives the latest-wins column. They keep their modelled route and are
+> **not** counted as unmodelled — `is_modelled` stays `true` and the tripwire
+> below does not fire on them. Still exactly one `session_records` row per
+> JSONL line, so `(source_file, source_line)` remains the key.
 
 `is_modelled = false` is the standing tripwire:
 
@@ -941,8 +949,8 @@ Fields marked *(derived)* also feed a `sessions` column.
 
 > Through v9, **1,373 of the 9,074 such records on disk** are in the table —
 > see the [v9 population caveat](#the-v9-columns-are-nearly-empty-and-only-re-parsing-fills-them).
-> **v10** adds four more source types to this table (above), which are modelled
-> elsewhere and stored here for history.
+> **v10** adds **eight** more source types to this table (above), which are
+> modelled elsewhere and stored here for history.
 
 ### `atis-latch` — 6,077
 
@@ -1260,7 +1268,7 @@ it lags**, so a downgrade rebuilds too.
 | `v_token_cost_daily` | daily spend |
 | `v_session_cost_drift` | **v9** — csd's computed cost vs Claude Code's reported cost |
 | `v_unsummarized` | the phase-4 work queue — `summary_state.state = 'pending'` **and `NOT is_subagent`** |
-| `v_duplicate_blocks` | **v10** — messages whose `content_blocks` were written more than once (historical duplicates are not deleted) |
+| `v_duplicate_blocks` | **v10** — `(message_uuid, session_id, kind, source_files, row_count)`, one row per message whose `content_blocks` **or** `tool_results` span more than one `source_file` (`kind` says which). Historical duplicates are **not** deleted; the batched operator cleanup recipe is in `postgres.py` beside the definition |
 
 ### `v_session_overview`
 
@@ -1269,7 +1277,8 @@ it lags**, so a downgrade rebuilds too.
 `session_kind`, `forked_from_session_id`, `forked_from_uuid`,
 `fork_context_length`, `worktree_session`, `reported_cost_usd` — a background
 session, a fork and a relocated session were all indistinguishable from an
-ordinary one before.
+ordinary one before. **v10** adds `worktree_active`, so a session that LEFT its
+worktree is distinguishable from one still in it.
 
 ### `v_message_cost`
 
@@ -1308,8 +1317,11 @@ priced at the **5m** rate (the API default TTL) and is folded into
 > `v_message_cost`, so they inherit the per-row API-message over-count
 > unchanged.** `v_token_cost_by_model` at least carries `unpriced_messages`;
 > **`v_token_cost_daily` has no unpriced counter at all through v9**, so a day
-> whose spend is half unpriced looks like a cheap day. **v10** adds
-> `priced_messages` and `unpriced_messages` to it.
+> whose spend is half unpriced looks like a cheap day. **v10** adds **three**
+> columns to it — `messages`, `priced_messages` and `unpriced_messages` —
+> matching `v_token_cost_by_model`. The view is `DROP`ped and recreated rather
+> than `CREATE OR REPLACE`d, because a replace cannot add columns.
+> **No cost arithmetic changed.**
 
 ### `v_session_cost_drift` — schema v9
 
@@ -1386,11 +1398,14 @@ measured impact** — no such ranking survives the data:
 Present in the archive but reachable only through JSONB. Listed so "csd does not
 have it" is never confused with "csd does not have a COLUMN for it".
 
-> **This section covers only the three tables that HAVE a hatch** —
-> `messages.raw`, `system_events.raw`, `session_records.payload`. For
-> `attachments`, `queue_operations`, `pr_links`, `file_history` and
-> `agent_tasks` there is no hatch through v9, so an unpromoted field is not
-> raw-only, it is **gone**. See the [intro](#data_modelmd--the-claude_sessions-schema-reference).
+> **This section covers the tables that HAVE a hatch** — `messages.raw`,
+> `system_events.raw`, `session_records.payload`, and since **v10**
+> `attachments.raw`. For `queue_operations`, `pr_links`, `file_history` and
+> `agent_tasks` there is still no hatch, so an unpromoted field on those is not
+> raw-only, it is **gone** — except `queue-operation`, whose record is
+> additionally kept verbatim in `session_records` since v10. An `attachments`
+> row written before v10 stays hatch-less until its source file is re-synced.
+> See the [intro](#data_modelmd--the-claude_sessions-schema-reference).
 
 ### Top-level record fields → `messages.raw`
 
@@ -1412,7 +1427,7 @@ have it" is never confused with "csd does not have a COLUMN for it".
 | `supersedesUuids` | assistant | |
 | `errorDetails` | assistant | |
 | `session_id` | both | a snake_case DUPLICATE of `sessionId`. **Much commoner than the old 7% figure**: 16.9% of `messages` (assistant 18.1%, user 14.8%), 23.5% of `system_events`, and highest of all on attachments — where there is no `raw` to read it from |
-| `userType` | both | **100% of user, assistant, system AND attachment records — and it has no column anywhere in the schema.** On `messages` and `system_events` it survives in `raw`; on `attachments` it is dropped outright through v9 |
+| `userType` | both | **100% of user, assistant, system AND attachment records — and it has no column anywhere in the schema.** On `messages` and `system_events` it survives in `raw`; on `attachments` it was dropped outright through v9 and is kept in `attachments.raw` from **v10** |
 | `thinkingMetadata` | user | **LEGACY — 0 occurrences archive-wide.** Parsed into a dataclass, never written to any column |
 | `todos` | user | **LEGACY — 0 occurrences archive-wide.** Parsed into a dataclass, never written to any column |
 | `content[].caller` | assistant | **100% of `tool_use` blocks, not written anywhere through v9.** **v10** adds `content_blocks.caller` and a `v10_content_block_caller` backfill that recovers it from `messages.raw`, matched on `tool_use_id` |
@@ -1490,7 +1505,7 @@ Schema versions 1-2 belong to the retired SQLite generations (Gen1/Gen2,
 | **7** | 2026-07-17 | `26d10f7` | `own_*` aggregate columns (main-chain vs roll-up) and `v_agent_children`, the Agent spawn ledger. |
 | **8** | 2026-08-20 | `5a2d462` | `summary_passes` — the per-pass ledger and in-flight claim for repeatable (delta) summarization. |
 | **9** | 2026-09-02 | `03bc19d` + `f2819b7` | The Claude Code v2.1.161-258 impact release. See below. |
-| **10** | pending | pending | Losslessness and attribution repairs. See below. |
+| **10** | 2026-09-02 | `7889c46` | The code-defect batch: losslessness and attribution repairs (`csd` 3.24.0). See below. |
 
 ### Unversioned table additions
 
@@ -1542,9 +1557,7 @@ for those rows).
 
 ### What v10 adds
 
-Everything below is the **target state**; the commit is pending.
-
-`SCHEMA_VERSION = 10`. New columns:
+Shipped in `csd` 3.24.0 (2026-09-02). `SCHEMA_VERSION = 10`. New columns:
 
 | Column | Type | Purpose |
 |---|---|---|
@@ -1553,28 +1566,48 @@ Everything below is the **target state**; the commit is pending.
 | `sessions.worktree_active` | boolean | **last-wins, not COALESCE** — NULL = never seen, true = last record carried a session object, false = last record was null, i.e. the session EXITED |
 | `projects.decoded_from` | text | `cwd` \| `encoded`; the conflict path now UPGRADES `decoded_path` / `project_name` from a real `cwd` hint and never downgrades |
 
-New backfills:
+New backfills (`postgres.BACKFILLS`, resumable):
 
-| Key | What it fills |
-|---|---|
-| `v10_first_prompt` | recomputes `sessions.first_prompt` under the v9 prompt rule (list-content prompts count) — **132 of 2,684 main sessions change** |
-| `v10_session_kind` | `sessions.session_kind` from `messages.session_kind` |
-| `v10_content_block_caller` | `content_blocks.caller` from `messages.raw`, matched on `tool_use_id` |
+| Key | Driving PK | What it fills | Measured on the live archive, 2026-09-02 |
+|---|---|---|---|
+| `v10_first_prompt` | `sessions.session_id` | recomputes `sessions.first_prompt` under the v9 prompt rule (list-content prompts count); main sessions only, `IS DISTINCT FROM`-guarded | **226 sessions changed** (the review had measured 132 of 2,684 main sessions as demonstrably wrong; the backfill also filled sessions that had none) |
+| `v10_session_kind` | `sessions.session_id` | `sessions.session_kind` from the constant `messages.session_kind`, **`IS NULL` only** — never overwrites a value ingest derived | **13 sessions** ended up non-NULL; almost every session in the archive genuinely has no `sessionKind` |
+| `v10_content_block_caller` | `messages.uuid` | `content_blocks.caller` from `messages.raw`, matched on `tool_use_id` (not `block_index` — the pre-v9 dropped-block bug shifted historical indexes) | **440,490 of 440,762** `tool_use` blocks filled; the remainder are blocks whose record carried no `caller` at all |
 
 Other changes:
 
 - **`first_prompt` uses the v9 prompt rule.** The v9 relabel fixed
   `messages.message_type` but never re-derived the session-level column.
 - **A message's `content_blocks` / `tool_results` are written once** even when
-  the record appears in several source files. **Historical duplicates are not
-  deleted** — the new view **`v_duplicate_blocks`** surfaces them, and
-  `recompute_session_aggregates` now counts `DISTINCT tool_use_id` and distinct
-  errors so the aggregates are right regardless.
-- **`bridge-session`, `queue-operation`, `last-prompt` and the seven latest-wins
-  metadata types are additionally stored verbatim in `session_records`**, so
-  their history survives. They keep their modelled route and are **not** counted
-  as unmodelled.
-- **`v_token_cost_daily` gains `priced_messages` and `unpriced_messages`.**
+  the record appears in several source files: ingest now skips block/result rows
+  for a message whose `messages` row is owned by a **different** `source_file`
+  (skip, not delete — deleting by `message_uuid` would destroy rows the owning
+  file's clear/insert cycle depends on). **Historical duplicates are not
+  deleted** — the new view **`v_duplicate_blocks`** surfaces them (live on
+  2026-09-02: **31,225 message_uuids / 67,605 duplicated rows**), and
+  `recompute_session_aggregates` now counts `count(DISTINCT tool_use_id)` (with
+  a `'blk:'||block_id` fallback so an id-less block is not dropped by
+  `count(DISTINCT)`) and `count(DISTINCT (message_uuid, tool_use_id))` for
+  errors, on **both** the main-session and the child-session statement — which
+  removed **11,586 phantom tool_uses across 81 sessions** on first run.
+- **Eight promoted-but-lossy record types are additionally stored verbatim in
+  `session_records`** (`jsonl_records.SESSION_RECORD_ALSO_ARCHIVED`): the seven
+  latest-wins metadata types `ai-title`, `custom-title`, `last-prompt`,
+  `permission-mode`, `mode`, `bridge-session`, `agent-name`, plus
+  `queue-operation`. Their history survives; they keep their modelled route and
+  are **not** counted as unmodelled. Still one `session_records` row per JSONL
+  line.
+- **`SESSION_RECORD_TYPES` has ten members, not eleven** — the 3.23.0-era
+  "eleven new record types" count is corrected in `sync.py`, the tripwire tests
+  and `CLAUDE.md`, and the `fallback` content block is dated to its first
+  observation at **v2.1.215**, not v2.1.247.
+- **`SyncStats.duplicate_rows_skipped`** reports block/result rows skipped
+  because the message they belong to is owned by a different `source_file`.
+- **`v_token_cost_daily` gains `messages`, `priced_messages` and
+  `unpriced_messages`** (DROP-then-CREATE — a replace cannot add columns), and
+  **`v_session_overview` gains `worktree_active`**. No cost arithmetic changed;
+  the `v_message_cost` DDL comment now names `write_untiered_tokens`, the column
+  the lump-`cache_creation` paragraph was always about.
 
 ### Migration discipline
 
@@ -1600,8 +1633,11 @@ Every migration in this schema is **additive, idempotent and guarded**:
   whose column list can grow is `DROP`ped first — `CREATE OR REPLACE VIEW`
   cannot add a column and fails with *cannot change name of view column*.
 - **Data backfills are bounded, resumable and self-committing**
-  (`postgres.BACKFILLS`, `SessionArchive.run_backfills`). Each walks the
-  messages primary key in 20K-row committed batches with a cursor in `metadata`,
+  (`postgres.BACKFILLS`, `SessionArchive.run_backfills`). Each walks **its own
+  driving table's primary key** — `messages.uuid` for `v9_message_effort_usage`,
+  `v9_relabel_list_content_prompts` and `v10_content_block_caller`;
+  `sessions.session_id` for `v10_first_prompt` and `v10_session_kind` — in
+  20K-row committed batches with a cursor in `metadata`,
   resumes on the next sweep, and isolates its own failures so a broken backfill
   can never stop ingest. A single long `UPDATE` would be exactly the
   `idle in transaction` shape that once convoyed this database for ~9 hours.

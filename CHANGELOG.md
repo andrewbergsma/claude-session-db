@@ -51,6 +51,13 @@ rewritten outside a documented resumable backfill. Full schema reference:
   New resumable backfill **`v10_first_prompt`** recomputes the history from
   `messages` — per-session, `IS DISTINCT FROM`-guarded, main sessions only
   (refresh child rows with `csd backfill-subagents`).
+- **`sessions.session_kind` is populated.** v9 added the column to both
+  `messages` and `sessions`, backfilled only `messages`, and left the sessions
+  column NULL on every row in the archive. New resumable backfill
+  **`v10_session_kind`** sets it from the constant `messages.session_kind`
+  where the session column IS NULL (never overwriting a value ingest derived).
+  `sync._derive_session_kind`'s docstring — which claimed there was
+  deliberately no per-message column — is corrected.
 - **`sessions.tool_use_count` / `error_count` count identities, not rows.**
   `recompute_session_aggregates` now counts `DISTINCT tool_use_id` (with a
   `block_id` fallback so an id-less block is not silently dropped by

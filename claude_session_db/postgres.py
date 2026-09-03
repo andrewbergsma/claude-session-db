@@ -965,6 +965,43 @@ BACKFILLS = [
                    (SELECT count(*) FROM upd)          AS updated
         """,
     },
+    {
+        # v9 added `session_kind` to BOTH messages and sessions and backfilled
+        # only messages, so `sessions.session_kind` was NULL on every row in the
+        # archive — the column existed, the index existed, and nothing ever
+        # answered "which sessions are background sessions?".
+        #
+        # `sessionKind` is CONSTANT per session (measured across every record
+        # type that carries it), which is what makes this recoverable from
+        # `messages` instead of a re-parse. Fills only where the session column
+        # IS NULL — it never overwrites a value ingest derived.
+        "key": "v10_session_kind",
+        "desc": "sessions.session_kind from the constant messages.session_kind",
+        "sql": """
+            WITH batch AS (
+                SELECT session_id, session_kind FROM sessions
+                WHERE session_id > %(after)s ORDER BY session_id LIMIT %(limit)s
+            ), want AS (
+                SELECT b.session_id, m.session_kind
+                FROM batch b
+                JOIN LATERAL (
+                    SELECT session_kind FROM messages
+                    WHERE session_id = b.session_id AND session_kind IS NOT NULL
+                    LIMIT 1
+                ) m ON true
+                WHERE b.session_kind IS NULL
+            ), upd AS (
+                UPDATE sessions s SET session_kind = w.session_kind
+                FROM want w
+                WHERE s.session_id = w.session_id
+                  AND s.session_kind IS NULL
+                RETURNING 1
+            )
+            SELECT (SELECT max(session_id) FROM batch) AS next_cursor,
+                   (SELECT count(*) FROM batch)        AS scanned,
+                   (SELECT count(*) FROM upd)          AS updated
+        """,
+    },
 ]
 
 

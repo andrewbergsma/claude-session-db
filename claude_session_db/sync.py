@@ -889,8 +889,14 @@ class SessionSync:
 
         Measured CONSTANT per session across user/assistant/attachment/system
         records (0 of 2 sessions in a 30-day scan carried more than one value),
-        so this is a session attribute and there is deliberately no
-        per-message column.
+        so this is a session ATTRIBUTE and `sessions.session_kind` is its home.
+
+        `messages.session_kind` exists too (v9 added the column and the
+        `v9_message_effort_usage` backfill filled it from `raw->>'sessionKind'`)
+        — the constancy is what lets `v10_session_kind` recompute the session
+        column from it without re-reading the transcripts. An earlier version
+        of this docstring claimed there was deliberately no per-message column;
+        there is, and the sessions column was the one left NULL on every row.
         """
         for bucket in ("user", "assistant", "attachment", "system"):
             for rec in records.get(bucket, []):

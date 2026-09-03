@@ -193,25 +193,39 @@ data in the places that did not.
 
 ### `projects`
 
-One row per project directory under `~/.claude/projects`.
+**Grain** one row per project directory under `~/.claude/projects`.
+**PK** `project_id`; **UNIQUE** `encoded_path` (the real key).
+**Writer** `sync.py::SessionSync` → `postgres.SessionArchive.upsert_project`.
+**Idempotence** COALESCE upsert on `encoded_path`; **never cleared** by a
+re-sync.
 
-| Column | Type | Null | Source | Notes |
-|---|---|---|---|---|
-| `project_id` | bigint | no | derived | PK, BIGSERIAL |
-| `encoded_path` | text | no | directory name | **UNIQUE. The key, and always exact.** |
-| `decoded_path` | text | no | derived (`decode_project_path`) | Best-effort; see §1 |
-| `project_name` | text | no | derived | `Path(decoded_path).name` |
-| `first_seen_at` | timestamptz | no | derived | insert time |
-| `last_seen_at` | timestamptz | no | derived | touched on every conflict |
+| Column | Type | Null | Source | Since | Notes |
+|---|---|---|---|---|---|
+| `project_id` | bigint | no | `default` | | PK, BIGSERIAL |
+| `encoded_path` | text | no | directory name | | **UNIQUE. The key, and always exact.** |
+| `decoded_path` | text | no | `parsed` (`decode_project_path`) | | Best-effort; see §1 |
+| `project_name` | text | no | `parsed` | | `Path(decoded_path).name` |
+| `first_seen_at` | timestamptz | no | `default` | | insert time |
+| `last_seen_at` | timestamptz | no | `parsed` | | touched on every conflict |
+| `decoded_from` | text | yes | `parsed` | **v10** | `cwd` \| `encoded` — which inversion produced `decoded_path` |
 
 Indexes: `idx_projects_name(project_name)`.
+
+> **v10.** `decoded_from` records how the path was resolved, and the conflict
+> path changes with it: a later file carrying a real `cwd` hint UPGRADES a
+> `decoded_path` / `project_name` that was guessed from the encoded slug, and an
+> encoded-slug guess never downgrades one already resolved from a `cwd`.
 
 ---
 
 ### `sessions`
 
-One row per main session, **plus** one child row per sidechain keyed
-`"<parent_session_id>:<agent_id>"`. Sidechain MESSAGES stay under the parent
+**Grain** one row per main session, **plus** one child row per sidechain keyed
+`"<parent_session_id>:<agent_id>"`. **PK** `session_id`. **Writer**
+`sync.py::SessionSync` (identity + metadata) and
+`postgres.recompute_session_aggregates` (the aggregate block).
+**Idempotence** COALESCE upsert; **never DELETEd by `source_file`**, unlike
+every per-file table in [§1](#ingest-is-idempotent--but-that-word-means-four-different-things-here). Sidechain MESSAGES stay under the parent
 session_id — the source is never re-shaped — so on a main session the unprefixed
 aggregate columns are a ROLL-UP that includes children, and the `own_*` columns
 are main-chain only. On a child row `total_* == own_*`.
@@ -224,10 +238,10 @@ field never wipes a value an earlier one set.
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
 | `session_id` | text | no | `sessionId`, or `"<parent>:<agent_id>"` | | PK |
-| `project_id` | bigint | yes | derived | | → `projects` |
-| `file_path` | text | yes | derived | | absolute path of the transcript |
-| `is_subagent` | boolean | no | derived | | true on child rows |
-| `parent_session_id` | text | yes | derived | | child rows only |
+| `project_id` | bigint | yes | `parsed` | | **FK** → `projects` (`ON DELETE NO ACTION`) — one of only four in the schema |
+| `file_path` | text | yes | `parsed` | | absolute path of the transcript |
+| `is_subagent` | boolean | no | `parsed` | | true on child rows |
+| `parent_session_id` | text | yes | `parsed` | | child rows only |
 | `agent_id` | text | yes | filename `agent-<hex>` | | child rows only |
 
 #### Session-scoped metadata (latest-wins)
@@ -236,7 +250,7 @@ field never wipes a value an earlier one set.
 |---|---|---|---|---|---|
 | `ai_title` | text | yes | `ai-title.aiTitle` | ~2.1.123 | replaced the `summary` record |
 | `custom_title` | text | yes | `custom-title.customTitle` | | on child rows: meta.json `description` |
-| `first_prompt` | text | yes | derived | | first non-meta user prompt |
+| `first_prompt` | text | yes | `recomputed` | | first non-meta user prompt. **v10** recomputes it under the v9 prompt rule (list-content prompts now count) — see `v10_first_prompt` in §9 |
 | `last_prompt` | text | yes | `last-prompt.lastPrompt` | ~2.1.123 | resume marker |
 | `last_prompt_leaf_uuid` | text | yes | `last-prompt.leafUuid` | ~2.1.123 | the summary watermark anchor |
 | `permission_mode` | text | yes | `permission-mode.permissionMode` | ~2.1.123 | |
@@ -247,9 +261,16 @@ field never wipes a value an earlier one set.
 | `cwd` | text | yes | `cwd` | | **where the session STARTED.** Semantics unchanged in v9 |
 | `cc_version` | text | yes | `version` | | |
 | `entrypoint` | text | yes | `entrypoint` | | |
-| `created_at` | timestamptz | yes | derived | | `min(timestamp)` |
-| `modified_at` | timestamptz | yes | derived | | file mtime (a SUPERSET of last activity — see below) |
-| `message_count` | integer | yes | derived | | recomputed post-ingest |
+| `created_at` | timestamptz | yes | `recomputed` | | `min(timestamp)` |
+| `modified_at` | timestamptz | yes | `parsed` | | file mtime (a SUPERSET of last activity — see below) |
+
+> **The nine latest-wins columns above keep only the current value.** `ai_title`,
+> `custom_title`, `last_prompt`, `last_prompt_leaf_uuid`, `permission_mode`,
+> `mode`, `bridge_session_id` and `agent_name` each collapse a whole stream of
+> records into one cell — through v9 the earlier values, and the times they
+> changed, are simply gone. **v10** additionally stores those record types
+> verbatim in `session_records`, so the history is retained alongside the
+> latest-wins column.
 
 > **`modified_at` is not last activity.** Bulk file touches create clusters of
 > identical mtimes, and mtime only ever lies toward "more recent". Use
@@ -258,24 +279,28 @@ field never wipes a value an earlier one set.
 
 #### Aggregates (recomputed after every ingest)
 
+All are `recomputed` — written by `recompute_session_aggregates` after ingest,
+never by the parser, and therefore a snapshot of the last recompute.
+
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
-| `total_input_tokens` | bigint | yes | derived | ROLL-UP on mains |
-| `total_output_tokens` | bigint | yes | derived | ROLL-UP on mains |
-| `total_cache_read_tokens` | bigint | yes | derived | ROLL-UP on mains |
-| `total_cache_creation_tokens` | bigint | yes | derived | ROLL-UP on mains |
-| `user_prompt_count` | integer | yes | derived | **main-chain only, always** |
-| `tool_use_count` | integer | yes | derived | ROLL-UP on mains |
-| `error_count` | integer | yes | derived | ROLL-UP on mains |
-| `compact_count` | integer | yes | derived | `compact_boundary` system events |
-| `duration_seconds` | double precision | yes | derived | Σ `turn_duration.durationMs`; NULL (not 0) when unknown |
-| `own_total_input_tokens` | bigint | yes | derived | main-chain only |
-| `own_total_output_tokens` | bigint | yes | derived | main-chain only |
-| `own_total_cache_read_tokens` | bigint | yes | derived | main-chain only |
-| `own_total_cache_creation_tokens` | bigint | yes | derived | main-chain only |
-| `own_message_count` | integer | yes | derived | main-chain only |
-| `own_tool_use_count` | integer | yes | derived | main-chain only |
-| `own_error_count` | integer | yes | derived | main-chain only |
+| `total_input_tokens` | bigint | yes | `recomputed` | ROLL-UP on mains |
+| `total_output_tokens` | bigint | yes | `recomputed` | ROLL-UP on mains |
+| `total_cache_read_tokens` | bigint | yes | `recomputed` | ROLL-UP on mains |
+| `total_cache_creation_tokens` | bigint | yes | `recomputed` | ROLL-UP on mains |
+| `message_count` | integer | yes | `recomputed` | ROLL-UP on mains — **includes sidechain rows**. The main-chain figure is `own_message_count` |
+| `user_prompt_count` | integer | yes | `recomputed` | **main-chain only, always** |
+| `tool_use_count` | integer | yes | `recomputed` | ROLL-UP on mains. **v10** counts `DISTINCT tool_use_id` |
+| `error_count` | integer | yes | `recomputed` | ROLL-UP on mains. **v10** counts distinct errors |
+| `compact_count` | integer | yes | `recomputed` | `compact_boundary` system events. **Never computed on child rows** — 0 on all 10,388 |
+| `duration_seconds` | double precision | yes | `recomputed` | Σ `turn_duration.durationMs`. **Never computed on child rows** — NULL on all 10,388. On a main session it is **0, not NULL**, when the session has `system_events` but none of them is a `turn_duration` |
+| `own_total_input_tokens` | bigint | yes | `recomputed` | main-chain only |
+| `own_total_output_tokens` | bigint | yes | `recomputed` | main-chain only |
+| `own_total_cache_read_tokens` | bigint | yes | `recomputed` | main-chain only |
+| `own_total_cache_creation_tokens` | bigint | yes | `recomputed` | main-chain only |
+| `own_message_count` | integer | yes | `recomputed` | main-chain only |
+| `own_tool_use_count` | integer | yes | `recomputed` | main-chain only |
+| `own_error_count` | integer | yes | `recomputed` | main-chain only |
 
 #### Fork lineage — schema v9
 
@@ -285,26 +310,56 @@ subagent inherits its parent session's context, and these say whose and how much
 
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
-| `forked_from_session_id` | text | yes | `fork-context-ref.parentSessionId` | 2.1.212 | |
-| `forked_from_uuid` | text | yes | `fork-context-ref.parentLastUuid` | 2.1.212 | last inherited record |
-| `fork_context_length` | integer | yes | `fork-context-ref.contextLength` | 2.1.212 | records inherited |
-| `fork_agent_id` | text | yes | `fork-context-ref.agentId` | 2.1.212 | the record's own field |
+| `forked_from_session_id` | text | yes | `fork-context-ref.parentSessionId` | 2.1.232 | |
+| `forked_from_uuid` | text | yes | `fork-context-ref.parentLastUuid` | 2.1.232 | last inherited record |
+| `fork_context_length` | integer | yes | `fork-context-ref.contextLength` | 2.1.232 | records inherited |
+| `fork_agent_id` | text | yes | `fork-context-ref.agentId` | 2.1.232 | the record's own field |
 
 Index: `idx_sessions_forked_from` (partial, NOT NULL).
 
-> The predecessor is `messages.forked_from` (top-level `forkedFrom`), which
-> Claude Code stopped emitting at **v2.1.212**. It is LEGACY and kept.
+> **2.1.232 is first-observed, and the record is rare by construction.**
+> `fork-context-ref` is emitted only for **fork-type dispatches** — 8 of the
+> 1,856 sidechain files in the scan carry one. A sidechain without it was not
+> forked; it is not a gap.
+
+> **`session_records.session_id` and `sessions.forked_from_*` point at opposite
+> ends of the same edge.** `fork-context-ref` carries no `sessionId`, so the
+> owning session supplied at sync time is the **parent** (`= parentSessionId`),
+> and that is what lands in `session_records.session_id`. The `forked_from_*`
+> columns land on the **child** row. Do not join them as if they were the same
+> session.
+
+> The predecessor is `messages.forked_from` (top-level `forkedFrom`), whose last
+> observation in this archive is **v2.1.159** (177 rows) and which is absent from
+> every record at 2.1.202 and later. It is LEGACY and kept.
 
 #### Relocation and worktree binding — schema v9
 
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
 | `current_cwd` | text | yes | latest `relocated.relocatedCwd`, else the last conversation record's `cwd` | 2.1.169 (`/cd`) | LAST known directory |
-| `worktree_session` | jsonb | yes | `worktree-state.worktreeSession` | | verbatim; keys below |
+| `worktree_session` | jsonb | yes | `worktree-state.worktreeSession` | | verbatim; shapes below |
+| `worktree_active` | boolean | yes | `worktree-state.worktreeSession IS NOT NULL`, **last-wins** | **v10** | NULL = no `worktree-state` record ever seen; true = the last one carried an object; false = the last one was null, i.e. the session EXITED the worktree |
 
-`worktree_session` keys (8, all strings): `originalCwd`, `preEnterOriginalCwd`,
-`worktreePath`, `worktreeName`, `worktreeBranch`, `originalBranch`,
-`originalHeadCommit`, `sessionId`.
+> **The two rules do not always agree.** `current_cwd` prefers the latest
+> `relocated` record over the last conversation record's `cwd`, and in 1 of the
+> 18 files where both are present the `relocated` value wins over a *later*
+> record `cwd`. The column is "last relocation", not strictly "last directory".
+
+**`worktreeSession` is `object | null`, and the null is the whole point.**
+It is null on 38% of `worktree-state` records — that is a worktree **EXIT**, not
+a missing field. Two object shapes exist:
+
+| Shape | Keys | Since |
+|---|---|---|
+| created-worktree | all 8: `originalCwd`, `preEnterOriginalCwd`, `worktreePath`, `worktreeName`, `worktreeBranch`, `originalBranch`, `originalHeadCommit`, `sessionId` | |
+| entered-existing | the first six only, plus `enteredExisting: true`; **no** `originalBranch` / `originalHeadCommit` | 2.1.226 |
+
+> **Through v9 an exit cannot be recorded.** `sessions` upserts with
+> `COALESCE(EXCLUDED.col, sessions.col)`, so a null `worktreeSession` never
+> clears a previously-set `worktree_session` — a session that entered and then
+> left a worktree looks permanently inside it. **v10 adds `worktree_active`**,
+> which is last-wins rather than COALESCE and therefore can go false.
 
 Index: `idx_sessions_current_cwd`.
 
@@ -322,7 +377,7 @@ never csd's; `v_session_cost_drift` compares the two.
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
 | `cost_state` | jsonb | yes | the whole `cost-state` record | includes per-model `modelUsage` |
-| `reported_cost_usd` | numeric | yes | `cost-state.totalCostUSD` | |
+| `reported_cost_usd` | numeric | yes | `cost-state.totalCostUSD` | the source is int-or-float; the column is `numeric` |
 | `reported_total_duration_ms` | bigint | yes | `cost-state.totalDuration` | wall clock |
 | `reported_api_duration_ms` | bigint | yes | `cost-state.totalAPIDuration` | |
 | `reported_tool_duration_ms` | bigint | yes | `cost-state.totalToolDuration` | |
@@ -333,18 +388,69 @@ never csd's; `v_session_cost_drift` compares the two.
 Not promoted (still in `cost_state`): `totalAPIDurationWithoutRetries`,
 `startTime`, `modelUsage`.
 
+**Since: 2.1.246.** Only sessions running 2.1.246 or later emit `cost-state` at
+all, so **only those sessions have a reported side** in
+`v_session_cost_drift`. On everything older a NULL reported cost means "the
+harness never wrote one", never "the harness said zero".
+
 #### Session kind — schema v9
 
-| Column | Type | Null | Source | Notes |
-|---|---|---|---|---|
-| `session_kind` | text | yes | `sessionKind` on any record that carries it | `"bg"` = background session |
+| Column | Type | Null | Source | Since | Notes |
+|---|---|---|---|---|---|
+| `session_kind` | text | yes | `sessionKind` on any record that carries it | 2.1.229 | `"bg"` = background session |
+
+**Since 2.1.229 — and that is the ONLY version that has ever emitted it here.**
+Every record carrying `sessionKind` in this archive is on 2.1.229, the value is
+always `bg`, and it appears in 31 files. Treat the field as a one-version
+artefact until a second version is observed.
 
 Measured **constant per session** across user / assistant / attachment / system
 records (0 of 2 carrying sessions in the scan showed more than one value), which
 is why this is a session attribute. `messages.session_kind` mirrors it so a
 future session that DOES vary is not silently flattened.
 
+> **`sessions.session_kind` is 0-populated today** (13,094 sessions, 0 non-NULL)
+> because nothing has ever back-propagated it from `messages`. **v10** adds the
+> `v10_session_kind` backfill, which does.
+
 Index: `idx_sessions_kind` (partial, NOT NULL).
+
+---
+
+> ### ⚠ The v9 columns are nearly empty, and only re-parsing fills them
+>
+> Everything in the four blocks above — the fork columns, `current_cwd`,
+> `worktree_session`, the `cost-state` ledger, `session_kind` — plus
+> `session_records` and `content_blocks.block_payload`, is written **only by the
+> parser, at ingest**. Existing rows are `ON CONFLICT DO NOTHING`
+> ([§1](#ingest-is-idempotent--but-that-word-means-four-different-things-here)),
+> and the two v9 backfills touch **`messages` only**. A v9 column therefore fills
+> for a given session only when that session's transcript is **re-parsed** —
+> a natural re-sync after the file changes, or an explicit
+> `csd ingest --force` / `--rebuild`.
+>
+> Live on 2026-09-02, against 13,094 sessions and 845,512 content blocks:
+>
+> | Column / table | Populated | Of |
+> |---|---|---|
+> | `sessions.current_cwd` | 74 | 13,094 |
+> | `sessions.cost_state` | 8 | 13,094 |
+> | `sessions.forked_from_session_id` | 5 | 13,094 |
+> | `sessions.worktree_session` | 1 | 13,094 |
+> | `sessions.session_kind` | 0 | 13,094 |
+> | `content_blocks.block_payload` | 0 | 845,512 |
+> | `session_records` rows | 1,373 | 9,074 such records on disk |
+>
+> **The source records are plentiful** — 31 `cost-state`, 38 `relocated` and 96
+> `worktree-state` records across 30 recent transcripts. The columns are empty
+> because those transcripts have not been re-parsed since v9 shipped, not
+> because the data is missing.
+>
+> The same rule governs the pre-v9 damage that has not yet been undone: dropped
+> `fallback` content blocks, and the `block_index` shift they caused in the rest
+> of their message, **persist in every file that has not been re-synced**. Live
+> proof: `content_blocks` holds `tool_use` / `thinking` / `text` and **zero**
+> `fallback` rows.
 
 Other indexes on `sessions`: `idx_sessions_project`, `idx_sessions_modified`,
 `idx_sessions_subagent`, `idx_sessions_parent`, `idx_sessions_agent_id`.
@@ -353,7 +459,11 @@ Other indexes on `sessions`: `idx_sessions_project`, `idx_sessions_modified`,
 
 ### `messages`
 
-One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
+**Grain** one row per `user` or `assistant` record. **PK** `uuid`.
+**Writer** `sync.py::SessionSync` → `postgres.insert_messages`.
+**Idempotence** `ON CONFLICT (uuid) DO NOTHING` **plus** a per-`source_file`
+DELETE before re-insert — so a re-sync of a file still on disk corrects it, and
+nothing else does.
 
 > **`uuid` is not the API response id.** One API response can appear as SEVERAL
 > `messages` rows sharing one `api_message_id`; measured ratios of 1.8-2.4 on
@@ -365,17 +475,17 @@ One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
 | `uuid` | text | no | `uuid` | PK |
-| `session_id` | text | yes | `sessionId` | sidechain rows carry the PARENT's id |
+| `session_id` | text | yes | `sessionId` | **sidechain rows carry the PARENT's id** — see below |
 | `parent_uuid` | text | yes | `parentUuid` | |
 | `ts` | timestamptz | yes | `timestamp` | |
-| `role` | text | no | derived | `user` \| `assistant` |
-| `message_type` | text | no | derived | `prompt` \| `tool_result` \| `response` — see below |
+| `role` | text | no | `parsed` | `user` \| `assistant` |
+| `message_type` | text | no | `parsed`, **backfilled v9** | `prompt` \| `tool_result` \| `response` — see below |
 | `is_sidechain` | boolean | yes | `isSidechain` | |
 | `agent_id` | text | yes | `agentId` | sidechain only |
-| `slug` | text | yes | `slug` | → `~/.claude/plans/<slug>.md` |
+| `slug` | text | yes | `slug` | the session's **codename**, roughly one distinct value per session. A `~/.claude/plans/<slug>.md` file exists **only when a plan was actually produced** — 2 of 193 slugs locally. It is not a plan pointer |
 | `cwd`, `git_branch`, `cc_version`, `entrypoint` | text | yes | universal fields | |
-| `source_file` | text | no | derived | absolute transcript path |
-| `source_line` | integer | yes | derived | currently always NULL for messages |
+| `source_file` | text | no | `parsed` | absolute transcript path |
+| `source_line` | integer | yes | — | always NULL; see [§2](#2-conventions-used-in-this-document) |
 | `raw` | jsonb | yes | the whole record | **the escape hatch** |
 
 > **`message_type` classification (corrected in v9).** A user record is
@@ -390,7 +500,7 @@ One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
 
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
-| `prompt_text` | text | yes | `message.content` | | string content verbatim; list content = ALL text blocks joined by `\n` (v9; previously only the first) |
+| `prompt_text` | text | yes | `message.content`, **backfilled v9** | | string content verbatim; list content = ALL text blocks joined by `\n` (v9; previously only the first) |
 | `prompt_id` | text | yes | `promptId` | | |
 | `permission_mode` | text | yes | `permissionMode` | | |
 | `is_meta` | boolean | yes | `isMeta` | | system-injected user message |
@@ -411,7 +521,7 @@ One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
 | `api_error_status` | integer | yes | `apiErrorStatus` | | |
 | `error_text` | text | yes | `error` | | |
 | `diagnostics` | jsonb | yes | `message.diagnostics` | ~2.1.123 | |
-| `effort` | text | yes | `effort` | **2.1.161-258** | **v9.** `"high"`, … Present on 98.5% of assistant records |
+| `effort` | text | yes | `effort` | **2.1.212** | **v9.** `"high"`, … **98.1% of assistant records from 2.1.212 on; 41.7% archive-wide.** A NULL means "the record predates 2.1.212", never "no effort was set" — the residue above 2.1.212 is harness-internal `claude-haiku-4-5` calls, a handful of `claude-opus-5` rows and `<synthetic>` |
 
 #### Attribution
 
@@ -435,14 +545,20 @@ One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
 | `cache_creation_tokens` | integer | yes | `usage.cache_creation_input_tokens` | | lump total |
 | `ephemeral_5m_tokens` | integer | yes | `usage.cache_creation.ephemeral_5m_input_tokens` | | |
 | `ephemeral_1h_tokens` | integer | yes | `usage.cache_creation.ephemeral_1h_input_tokens` | | |
-| `service_tier` | text | yes | `usage.service_tier` | | → `service_tier_pricing` |
-| `inference_geo` | text | yes | `usage.inference_geo` | | |
-| `speed` | text | yes | `usage.speed` | | `"fast"` on Opus 5 fast mode; **absent on ~36% of records**, so fast mode is NOT reliably detectable |
+| `service_tier` | text | yes | `usage.service_tier` | | → `service_tier_pricing`. **Defaults to `standard` in the parser when the field is absent** |
+| `inference_geo` | text | yes | `usage.inference_geo` | | **Defaults to `not_available` in the parser when the field is absent** |
+| `speed` | text | yes | `usage.speed` | | **Only `standard` has ever been observed** (569,370 rows); `fast` never. Absent on 30.6% of assistant rows. **Fast mode is not detectable from this column** |
 | `usage` | jsonb | yes | `message.usage` | | the escape hatch |
-| `thinking_tokens` | integer | yes | `usage.output_tokens_details.thinking_tokens` | **2.1.161-258** | **v9.** 55% of records |
-| `server_tool_use` | jsonb | yes | `usage.server_tool_use` | **2.1.161-258** | **v9.** 64%. e.g. `{web_search_requests, web_fetch_requests}` |
-| `iterations` | jsonb | yes | `usage.iterations` | **2.1.161-258** | **v9. An ARRAY, not a count** — see below |
-| `iteration_count` | integer | yes | derived | | `jsonb_array_length(iterations)`; **>1 iff a model fallback occurred** |
+| `thinking_tokens` | integer | yes | `usage.output_tokens_details.thinking_tokens` | **2.1.228** | **v9.** 63.1% of assistant rows on 2.1.228+; **16.2% archive-wide** |
+| `server_tool_use` | jsonb | yes | `usage.server_tool_use` | **≤2.1.101** | **v9 added the COLUMN, not the field** — the field predates the archive floor. e.g. `{web_search_requests, web_fetch_requests}` |
+| `iterations` | jsonb | yes | `usage.iterations` | **≤2.1.101** | **v9 added the COLUMN, not the field. An ARRAY, not a count** — see below |
+| `iteration_count` | integer | yes | `parsed` | | `jsonb_array_length(iterations)`; **>1 iff a model fallback occurred** |
+
+> **The token columns default to 0, not NULL, when `usage` omits them.**
+> `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_creation_tokens`
+> and the two `ephemeral_*` columns are zero-filled by the parser, so a 0 can
+> mean either "the API reported zero" or "the field was absent".
+> **`usage IS NULL` is the only honest test for "this row has no usage data".**
 
 > **`usage.iterations` records model fallbacks.** Each element is a per-iteration
 > usage object with its OWN `model` and `type`:
@@ -450,17 +566,26 @@ One row per `user` or `assistant` record. PK `uuid`, so re-ingest is idempotent.
 > [{"type":"message",          "model":"claude-fable-5",  "output_tokens":251},
 >  {"type":"fallback_message", "model":"claude-opus-4-8", "output_tokens":1366}]
 > ```
-> So `messages.model` is not the only model that billed for the row.
-> `v_message_cost` prices the whole message at the top-level model and is
-> therefore wrong for these; `v_session_cost_drift.fallback_messages` counts
-> them. This is the same event as the `fallback` CONTENT BLOCK (§`content_blocks`)
-> — recorded twice, in two places.
+> Every element carries `type`; **only the elements of a multi-iteration
+> (fallback) array carry `model`** — 14 of 161,765 elements. So `messages.model`
+> is not the only model that billed for the row. `v_message_cost` prices the
+> whole message at the top-level model and is therefore wrong for these;
+> `v_session_cost_drift.fallback_messages` counts them.
+>
+> **`iteration_count` distinguishes three absences.** 1 is the normal case; >1 is
+> a fallback; **0 means `iterations` was an empty array** (29 rows); NULL means
+> the field was absent or null. Do not read 0 and NULL as the same thing.
+>
+> This is the same event as the `fallback` CONTENT BLOCK (§`content_blocks`) —
+> recorded twice — but the two are **not 1:1**. A fanned-out API response becomes
+> several `messages` rows and the `iterations` array repeats on **every** one of
+> them, while the `fallback` block appears on exactly one.
 
 #### Other
 
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
-| `session_kind` | text | yes | `sessionKind` | **2.1.161-258** | **v9.** mirror of `sessions.session_kind` |
+| `session_kind` | text | yes | `sessionKind` | **2.1.229** | **v9.** mirror of `sessions.session_kind`; see the caveat under that column |
 | `forked_from` | jsonb | yes | `forkedFrom` | | **LEGACY — dead since v2.1.212.** `{sessionId, messageUuid}`. Real on older rows; replaced by `sessions.forked_from_*` |
 
 Indexes: `idx_messages_session`, `_ts`, `_role`, `_model`, `_source_file`,
@@ -472,26 +597,29 @@ Indexes: `idx_messages_session`, `_ts`, `_role`, `_model`, `_source_file`,
 
 ### `content_blocks`
 
-One row per block of an assistant `message.content`, in order.
+**Grain** one row per block of an **assistant** `message.content`, in order.
+**PK** `block_id` (BIGSERIAL). **Writer** `sync.py::SessionSync`.
+**Idempotence** cleared by `source_file` before re-insert; no uuid to conflict on.
 
 | Column | Type | Null | Source | Since | Notes |
 |---|---|---|---|---|---|
-| `block_id` | bigint | no | derived | | PK, BIGSERIAL |
-| `message_uuid` | text | no | derived | | → `messages.uuid` |
-| `session_id` | text | yes | derived | | |
-| `block_index` | integer | no | derived | | position in `message.content` |
+| `block_id` | bigint | no | `default` | | PK, BIGSERIAL |
+| `message_uuid` | text | no | `parsed` | | → `messages.uuid` (logical, not a declared FK) |
+| `session_id` | text | yes | `parsed` | | **copied from the record, so on a sidechain row this is the PARENT's session id** — see below |
+| `block_index` | integer | no | `parsed` | | position in `message.content` |
 | `block_type` | text | no | `content[].type` | | `thinking` \| `text` \| `tool_use` \| **the block's own type** |
 | `content` | text | yes | `.thinking` / `.text` | | verbatim, never truncated |
-| `char_count` | integer | yes | derived | | |
+| `char_count` | integer | yes | `parsed` | | |
 | `signature` | text | yes | `.signature` | | thinking blocks only |
 | `tool_use_id` | text | yes | `.id` | | tool_use only; joins `tool_results` |
 | `tool_name` | text | yes | `.name` | | |
 | `tool_input` | jsonb | yes | `.input` | | full input, never truncated |
-| `tool_type` | text | yes | derived | | `mcp` (name starts `mcp__`) \| `builtin` |
-| `mcp_server` | text | yes | derived | | 2nd segment of `mcp__<server>__<tool>` |
-| `source_file` | text | no | derived | | |
-| `source_line` | integer | yes | derived | | currently NULL |
-| `block_payload` | jsonb | yes | the whole block | **2.1.247** | **v9.** Set only for block types with no dedicated columns |
+| `tool_type` | text | yes | `parsed` | | `mcp` (name starts `mcp__`) \| `builtin` |
+| `mcp_server` | text | yes | `parsed` | | 2nd segment of `mcp__<server>__<tool>` |
+| `source_file` | text | no | `parsed` | | |
+| `source_line` | integer | yes | — | | always NULL |
+| `block_payload` | jsonb | yes | the whole block | **2.1.215** | **v9.** Set only for block types with no dedicated columns. First `fallback` block observed 2026-08-01 |
+| `caller` | jsonb | yes | `content[].caller` | **v10** | Present on **100% of `tool_use` blocks** and **not written at all through v9** |
 
 > **Unknown blocks are kept (v9).** `parse_content_block` used to return None for
 > anything that was not thinking/text/tool_use, and the sync skipped it — so the
@@ -501,36 +629,91 @@ One row per block of an assistant `message.content`, in order.
 > `block_type` with the payload in `block_payload`. They are deliberately not
 > counted as text or tool_use.
 
+> ### `session_id` on `content_blocks` and `tool_results` is the PARENT's
+>
+> Both tables copy `session_id` straight off the record, and Claude Code never
+> re-keys a sidechain record — so a subagent's blocks carry the **parent
+> session's** id. **53.4% of `content_blocks` rows** are sidechain rows filed
+> this way, and the child session key (`"<parent>:<agent_id>"`) **never appears
+> in either table**. Grouping `content_blocks` by `session_id` silently merges
+> every subagent into its parent.
+>
+> Attribute through `messages` instead — it is the only table that carries
+> `is_sidechain` and `agent_id`:
+>
+> ```sql
+> -- which sessions read a given file, main chain and subagents kept apart
+> SELECT CASE WHEN m.is_sidechain AND m.agent_id IS NOT NULL
+>             THEN m.session_id || ':' || m.agent_id
+>             ELSE m.session_id END      AS session_key,
+>        m.is_sidechain,
+>        count(*)                        AS reads
+> FROM   content_blocks cb
+> JOIN   messages m ON m.uuid = cb.message_uuid   -- NOT ON session_id
+> WHERE  cb.tool_name = 'Read'
+>   AND  cb.tool_input->>'file_path' = '/path/to/file'
+> GROUP  BY 1, 2
+> ORDER  BY reads DESC;
+> ```
+>
+> The same join fixes `tool_results`.
+
+**Only assistant block types are represented.** Live: `tool_use` 440,550,
+`thinking` 220,473, `text` 184,489 — and nothing else. User-side `image` (606 in
+60 days) and `document` (31) content blocks reach **no table at all**; only
+`text` blocks on the user side survive, folded into `messages.prompt_text`. The
+block-type census in [Appendix A](#content-block-types-30-day-window) counts
+assistant blocks only.
+
 Indexes: `idx_cb_message`, `_type`, `_tool`, `_tool_use_id`, `_source_file`.
 
 ---
 
 ### `tool_results`
 
-One row per `tool_result` block in a user record.
+**Grain** one row per `tool_result` block in a user record. **PK** `result_id`
+(BIGSERIAL). **Writer** `sync.py::SessionSync`. **Idempotence** cleared by
+`source_file` before re-insert.
 
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
-| `result_id` | bigint | no | derived | PK, BIGSERIAL |
-| `message_uuid` | text | no | derived | → `messages.uuid` |
-| `session_id` | text | yes | derived | |
+| `result_id` | bigint | no | `default` | PK, BIGSERIAL |
+| `message_uuid` | text | no | `parsed` | → `messages.uuid` (logical, not a declared FK) |
+| `session_id` | text | yes | `parsed` | **the PARENT's id on sidechain rows** — see the note under `content_blocks` |
 | `tool_use_id` | text | no | `.tool_use_id` | joins `content_blocks.tool_use_id` |
 | `content_text` | text | yes | `.content` | **verbatim, never truncated**; substituted from the overflow file when that is longer |
-| `tldr` | text | yes | derived (`tool_tldr.tldr_result`) | heuristic one-liner; nullable sibling, never a replacement |
-| `char_count` | integer | yes | derived | of `content_text` |
+| `tldr` | text | yes | `parsed` (`tool_tldr.tldr_result`) | heuristic one-liner; nullable sibling, never a replacement |
+| `char_count` | integer | yes | `parsed` | of `content_text` |
 | `is_error` | boolean | yes | `.is_error` | |
-| `error_class` | text | yes | derived (`transcript_analyzer.classify_error`) | NULL unless `is_error` |
-| `block_count` | integer | yes | derived | inner content blocks |
-| `tool_use_result` | jsonb | yes | `toolUseResult` | client-side structured enrichment. Polymorphic (dict/list/str) — **stored as a blob, never normalized per tool** |
-| `from_overflow_file` | boolean | yes | derived | true when the body came from `tool-results/` |
-| `source_file` | text | no | derived | |
-| `source_line` | integer | yes | derived | currently NULL |
+| `error_class` | text | yes | `parsed` (`transcript_analyzer.classify_error`) | NULL unless `is_error` |
+| `block_count` | integer | yes | `parsed` | inner content blocks |
+| `tool_use_result` | jsonb | yes | `toolUseResult` | client-side structured enrichment. **Record-level, not block-level** — see below. Polymorphic (dict/list/str), **stored as a blob, never normalized per tool** |
+| `from_overflow_file` | boolean | yes | `parsed` | true when the body came from `tool-results/` |
+| `source_file` | text | no | `parsed` | |
+| `source_line` | integer | yes | — | always NULL |
+
+> **`tool_use_result` is a RECORD-level field copied onto every row of that
+> record.** One user record can hold several `tool_result` blocks — 10,219
+> messages here carry 2 to 5 rows, capped at 5 — and each row gets an identical
+> copy of the one `toolUseResult` object. **Aggregating over `tool_results`
+> double-counts it.** Dedupe on `message_uuid` first:
+>
+> ```sql
+> SELECT jsonb_typeof(tool_use_result), count(*)
+> FROM (SELECT DISTINCT ON (message_uuid) message_uuid, tool_use_result
+>       FROM tool_results WHERE tool_use_result IS NOT NULL) d
+> GROUP BY 1;
+> ```
+>
+> Deduped, the live mix of carriers is **dict 75.5% / list 19.7% / string 4.8%**.
 
 > **Overflow (widened in v9).** `tool-results/<tool_use_id>.txt` **and `.json`**
 > are both ingested, keyed on the filename stem. The `.json` form is a
 > content-block array introduced in the v2.1.161-258 window and stored as the
-> JSON text it is; 230 such files existed unread while their results sat in the
-> archive as inline truncations. `.pdf` downloads, `pdf-<uuid>/page-N.jpg`
+> JSON text it is; 227 such `toolu*.json` files exist today (231 `.json` files
+> in all — the other 4 are top-level files that are read but never match a
+> `tool_use_id`), and before v9 they sat unread while their results were held in
+> the archive as inline truncations. `.pdf` downloads, `pdf-<uuid>/page-N.jpg`
 > renders and the `extracted/` / `data/` agent working directories are
 > deliberately NOT ingested — their filenames are not tool_use_ids. Discovery is
 > non-recursive for that reason.

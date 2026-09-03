@@ -39,6 +39,7 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+from . import tool_labels
 from .angles import (_is_real_prompt, _one_line, extract_turn,  # noqa: F401
                      find_session_jsonl, TurnDelta)
 
@@ -126,6 +127,11 @@ def _tool_line(name: str, inp: dict) -> str:
         t = inp.get("skill") or ""
     elif name == "SendMessage":
         t = inp.get("to") or inp.get("summary") or ""
+    elif tool_labels.is_known(name):
+        # ToolSearch / EnterWorktree / Monitor / SendUserFile / Task* / … — the
+        # salient field lives in ONE table (tool_labels) so this renderer, the
+        # angle stream and the console cannot disagree about it.
+        t = tool_labels.tool_target(name, inp)
     elif name.startswith("mcp__"):
         name = name.rsplit("__", 1)[-1]
         t = inp.get("path") or inp.get("query") or inp.get("application") or ""

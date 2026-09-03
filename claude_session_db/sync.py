@@ -14,7 +14,7 @@ Phase 3 of claudecode:design/claude-session-db-postgres-archive.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +26,7 @@ from .jsonl_records import (
     ThinkingBlock,
     TextBlock,
     ToolUseBlock,
+    UnknownBlock,
 )
 from .postgres import SessionArchive, resolve_dsn
 from .subagent import load_external_tool_results, read_agent_meta
@@ -40,11 +41,66 @@ TASKS_TMP_BASE = Path("/private/tmp")
 TASK_OUTPUT_MAX_BYTES = 5 * 1024 * 1024
 
 
-def decode_project_path(encoded: str) -> str:
-    """Decode a project dir name: -Users-me-GitHub-x -> /Users/me/GitHub/x."""
+def encode_project_path(path: str) -> str:
+    """Claude Code's own project-dir encoding: every `/` AND `.` becomes `-`.
+
+    This is why the decode below cannot be exact — see `decode_project_path`.
+    """
+    return path.replace("/", "-").replace(".", "-")
+
+
+def decode_project_path(encoded: str, cwd_hint: Optional[str] = None) -> str:
+    """Decode a project dir name: `-Users-me-GitHub-x` -> `/Users/me/GitHub/x`.
+
+    THE ENCODING IS NOT INVERTIBLE. Claude Code maps both `/` and `.` to `-`,
+    so a `-` in the directory name is three different characters and the naive
+    decode is a guess. It guesses wrong for, among others:
+
+      * dot-directories — `-Users-andrew--claude` decodes to
+        `/Users/andrew//claude`, which normalises to `/Users/andrew/claude`,
+        not `/Users/andrew/.claude`. Every worktree project
+        (`…-infrastructure--claude-worktrees-net-v1`) is in this family.
+      * hyphens in a real directory name — `claude-session-db` becomes three
+        path segments.
+      * scratchpad projects that embed an encoded path inside an encoded path
+        (`-private-tmp-claude-501--Users-…-scratchpad`).
+      * `CLAUDE_CODE_PROJECT_DIR_NAME` — an arbitrary operator-supplied name
+        with no path relationship at all.
+      * the v2.1.224 long-path scheme, which shortens/hashes very long paths.
+
+    Two mitigations, in order:
+
+      1. `cwd_hint` — the transcript's OWN `cwd`, which is ground truth. If it
+         encodes to this exact directory name it IS the answer, and no guessing
+         is needed. This is the only reliable inversion available.
+      2. otherwise the naive decode, which is kept because `decoded_path` and
+         `project_name` are descriptive only — `projects.encoded_path` is the
+         unique key and is never derived.
+
+    Callers that care should ask `project_path_is_decodable()` and flag rather
+    than trust the result. `SessionSync` does, and reports the count.
+    """
+    if cwd_hint and encode_project_path(cwd_hint) == encoded:
+        return cwd_hint
     if encoded.startswith("-"):
         encoded = encoded[1:]
     return "/" + encoded.replace("-", "/")
+
+
+def project_path_is_decodable(encoded: str, decoded: str) -> bool:
+    """True when `decoded` is a believable inversion of `encoded`.
+
+    Two conditions, and the second is the one that catches the dot-directory
+    family: the decode must RE-ENCODE to the same directory name, and it must
+    actually exist on disk. `/Users/andrew//claude` re-encodes correctly and is
+    still wrong — only the existence check knows that.
+    """
+    if encode_project_path(decoded) != encoded:
+        return False
+    try:
+        return Path(decoded).is_dir()
+    except OSError:
+        return False
 
 
 @dataclass
@@ -61,12 +117,48 @@ class SyncStats:
     file_snapshots: int = 0
     pr_links: int = 0
     agent_tasks: int = 0
+    session_records: int = 0
     overflow_results: int = 0
     task_outputs: int = 0
     errors: int = 0
 
+    # --- the unmodelled-record tripwire -----------------------------------
+    # The parser has always collected `records["unknown"]` and nothing has ever
+    # read it, so eleven record types Claude Code added between v2.1.161 and
+    # v2.1.258 were dropped in silence. These two fields are what makes a NEW
+    # record type visible on the next sweep instead of on the next audit.
+    # `unknown` counts records; `unknown_types` is the census by type.
+    # (Since schema v9 these are also CAPTURED, in `session_records` — the
+    # counter now says "we do not model this yet", not "we lost this".)
+    unknown: int = 0
+    unknown_types: dict = field(default_factory=dict)
+
+    # Project directory names csd could not believably decode. The encoding
+    # maps both `/` and `.` to `-`, so it is not invertible; before this the
+    # naive decode produced a wrong `decoded_path` for every dot-directory and
+    # every worktree project, silently. See decode_project_path.
+    undecodable_projects: set = field(default_factory=set)
+
+    def note_undecodable_project(self, encoded: str) -> None:
+        self.undecodable_projects.add(encoded)
+
+    def note_unknown(self, record_type: str, n: int = 1) -> None:
+        self.unknown += n
+        self.unknown_types[record_type] = self.unknown_types.get(record_type, 0) + n
+
+    def unknown_census(self, limit: int = 8) -> str:
+        """`type×n, type×n` ordered by frequency — empty string when there are
+        none, so callers can append it unconditionally."""
+        if not self.unknown_types:
+            return ""
+        items = sorted(self.unknown_types.items(), key=lambda kv: -kv[1])
+        shown = ", ".join(f"{t}×{n:,}" for t, n in items[:limit])
+        if len(items) > limit:
+            shown += f", +{len(items) - limit} more"
+        return shown
+
     def __str__(self) -> str:
-        return (
+        out = (
             "Sync complete:\n"
             f"  Files: {self.files_found} found, {self.files_synced} synced, "
             f"{self.files_skipped} skipped\n"
@@ -77,9 +169,22 @@ class SyncStats:
             f"  System events: {self.system_events:,}\n"
             f"  Queue ops: {self.queue_operations:,}  File snapshots: {self.file_snapshots:,}\n"
             f"  PR links: {self.pr_links}  Agent tasks: {self.agent_tasks}\n"
+            f"  Session records: {self.session_records:,}\n"
             f"  Task outputs: {self.task_outputs}\n"
             f"  Errors: {self.errors}"
         )
+        if self.unknown:
+            out += (f"\n  UNMODELLED record types: {self.unknown:,} records — "
+                    f"{self.unknown_census(20)}\n"
+                    f"    (captured verbatim in session_records; no dedicated table yet)")
+        if self.undecodable_projects:
+            names = sorted(self.undecodable_projects)
+            out += (f"\n  UNDECODABLE project dirs: {len(names)} — "
+                    + ", ".join(names[:5])
+                    + (f", +{len(names) - 5} more" if len(names) > 5 else "")
+                    + "\n    (projects.decoded_path is a best-effort guess for these;"
+                      " encoded_path is the key and is exact)")
+        return out
 
     def oneline(self) -> str:
         """Compact single-line summary — only non-zero record counts (errors always)."""
@@ -88,12 +193,18 @@ class SyncStats:
             ("results", self.tool_results), ("attach", self.attachments),
             ("sysevents", self.system_events), ("queueops", self.queue_operations),
             ("snapshots", self.file_snapshots), ("prs", self.pr_links),
-            ("agents", self.agent_tasks), ("taskout", self.task_outputs),
+            ("agents", self.agent_tasks), ("sessrec", self.session_records),
+            ("taskout", self.task_outputs),
         ]
         parts = [f"{n:,} {label}" for label, n in counts if n]
         body = ", ".join(parts) if parts else "no new records"
-        return (f"Synced {self.files_synced}/{self.files_found} files · "
+        line = (f"Synced {self.files_synced}/{self.files_found} files · "
                 f"{body} ({self.errors} errors)")
+        if self.unknown:
+            line += f" · UNMODELLED {self.unknown:,}: {self.unknown_census()}"
+        if self.undecodable_projects:
+            line += f" · {len(self.undecodable_projects)} undecodable project dirs"
+        return line
 
 
 class SessionSync:
@@ -142,7 +253,7 @@ class SessionSync:
             if rebuild:
                 self.log("Rebuilding schema (DROP + CREATE)...")
                 self.archive.drop_all()
-            self.archive.initialize()
+            self.archive.initialize(backfill_log=self.log)
 
             files = self.enumerate_files()
             stats.files_found = len(files)
@@ -175,9 +286,22 @@ class SessionSync:
 
     # -- per-file -----------------------------------------------------------
 
-    def _project_id_for(self, project_encoded: str) -> int:
+    def _project_id_for(self, project_encoded: str, stats: Optional[SyncStats] = None,
+                        cwd_hint: Optional[str] = None) -> int:
+        """project_id for an encoded project dir name.
+
+        `cwd_hint` is the transcript's own `cwd` — ground truth, and the only
+        reliable way to invert an encoding that maps both `/` and `.` to `-`.
+        When neither the hint nor the naive decode is believable, the project
+        is FLAGGED (see SyncStats.undecodable_projects) rather than silently
+        recorded with a garbage `decoded_path`. The flag is the point: the
+        naive decode fails on every dot-directory and every worktree project,
+        and nothing said so.
+        """
         if project_encoded not in self._project_cache:
-            decoded = decode_project_path(project_encoded)
+            decoded = decode_project_path(project_encoded, cwd_hint=cwd_hint)
+            if stats is not None and not project_path_is_decodable(project_encoded, decoded):
+                stats.note_undecodable_project(project_encoded)
             self._project_cache[project_encoded] = self.archive.get_or_create_project(
                 project_encoded, decoded
             )
@@ -219,7 +343,12 @@ class SessionSync:
         # a subagent file additionally defines a CHILD session row keyed
         # "<parent>:<agent_id>" so the sidechain is a navigable identity.
         if not is_subagent:
-            project_id = self._project_id_for(project_encoded)
+            # The transcript's own cwd is ground truth for the project dir name
+            # the encoding cannot be inverted from.
+            ctx = next((m for m in records.get("user", []) + records.get("assistant", [])),
+                       None)
+            project_id = self._project_id_for(
+                project_encoded, stats, cwd_hint=getattr(ctx, "cwd", None))
             self._upsert_session(records, owning_session_id, project_id, source_file, st)
         else:
             self._upsert_subagent_session(records, path, owning_session_id,
@@ -351,6 +480,29 @@ class SessionSync:
                 "source_line": None,
             })
 
+        # Generic session-scoped records (schema v9): the ten modelled types
+        # with no dedicated table, plus anything csd has never seen. Verbatim
+        # payloads, keyed (source_file, source_line) — nothing is dropped.
+        sr_rows: list[dict] = [{
+            "session_id": rec.session_id or owning_session_id,
+            "record_type": rec.kind,
+            "ts": rec.timestamp,
+            "agent_id": rec.agent_id,
+            "is_modelled": rec.modelled,
+            "payload": rec.raw,
+            "source_file": source_file,
+            "source_line": rec.line_num,
+        } for rec in records.get("session_record", [])]
+
+        # The tripwire. `records["unknown"]` is [(line_num, record_type)] for
+        # every record type csd has NO handling for at all. It has existed
+        # since the first parser and nothing has ever read it, which is how
+        # eleven Claude Code record types were dropped in silence between
+        # v2.1.161 and v2.1.258. Counting it here puts a new type on the very
+        # next sweep line and on the sweep heartbeat.
+        for _line_num, record_type in records.get("unknown", []):
+            stats.note_unknown(record_type)
+
         for al in records.get("agent_lifecycle", []):
             agent_rows.append({
                 "key": al.key,
@@ -369,6 +521,7 @@ class SessionSync:
         self.archive.insert_queue_operations(qo_rows)
         self.archive.insert_pr_links(pr_rows)
         self.archive.insert_agent_tasks(agent_rows)
+        self.archive.insert_session_records(sr_rows)
 
         # File-history snapshots need per-row generated ids
         for snap in records.get("file_history", []):
@@ -383,6 +536,7 @@ class SessionSync:
         stats.queue_operations += len(qo_rows)
         stats.pr_links += len(pr_rows)
         stats.agent_tasks += len(agent_rows)
+        stats.session_records += len(sr_rows)
 
     def _user_row(self, msg: UserMessage, owning_session_id: str, source_file: str) -> dict:
         return {
@@ -391,7 +545,15 @@ class SessionSync:
             "parent_uuid": msg.parent_uuid,
             "ts": msg.timestamp,
             "role": "user",
-            "message_type": "prompt" if msg.is_direct_prompt else "tool_result",
+            # Classify on POSITIVE evidence, not on content shape. The old
+            # `"prompt" if msg.is_direct_prompt else "tool_result"` typed every
+            # list-content user record as a tool_result, and `is_direct_prompt`
+            # is True only for a bare string — so an image paste, a document
+            # attachment, or any multi-block prompt was filed as a tool result.
+            # Those rows then vanished from `user_prompt_count`, from
+            # `first_prompt`, from the reconcile gate's empty/trivial
+            # heuristics, and from every "what did the user ask" query.
+            "message_type": "tool_result" if msg.is_tool_result else "prompt",
             "prompt_text": msg.prompt_text,
             "prompt_id": msg.prompt_id,
             "permission_mode": msg.permission_mode,
@@ -406,7 +568,8 @@ class SessionSync:
             "git_branch": msg.git_branch,
             "cc_version": msg.version,
             "entrypoint": msg.entrypoint,
-            "forked_from": msg.forked_from,
+            "session_kind": msg.session_kind,
+            "forked_from": msg.forked_from,   # legacy; dead since CC v2.1.212
             "source_file": source_file,
             "source_line": None,
             "raw": msg.raw,
@@ -445,6 +608,13 @@ class SessionSync:
             "inference_geo": u.inference_geo,
             "speed": u.speed,
             "usage": u.raw or None,
+            # schema v9: promoted usage sub-fields + the top-level effort level
+            "thinking_tokens": u.thinking_tokens,
+            "server_tool_use": u.server_tool_use,
+            "iterations": u.iterations,
+            "iteration_count": u.iteration_count,
+            "effort": msg.effort,
+            "session_kind": msg.session_kind,
             "is_sidechain": msg.is_sidechain,
             "agent_id": msg.agent_id,
             "slug": msg.slug,
@@ -464,7 +634,7 @@ class SessionSync:
             "message_uuid": message_uuid, "session_id": session_id, "block_index": idx,
             "block_type": "", "content": None, "char_count": None, "signature": None,
             "tool_use_id": None, "tool_name": None, "tool_input": None,
-            "tool_type": None, "mcp_server": None,
+            "tool_type": None, "mcp_server": None, "block_payload": None,
             "source_file": source_file, "source_line": None,
         }
         if isinstance(blk, ThinkingBlock):
@@ -483,6 +653,13 @@ class SessionSync:
             row["tool_input"] = blk.input
             row["tool_type"] = blk.tool_type
             row["mcp_server"] = blk.mcp_server
+        elif isinstance(blk, UnknownBlock):
+            # Kept under its OWN type (e.g. "fallback"), payload verbatim. The
+            # block used to be dropped, which also shifted every later
+            # block_index in the message.
+            row["block_type"] = blk.block_type
+            row["block_payload"] = blk.payload
+            row["char_count"] = blk.char_count
         return row
 
     def _tool_result_row(self, msg: UserMessage, blk, owning_session_id: str,
@@ -579,6 +756,90 @@ class SessionSync:
 
     # -- session metadata derivation ---------------------------------------
 
+    @staticmethod
+    def _derive_from_session_records(records: dict, ctx_last=None) -> dict:
+        """Derive the schema-v9 `sessions` columns from the generic records.
+
+        Every field here comes from a record type Claude Code added in
+        v2.1.161-258 that csd used to drop. Latest-wins throughout: a
+        transcript is append-only, so the last record of a kind is the current
+        state (a session can relocate more than once, and `cost-state` is
+        rewritten as the session runs).
+
+        `ctx_last` is the LAST conversation record, used as the fallback for
+        current_cwd when the session never emitted a `relocated`.
+        """
+        out: dict = {}
+        latest: dict = {}
+        for rec in records.get("session_record", []):
+            if rec.modelled:
+                latest[rec.kind] = rec.raw
+
+        # -- fork lineage (fork-context-ref, v2.1.212+) --------------------
+        # Replaces the dead `forkedFrom`. Observed only on sidechain files, so
+        # in practice this lands on the child session row.
+        fork = latest.get("fork-context-ref")
+        if fork:
+            out["forked_from_session_id"] = fork.get("parentSessionId")
+            out["forked_from_uuid"] = fork.get("parentLastUuid")
+            length = fork.get("contextLength")
+            out["fork_context_length"] = length if isinstance(length, int) else None
+            out["fork_agent_id"] = fork.get("agentId")
+
+        # -- relocation (relocated, v2.1.169 `/cd`) ------------------------
+        # `cwd` keeps its meaning (where the session STARTED); this is where it
+        # ended up. Without it a /cd'd or worktree-moved session stays filed
+        # under a directory it left hours ago.
+        reloc = latest.get("relocated")
+        current_cwd = reloc.get("relocatedCwd") if reloc else None
+        if not current_cwd and ctx_last is not None:
+            current_cwd = getattr(ctx_last, "cwd", None) or None
+        if current_cwd:
+            out["current_cwd"] = current_cwd
+
+        # -- worktree binding (worktree-state) -----------------------------
+        # Kept verbatim as JSONB: 8 keys today (originalCwd, preEnterOriginalCwd,
+        # worktreePath, worktreeName, worktreeBranch, originalBranch,
+        # originalHeadCommit, sessionId) and the JSONB escape hatch is how this
+        # archive absorbs field drift without a migration.
+        wt = latest.get("worktree-state")
+        if isinstance(wt, dict) and isinstance(wt.get("worktreeSession"), dict):
+            out["worktree_session"] = wt["worktreeSession"]
+
+        # -- Claude Code's own cost ledger (cost-state) --------------------
+        # The harness's number, kept beside csd's computed one so the two can be
+        # compared (v_session_cost_drift) rather than silently disagreeing.
+        cost = latest.get("cost-state")
+        if isinstance(cost, dict):
+            out["cost_state"] = cost
+            out["reported_cost_usd"] = cost.get("totalCostUSD")
+            out["reported_total_duration_ms"] = cost.get("totalDuration")
+            out["reported_api_duration_ms"] = cost.get("totalAPIDuration")
+            out["reported_tool_duration_ms"] = cost.get("totalToolDuration")
+            out["reported_lines_added"] = cost.get("totalLinesAdded")
+            out["reported_lines_removed"] = cost.get("totalLinesRemoved")
+            unknown = cost.get("hasUnknownModelCost")
+            out["has_unknown_model_cost"] = (
+                bool(unknown) if unknown is not None else None)
+
+        return out
+
+    @staticmethod
+    def _derive_session_kind(records: dict) -> Optional[str]:
+        """`sessionKind` ("bg", ...) off any record that carries it.
+
+        Measured CONSTANT per session across user/assistant/attachment/system
+        records (0 of 2 sessions in a 30-day scan carried more than one value),
+        so this is a session attribute and there is deliberately no
+        per-message column.
+        """
+        for bucket in ("user", "assistant", "attachment", "system"):
+            for rec in records.get(bucket, []):
+                kind = (getattr(rec, "raw", None) or {}).get("sessionKind")
+                if kind:
+                    return kind
+        return None
+
     def _upsert_subagent_session(self, records: dict, path: Path,
                                  parent_session_id: str, project_encoded: str,
                                  source_file: str, st) -> None:
@@ -607,9 +868,20 @@ class SessionSync:
         ctx = next((m for m in users + assts), None)
         ts_list = [m.timestamp for m in users + assts if getattr(m, "timestamp", None)]
 
+        # Schema v9. `fork-context-ref` is observed ONLY on sidechain files, so
+        # this is where fork lineage actually lands: a forked subagent inherits
+        # its parent session's context, and these columns say whose and how much.
+        ordered = sorted((m for m in users + assts if getattr(m, "timestamp", None)),
+                         key=lambda m: m.timestamp)
+        derived = self._derive_from_session_records(
+            records, ctx_last=ordered[-1] if ordered else None)
+        derived["session_kind"] = self._derive_session_kind(records)
+
         self.archive.upsert_session({
+            **derived,
             "session_id": f"{parent_session_id}:{agent_id}",
-            "project_id": self._project_id_for(project_encoded),
+            "project_id": self._project_id_for(
+                project_encoded, cwd_hint=getattr(ctx, "cwd", None)),
             "file_path": source_file,
             "is_subagent": True,
             "parent_session_id": parent_session_id,
@@ -656,7 +928,18 @@ class SessionSync:
         created_at = min(ts_list) if ts_list else None
         modified_at = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
 
+        # Schema v9: fork lineage / relocation / worktree binding / cost-state,
+        # all off record types that used to be dropped. `ctx_last` is the LAST
+        # conversation record — the current_cwd fallback for a session that
+        # moved without emitting a `relocated`.
+        ordered = sorted((m for m in users + assts if getattr(m, "timestamp", None)),
+                         key=lambda m: m.timestamp)
+        derived = self._derive_from_session_records(
+            records, ctx_last=ordered[-1] if ordered else None)
+        derived["session_kind"] = self._derive_session_kind(records)
+
         self.archive.upsert_session({
+            **derived,
             "session_id": session_id,
             "project_id": project_id,
             "file_path": source_file,

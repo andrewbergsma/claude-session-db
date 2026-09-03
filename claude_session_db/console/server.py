@@ -99,6 +99,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 from .. import cr as crlib
+from .. import tool_labels
 from .. import tldr
 from .. import session_timeline
 from .. import version as vinfo
@@ -702,10 +703,20 @@ def _tool_summary(name, inp):
     if name == "SendMessage":
         return (inp.get("summary") or inp.get("to") or "",
                 str(inp.get("message") or inp.get("content") or "")[:400])
-    if name == "ToolSearch":
-        return (str(inp.get("query") or ""), "")
     if name in ("TodoWrite",):
+        # LEGACY. Claude Code replaced TodoWrite with the TaskCreate /
+        # TaskUpdate / TaskStop / TaskOutput family; this branch is kept (not
+        # deleted) because the archive is lossless and older sessions still
+        # carry real TodoWrite calls that must keep rendering.
         return (name, "")
+    # ToolSearch / EnterWorktree / Monitor / SendUserFile / Artifact /
+    # PushNotification / SendFeedback / Task* / ListAgents. The salient field
+    # per tool lives in ONE table (tool_labels) shared with the tldr renderer
+    # and the angle stream, so the three cannot disagree about it.
+    if tool_labels.is_known(name):
+        label, detail = tool_labels.tool_label(name, inp)
+        if label:
+            return (label, detail)
     # generic MCP write / unknown tool — show a compact input peek
     peek = ", ".join(f"{k}={str(v)[:40]}" for k, v in list(inp.items())[:3])
     return (short, peek)

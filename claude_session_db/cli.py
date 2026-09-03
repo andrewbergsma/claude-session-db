@@ -191,21 +191,32 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
         click.echo(f"sweep: {res.reason}", err=True)
 
     try:
-        _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
+        stats = _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
     except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
         guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
         click.echo(f"sweep: FAILED — {type(exc).__name__}: {exc}", err=True)
         guard.release()
         raise SystemExit(1)
     else:
-        guard.heartbeat(ok=True)
+        # The unmodelled-record-type tripwire rides the heartbeat so it reaches
+        # `csd sweep-health`, which is deliberately DB-free and could not
+        # otherwise see it. ok stays True — a new record type is a signal to
+        # act on, not a sweep failure.
+        census = stats.unknown_census(6) if stats is not None else ""
+        guard.heartbeat(ok=True,
+                        detail=(f"unmodelled record types: {census}" if census else ""))
     finally:
         guard.release()
 
 
 def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
-               no_ingest: bool, quiet: bool) -> None:
-    """The actual sweep body, wrapped by the liveness guard in `sweep()`."""
+               no_ingest: bool, quiet: bool):
+    """The actual sweep body, wrapped by the liveness guard in `sweep()`.
+
+    Returns the SyncStats of the ingest phase (None when --no-ingest), so the
+    caller can put the unmodelled-record-type census on the heartbeat.
+    """
+    stats = None
     if not no_ingest:
         # verbose=False: suppress the "Found N files" preamble + per-file lines;
         # the one-line summary below carries the only signal worth keeping.
@@ -217,7 +228,7 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
         rows = a.query(_SWEEP_HEAD_SQL, (window,))
     if not rows:
         click.echo(f"No sessions active in the last {window} min.")
-        return
+        return stats
 
     def render(r) -> str:
         idle_min = int(r["idle_min"] or 0)
@@ -240,6 +251,7 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
     remaining = len(done) - len(shown_done)
     if remaining > 0:
         click.echo(f"  … +{remaining} quiesced (run `csd recent` to list)")
+    return stats
 
 
 @main.command(name="sweep-health")
@@ -280,6 +292,14 @@ def sweep_health(ctx: click.Context, stale_intervals: int) -> None:
     status = "STALE" if age > threshold else "ok"
     click.echo(f"heartbeat: {status} (age={age:.0f}s, threshold={threshold}s, "
                f"last_ok={hb.get('ok')}){when}")
+    # The unmodelled-record-type tripwire rides the heartbeat detail on an OK
+    # run (this watcher is DB-free, so the census cannot reach it any other
+    # way). It is a NOTICE, never an exit code: a new Claude Code record type
+    # is captured verbatim in `session_records` and wants a dedicated table,
+    # but the sweep itself is healthy.
+    detail = (hb or {}).get("detail") or ""
+    if hb and hb.get("ok") is not False and detail:
+        click.echo(f"notice: {detail[:300]}")
     if status == "STALE" or (hb and hb.get("ok") is False):
         raise SystemExit(1)
 
@@ -292,11 +312,30 @@ def stats(ctx: click.Context, exact: bool) -> None:
     """Show table row counts and database size."""
     with SessionArchive(ctx.obj["dsn"]) as a:
         s = a.statistics(exact=exact)
+        census = a.session_record_census()
     width = max(len(k) for k in s)
     for k, v in s.items():
         click.echo(f"  {k:<{width}}  {v:>14,}" if isinstance(v, int) else f"  {k:<{width}}  {v:>14}")
     if not exact:
         click.echo("  (row counts are catalog estimates; pass --exact for precise counts)")
+
+    # The unmodelled-record-type tripwire, DB side. The sweep line and the
+    # heartbeat report what the LAST sync saw; this reports the whole archive,
+    # so a type that arrived weeks ago and has not recurred is still visible.
+    if census:
+        modelled = [r for r in census if r["is_modelled"]]
+        unmodelled = [r for r in census if not r["is_modelled"]]
+        click.echo("\n  session_records by type (generic catch-all):")
+        for r in modelled:
+            click.echo(f"    {r['record_type']:<28} {r['n']:>10,}")
+        if unmodelled:
+            click.echo("\n  ⚠ UNMODELLED record types — captured verbatim, no dedicated"
+                       " table yet:")
+            for r in unmodelled:
+                seen = f"  last {r['last_seen']:%Y-%m-%d}" if r["last_seen"] else ""
+                click.echo(f"    {r['record_type']:<28} {r['n']:>10,}{seen}")
+            click.echo("    (inspect: csd query \"SELECT payload FROM session_records"
+                       " WHERE NOT is_modelled LIMIT 5\")")
 
 
 @main.command()
@@ -573,6 +612,31 @@ def _fmt_idle(s: int | None) -> str:
     return f"{s // 86400}d{(s % 86400) // 3600}h"
 
 
+def _fmt_session_flags(r) -> str:
+    """Compact per-session flags the inventory could not show before schema v9.
+
+    `bg` — sessionKind="bg", a BACKGROUND session. It reads like any other row
+           in an inventory built for open interactive threads, which is exactly
+           why it needs a mark.
+    `mv` — the session RELOCATED (a v2.1.169 `/cd`, or a worktree enter): its
+           current_cwd is not the cwd it was filed under. The PROJECT column is
+           derived from the original, so without this the row points at a
+           directory the session left.
+    `fk` — a fork: it inherited another session's context (fork-context-ref).
+    """
+    flags = []
+    if (r.get("session_kind") or "") == "bg":
+        flags.append("bg")
+    elif r.get("session_kind"):
+        flags.append(str(r["session_kind"])[:3])
+    cur, orig = r.get("current_cwd"), r.get("cwd")
+    if cur and orig and cur != orig:
+        flags.append("mv")
+    if r.get("forked_from_session_id"):
+        flags.append("fk")
+    return "/".join(flags) if flags else "—"
+
+
 def _fmt_agents(r: dict) -> str:
     n = r.get("agents_total") or 0
     if not n:
@@ -618,7 +682,8 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
     if not rows:
         click.echo(f"No main sessions active in the last {window_days}d.")
         return
-    hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'PROJECT':<20.20} {'BRANCH':<22.22} "
+    hdr = (f"{'VERDICT':<10} {'SESSION':<8} {'FLAGS':<9} {'PROJECT':<20.20} "
+           f"{'BRANCH':<22.22} "
            f"{'LAST-ACT':<12} {'IDLE':>6} {'MSGS':>5} {'AGENTS':>8}  "
            f"{'SUMMARY':<12} DELTA")
     click.echo(hdr)
@@ -635,6 +700,7 @@ def _angles_sessions(ctx: click.Context, kmcp_dsn: str | None, window_days: int,
         verdict = click.style(f"{r['verdict']:<10}", fg=color) if color \
             else f"{r['verdict']:<10}"
         click.echo(f"{verdict} {r['session_id'][:8]:<8} "
+                   f"{_fmt_session_flags(r):<9} "
                    f"{str(r['project_name'] or ''):<20.20} "
                    f"{str(r['git_branch'] or '—'):<22.22} {last:<12} "
                    f"{_fmt_idle(r['idle_s']):>6} {r['message_count'] or 0:>5} "

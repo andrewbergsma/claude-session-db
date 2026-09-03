@@ -27,10 +27,11 @@ csd query "SELECT skill, sum(output_tokens) FROM v_token_by_attribution GROUP BY
 
 ## ✨ Why it's different
 
-- **🔒 Lossless by design.** Content blocks and tool results are stored **verbatim** — no truncation. The largest results are pulled from `tool-results/*.txt` overflow files. `tldr` is a *nullable derived sibling*, never a replacement.
+- **🔒 Lossless by design.** Content blocks and tool results are stored **verbatim** — no truncation. The largest results are pulled from `tool-results/*.txt` and `*.json` overflow files. `tldr` is a *nullable derived sibling*, never a replacement.
 - **💰 Full token economics.** Every assistant message captures input + output + cache_read + cache_creation + ephemeral, plus the raw `usage` JSONB. Per-skill / per-MCP / per-agent absorption falls out of `v_token_by_attribution`.
 - **🧩 JSONB escape-hatch everywhere.** `raw`, `usage`, `tool_input`, `tool_use_result`, `attachment`, `stop_details`, `diagnostics` columns absorb JSONL field drift **without a migration**.
 - **⚡ Incremental & idempotent.** Sync keys off `*.jsonl` mtime (`st_mtime_ns`), not the stale sessions-index. Re-ingesting is safe — messages are keyed by `uuid`, child rows cleared per source file.
+- **🚨 Nothing is dropped in silence.** A session-scoped record type `csd` doesn't model yet still lands **verbatim** in `session_records`, flagged `is_modelled = false` — and the same sweep that stored it says so, on its summary line, its heartbeat, `csd sweep-health` and `csd stats`. New Claude Code record types show up on the next sweep, not on the next audit.
 - **🛡️ Hardened background sweep.** A launchd-timed `csd sweep` with a liveness guard, heartbeat/error detection, and an idle-transaction reaper — built after a real lock-convoy once starved the schedule for ~9h.
 
 ## 🚀 Quickstart
@@ -59,7 +60,7 @@ csd recent 10
 | `csd ingest` | Incremental sync (mtime-based glob over `*.jsonl`) |
 | `csd ingest --rebuild` | `DROP SCHEMA` + rebuild from scratch |
 | `csd ingest --force` | Re-sync every file regardless of mtime |
-| `csd stats` | Table row counts + database size |
+| `csd stats` | Table row counts + database size, plus the `session_records` type census (⚠ flags UNMODELLED types) |
 | `csd recent [N]` | Most recent sessions |
 | `csd query "SQL"` | Ad-hoc SQL (`--csv` for CSV out) |
 | `csd views` | List the analytic views |
@@ -84,7 +85,7 @@ csd recent 10
 
 ## 📊 What you can query
 
-**17 tables** capture the full transcript graph — `sessions`, `messages`, `content_blocks`, `tool_results`, `agent_tasks`, `attachments`, `file_history`, `pr_links`, and more — each with its raw JSONB escape-hatch.
+**20 tables** capture the full transcript graph — `sessions`, `messages`, `content_blocks`, `tool_results`, `agent_tasks`, `attachments`, `file_history`, `pr_links`, `session_records`, and more — each with its raw JSONB escape-hatch.
 
 On top sit **analytic views**, ready to `SELECT` from:
 
@@ -98,10 +99,30 @@ On top sit **analytic views**, ready to `SELECT` from:
 | `v_tool_usage` | Tool-call frequency and cost |
 | `v_compaction` | Context-compaction events and pre-token counts |
 | `v_agent_children` | One row per subagent spawn — type, status, tokens, child session link |
+| `v_session_cost_drift` | `csd`'s computed cost vs Claude Code's **own** reported cost, with the terms to attribute a gap |
 
 ```bash
 csd views        # full list, live from the database
 ```
+
+Two of these are worth knowing about by name. **`session_records`** is the
+catch-all: every session-scoped record type Claude Code emits that has no
+dedicated table of its own — `cost-state`, `worktree-state`, `relocated`,
+`fork-context-ref`, `atis-latch` and the rest — kept **verbatim**, keyed by
+source file + line. Anything `csd` has never seen lands there too with
+`is_modelled = false`, which is the standing "what did Claude Code just add"
+probe:
+
+```sql
+SELECT record_type, count(*), max(ts)
+FROM session_records WHERE NOT is_modelled GROUP BY 1 ORDER BY 2 DESC;
+```
+
+**`v_session_cost_drift`** puts `csd`'s computed spend next to the harness's own
+`cost-state` total for the same session, and carries the terms needed to explain
+a gap rather than just show one — `api_message_ratio` (one API response can
+appear as several message rows), sidechain roll-up, model-fallback rows and
+unpriced rows. See [`DATA_MODEL.md`](DATA_MODEL.md) for the full schema.
 
 ## 🧭 Session management (`csd angles sessions`)
 
@@ -111,6 +132,12 @@ last activity — `max(messages.ts)` from the archive, never transcript mtime
 plus message count, summary classification, and an
 **OPEN / OPEN-delta / LIVE / CLOSED** verdict (LIVE = last message within
 ~15 min).
+
+A **FLAGS** column marks the sessions that used to read like ordinary rows:
+`bg` — a background session; `mv` — the session **relocated** (a `/cd`, or a
+worktree enter), so the PROJECT column reflects where it was *filed*, not where
+it is now; `fk` — a **fork**, which inherited another session's context. `—`
+when a session is none of these.
 
 For summarized sessions it also runs **delta-after-summary detection**: the
 transcript tail after the summary watermark (`leaf_uuid_at_summary` →
@@ -191,7 +218,8 @@ The `csd sweep` agent (every 300s via launchd) is hardened against the failure m
 - **Liveness guard** — a PID+age pidfile; a stale lock (dead PID, or alive but past `CSD_SWEEP_MAX_AGE_S`) is *reclaimed*, so a wedged predecessor can never become a permanent block.
 - **Heartbeat / error detection** — every sweep writes `{ts, ok, detail}`; `csd sweep-health` reports staleness and last outcome with exit codes, and it's **DB-free** so it still works when the archive itself is wedged.
 - **Transaction lifetime** — `idle_in_transaction_session_timeout` reaps abandoned transactions; reads commit immediately so the sweep never sits `idle in transaction` between phases.
-- **DDL off the hot path** — `CREATE OR REPLACE VIEW` runs only on a schema-version mismatch, never on every tick.
+- **DDL off the hot path** — `CREATE OR REPLACE VIEW` runs only on a schema-version mismatch, never on every tick. Column additions sit behind an `information_schema` guard so the `ALTER` fires once, and data backfills are bounded (20s/tick), resumable from a cursor, and isolated — a broken backfill can never stop ingest.
+- **The UNMODELLED tripwire** — a record type `csd` doesn't model yet is stored and *counted*: the sync summary and the one-line sweep form print the census by type, and it rides the heartbeat so `csd sweep-health` shows it as a `notice:` even though that watcher is deliberately DB-free. It never sets `ok=false` and never changes an exit code — a new record type is a signal to act on, not a sweep failure. The sweep also reports project directories whose name it **couldn't believably decode** (Claude Code maps both `/` and `.` to `-`, so the encoding isn't invertible; `projects.encoded_path` is the exact key and is never derived).
 
 ## 🔌 Bonus: statusline
 

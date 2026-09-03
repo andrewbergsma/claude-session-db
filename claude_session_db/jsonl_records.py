@@ -137,12 +137,49 @@ class ToolUseBlock:
         return None
 
 
+@dataclass
+class UnknownBlock:
+    """Any assistant content block that is not thinking / text / tool_use.
+
+    The parser used to return None for these, and `sync` skips a None — so an
+    unrecognised block was DROPPED, and worse, every later block in the same
+    message shifted down one `block_index`, silently corrupting the ordering of
+    blocks that were kept.
+
+    Claude Code v2.1.247 started emitting `fallback`
+    (`{"type":"fallback","from":{"model":…},"to":{"model":…}}` — the marker for
+    a server-side model fallback, which is exactly the kind of thing a cost or
+    reliability lens wants) and csd threw all of them away. There will be a next
+    one; this branch is so that it costs nothing.
+
+    The block is kept VERBATIM under its own real type.
+    """
+
+    block_type: str
+    payload: dict
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "UnknownBlock":
+        return cls(block_type=data.get("type") or "unknown", payload=data)
+
+    @property
+    def char_count(self) -> int:
+        return len(json.dumps(self.payload, default=str))
+
+
 # Type alias for assistant content blocks
-ContentBlock = ThinkingBlock | TextBlock | ToolUseBlock
+ContentBlock = ThinkingBlock | TextBlock | ToolUseBlock | UnknownBlock
 
 
 def parse_content_block(data: dict) -> Optional[ContentBlock]:
-    """Parse a content block based on its type."""
+    """Parse a content block based on its type.
+
+    Never returns None for a dict: an unrecognised type becomes an
+    `UnknownBlock` carrying the payload verbatim. Returning None used to drop
+    the block AND shift every subsequent block_index in the message.
+    """
+    if not isinstance(data, dict):
+        return None
     block_type = data.get("type")
     if block_type == "thinking":
         return ThinkingBlock.from_dict(data)
@@ -150,7 +187,7 @@ def parse_content_block(data: dict) -> Optional[ContentBlock]:
         return TextBlock.from_dict(data)
     elif block_type == "tool_use":
         return ToolUseBlock.from_dict(data)
-    return None
+    return UnknownBlock.from_dict(data)
 
 
 # =============================================================================
@@ -292,11 +329,33 @@ class Usage:
     service_tier: str = "standard"
     inference_geo: str = "not_available"
     speed: Optional[str] = None
+    # Promoted usage sub-fields (schema v9). The whole `usage` object is still
+    # kept in `raw`; these three are surfaced because they are what the cost and
+    # behaviour lenses group by, and reaching into JSONB for every query is how
+    # a field stays effectively unqueryable.
+    #   thinking_tokens  output_tokens_details.thinking_tokens (55% of records)
+    #                    — how much of the output was reasoning, not answer.
+    #   server_tool_use  server-side tool invocations (web search/fetch), 64%.
+    #                    Shape varies, so it stays a dict.
+    #   iterations       an ARRAY, not a count (64%). Each element is a
+    #                    per-iteration usage object with its OWN `model` and
+    #                    `type`, and that is where a model FALLBACK is recorded:
+    #                      [{"type":"message","model":"claude-fable-5",...},
+    #                       {"type":"fallback_message","model":"claude-opus-4-8",...}]
+    #                    So the message's top-level `model` is not the only
+    #                    model that billed for it — the same event the v2.1.247
+    #                    `fallback` CONTENT BLOCK marks, recorded twice.
+    thinking_tokens: Optional[int] = None
+    server_tool_use: Optional[Any] = None
+    iterations: Optional[list] = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: dict) -> "Usage":
         cache_data = data.get("cache_creation")
+        details = data.get("output_tokens_details")
+        thinking = (details.get("thinking_tokens")
+                    if isinstance(details, dict) else None)
         return cls(
             input_tokens=data.get("input_tokens", 0),
             output_tokens=data.get("output_tokens", 0),
@@ -306,8 +365,33 @@ class Usage:
             service_tier=data.get("service_tier", "standard"),
             inference_geo=data.get("inference_geo", "not_available"),
             speed=data.get("speed"),
+            thinking_tokens=thinking if isinstance(thinking, int) else None,
+            server_tool_use=data.get("server_tool_use"),
+            iterations=(data["iterations"]
+                        if isinstance(data.get("iterations"), list) else None),
             raw=data,
         )
+
+    @property
+    def iteration_count(self) -> Optional[int]:
+        """How many API iterations produced this message. >1 exactly when the
+        turn fell back to another model mid-message."""
+        return len(self.iterations) if self.iterations is not None else None
+
+    @property
+    def fallback_models(self) -> list[str]:
+        """Models OTHER than the first that billed for this message.
+
+        Non-empty only on a fallback. `v_message_cost` prices the whole message
+        at the top-level model, so a non-empty list here means that price is
+        wrong for part of the turn.
+        """
+        if not self.iterations:
+            return []
+        seen = [it.get("model") for it in self.iterations
+                if isinstance(it, dict) and it.get("model")]
+        first = seen[0] if seen else None
+        return [m for m in seen[1:] if m != first]
 
     @property
     def ephemeral_5m_tokens(self) -> int:
@@ -380,6 +464,14 @@ class AssistantMessage:
     # Context / threading (added 2026-06 re-audit)
     entrypoint: Optional[str] = None
     agent_id: Optional[str] = None
+
+    # Top-level `effort` (schema v9). Present on 98.5% of assistant records
+    # (235,687 of 239,367 in a 30-day scan) and, until v9, readable only by
+    # digging into `raw`. It is the effort level the turn actually ran at — the
+    # single biggest per-turn cost/quality lever there is.
+    effort: Optional[str] = None
+    # `sessionKind` ("bg" = background session).
+    session_kind: Optional[str] = None
 
     # Attribution system (NEW — which agent/skill/mcp/plugin produced this message)
     attribution_agent: Optional[str] = None
@@ -471,6 +563,8 @@ class AssistantMessage:
             error=data.get("error"),
             entrypoint=data.get("entrypoint"),
             agent_id=data.get("agentId"),
+            effort=data.get("effort"),
+            session_kind=data.get("sessionKind"),
             attribution_agent=data.get("attributionAgent"),
             attribution_skill=data.get("attributionSkill"),
             attribution_mcp_server=data.get("attributionMcpServer"),
@@ -561,17 +655,33 @@ class UserMessage:
     prompt_id: Optional[str] = None
     agent_id: Optional[str] = None
     origin: Optional[Any] = None
+    session_kind: Optional[str] = None
+    # LEGACY: Claude Code stopped emitting `forkedFrom` at v2.1.212. The live
+    # replacement is the `fork-context-ref` record (-> sessions.forked_from_*).
     forked_from: Optional[dict] = None
     raw: dict = field(default_factory=dict, repr=False)
 
     @property
     def is_direct_prompt(self) -> bool:
-        """True if this is a direct user prompt (not a tool result)."""
+        """True if `message.content` is a bare STRING.
+
+        NOTE: this is NOT "is a user prompt". A prompt carrying an image, a
+        document, or any other block is a LIST and answers False here. Use
+        `is_tool_result` to classify — see the note there.
+        """
         return isinstance(self.content, str)
 
     @property
     def is_tool_result(self) -> bool:
-        """True if this contains tool results."""
+        """True iff the content actually contains a `tool_result` block.
+
+        This is THE classifier for user-record type, and the negation of
+        `is_direct_prompt` is not a substitute for it. A user record is one of
+        exactly two things — an answer to a tool call, or a prompt — and the
+        only positive evidence for the first is a tool_result block. Content
+        shape is not evidence: list content is equally the shape of an
+        image/document/multi-block prompt.
+        """
         if not isinstance(self.content, list):
             return False
         return any(
@@ -580,14 +690,25 @@ class UserMessage:
 
     @property
     def prompt_text(self) -> Optional[str]:
-        """Extract the prompt text if this is a direct prompt."""
+        """The user's text, whether the content is a string or a list.
+
+        A user message is NOT string-only. Pasting an image, attaching a
+        document, or any of the richer prompt shapes Claude Code has added
+        makes `message.content` a LIST — `[{"type":"image",...},
+        {"type":"text","text":"…"}]` — and that list is still a prompt.
+
+        This used to return only the FIRST text block, which silently truncated
+        a multi-block prompt to its first paragraph. Every text block is joined
+        now, in order.
+        """
         if isinstance(self.content, str):
             return self.content
-        # Check for text blocks in array content
-        for item in self.content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                return item.get("text")
-        return None
+        if not isinstance(self.content, list):
+            return None
+        texts = [item.get("text") for item in self.content
+                 if isinstance(item, dict) and item.get("type") == "text"
+                 and item.get("text")]
+        return "\n".join(texts) if texts else None
 
     @property
     def tool_result_ids(self) -> list[str]:
@@ -674,6 +795,7 @@ class UserMessage:
             prompt_id=data.get("promptId"),
             agent_id=data.get("agentId"),
             origin=data.get("origin"),
+            session_kind=data.get("sessionKind"),
             forked_from=data.get("forkedFrom"),
             raw=data,
         )
@@ -1683,6 +1805,104 @@ class PrLinkRecord:
 
 
 @dataclass
+class SessionRecord:
+    """A session-scoped record with NO dedicated table of its own.
+
+    Claude Code v2.1.161-258 added a long tail of small, session-keyed record
+    types. Each is real data (a relocation, a fork's parent pointer, the
+    harness's own cost ledger) but none warrants its own table, and the parser
+    used to drop every one of them on the floor — `records["unknown"]` was
+    write-only.
+
+    This is the catch-all: the payload is kept VERBATIM as JSONB, the type is
+    kept as `kind`, and the row is addressed by (source_file, line_num) so a
+    re-sync is idempotent without needing a uuid the record does not have.
+
+    `modelled` distinguishes the two populations that share the table:
+      True  — a type csd knows about and deliberately routes here
+              (`SESSION_RECORD_TYPES` below).
+      False — a type csd has never seen. Captured all the same (nothing is
+              dropped any more), and ALSO reported through the SyncStats
+              tripwire so it shows up on the next sweep.
+    """
+
+    kind: str                       # record `type`
+    session_id: str
+    line_num: int
+    timestamp: Optional[datetime] = None
+    agent_id: Optional[str] = None
+    modelled: bool = True
+    raw: dict = field(default_factory=dict, repr=False)
+
+    # Where each type carries its own timestamp. Types absent here have none in
+    # the record at all (atis-latch, worktree-state, relocated, cost-state,
+    # artifact-*) and get a NULL ts rather than an invented one.
+    _TS_FIELDS = ("timestamp", "ts")
+
+    @classmethod
+    def from_dict(cls, data: dict, line_num: int, modelled: bool = True) -> "SessionRecord":
+        ts = None
+        for f in cls._TS_FIELDS:
+            v = data.get(f)
+            if isinstance(v, str) and v:
+                try:
+                    ts = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                except ValueError:
+                    ts = None
+                break
+        # worktree-state nests its sessionId inside worktreeSession as well as
+        # carrying it at top level; the top level is authoritative.
+        sid = data.get("sessionId") or ""
+        if not sid and isinstance(data.get("worktreeSession"), dict):
+            sid = data["worktreeSession"].get("sessionId") or ""
+        return cls(
+            kind=data.get("type", ""),
+            session_id=sid,
+            line_num=line_num,
+            timestamp=ts,
+            agent_id=data.get("agentId"),
+            modelled=modelled,
+            raw=data,
+        )
+
+
+# Record types routed to the generic `session_records` table. All ten were
+# confirmed present in a 30-day scan of ~/.claude/projects (2,015 files); the
+# payload of each is documented per-type in DATA_MODEL.md.
+#
+#   atis-latch                 {atis, sessionId}                            6,077
+#   worktree-state             {worktreeSession{...}, sessionId}              816
+#   relocated                  {relocatedCwd, sessionId}                      733
+#   file-history-delta         {backup, messageId, snapshotMessageId,         638
+#                               trackingPath, timestamp}
+#   history-suppression        {cause, ts, vetoedAgainstAccountUuid,          291
+#                               sessionId}
+#   frame-link                 {frameUrl, path, title, artifactCount,         241
+#                               timestamp, sessionId}
+#   cost-state                 {totalCostUSD, modelUsage, ...}                107
+#   artifact-autoreact-ledger  {artifacts, accountUuid, v, sessionId}          56
+#   artifact-comment-monitor   {artifacts, v, sessionId}                       20
+#   fork-context-ref           {parentSessionId, parentLastUuid,                8
+#                               contextLength, agentId}
+#
+# Several of these ALSO feed dedicated `sessions` columns (fork lineage,
+# relocation, worktree binding, cost-state); the generic row stays regardless,
+# so the derived column can be recomputed from the archive without a re-parse.
+SESSION_RECORD_TYPES = {
+    "atis-latch",
+    "worktree-state",
+    "relocated",
+    "file-history-delta",
+    "history-suppression",
+    "frame-link",
+    "cost-state",
+    "artifact-autoreact-ledger",
+    "artifact-comment-monitor",
+    "fork-context-ref",
+}
+
+
+@dataclass
 class AgentLifecycleRecord:
     """A `started` or `result` agent-lifecycle record.
 
@@ -1752,7 +1972,15 @@ class JSONLParser:
             "session_meta": [],   # ai-title, custom-title, last-prompt, mode, etc.
             "pr_link": [],
             "agent_lifecycle": [],  # started, result
-            "unknown": [],        # record types we don't model (kept as raw line nums)
+            # Generic session-scoped records with no dedicated table: the ten
+            # SESSION_RECORD_TYPES plus anything csd has never seen. Payloads
+            # verbatim — nothing is dropped.
+            "session_record": [],
+            # The TRIPWIRE. Types with no handling AT ALL, as [(line_num, type)].
+            # Read by SyncStats so a new Claude Code record type surfaces on the
+            # next sweep instead of on the next audit. Types in
+            # SESSION_RECORD_TYPES are modelled and deliberately absent here.
+            "unknown": [],
         }
 
         # Record types folded into session_meta via SessionMetaRecord
@@ -1792,7 +2020,13 @@ class JSONLParser:
                         records["pr_link"].append(PrLinkRecord.from_dict(data))
                     elif record_type in ("started", "result"):
                         records["agent_lifecycle"].append(AgentLifecycleRecord.from_dict(data))
+                    elif record_type in SESSION_RECORD_TYPES:
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=True))
                     else:
+                        # Captured verbatim (nothing is dropped) AND reported.
+                        records["session_record"].append(
+                            SessionRecord.from_dict(data, line_num, modelled=False))
                         records["unknown"].append((line_num, record_type))
 
                 except json.JSONDecodeError as e:

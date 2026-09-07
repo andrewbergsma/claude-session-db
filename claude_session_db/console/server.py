@@ -1888,6 +1888,16 @@ def build_session(sid: str):
     usage = None
     title = None
     n_reads = n_searches = n_writes = 0
+    # Status-line inputs (the composer foot mirrors Claude Code's own status
+    # line): the last assistant record's top-level `effort`, the timestamp of
+    # the last usage-bearing turn (cache expiry = that + TTL), the TTL tier the
+    # last cache WRITE used (usage.cache_creation.ephemeral_{1h,5m}), and a
+    # per-message hit tally — one API message streams as several records that
+    # repeat the same usage, so it is counted once by message.id.
+    effort = None
+    last_usage_ts = None
+    cache_ttl = None
+    cache_seen = {}
 
     for r in records:
         t = r.get("type")
@@ -1910,8 +1920,19 @@ def build_session(sid: str):
 
         if t == "assistant":
             model = msg.get("model") or model
+            effort = r.get("effort") or effort
             if isinstance(msg.get("usage"), dict):
                 usage = msg["usage"]
+                last_usage_ts = ts or last_usage_ts
+                cc = usage.get("cache_creation")
+                if isinstance(cc, dict):
+                    if (cc.get("ephemeral_1h_input_tokens") or 0) > 0:
+                        cache_ttl = "1h"
+                    elif (cc.get("ephemeral_5m_input_tokens") or 0) > 0:
+                        cache_ttl = "5m"
+                mid = msg.get("id")
+                if mid:
+                    cache_seen[mid] = (usage.get("cache_read_input_tokens") or 0) > 0
             text_parts, other_tools = [], []
             blocks = content if isinstance(content, list) else (
                 [{"type": "text", "text": content}] if content else [])
@@ -2069,6 +2090,17 @@ def build_session(sid: str):
         "project": str(path.parent.name),
         "cwd": cwd, "branch": branch, "title": title.strip(),
         "model": model, "ctx_tokens": ctx_tokens,
+        # status-line detail (see the loop): last turn's usage split, the
+        # cache TTL tier + last-usage timestamp (expiry = ts + ttl), the
+        # per-message hit tally, and the effort level. Every key nullable.
+        "effort": effort,
+        "usage": ({"input": usage.get("input_tokens") or 0,
+                   "cache_read": usage.get("cache_read_input_tokens") or 0,
+                   "cache_creation": usage.get("cache_creation_input_tokens") or 0,
+                   "output": usage.get("output_tokens") or 0} if usage else None),
+        "cache": {"ttl": cache_ttl, "last_ts": last_usage_ts,
+                  "hits": sum(1 for v in cache_seen.values() if v),
+                  "requests": len(cache_seen)},
         "state": _state_v,
         "sub_working": _sub_working,
         "mtime_age_s": round(mtime_age),

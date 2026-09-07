@@ -4669,6 +4669,10 @@ function writtenList(writes){
   writes.forEach(e=>{
     const refs = (e.refs && e.refs.length) ? e.refs
                : [{app:e.app, path:e.path, etype:e.etype, op:e.op}];
+    // An import's validation error names the ONE entry it refused (the server
+    // marks that ref `failed`); the rest of the batch landed. Only an error
+    // no ref owns — a whole-call refusal, a transport error — is every ref's.
+    const attributed = refs.some(r=>r.failed);
     refs.forEach(r=>{
       const op = r.op || e.op || "wrote";
       // A pathless row (a staged-file import) is keyed by tool+note so two
@@ -4680,7 +4684,8 @@ function writtenList(writes){
                                 n:0, dry:0, real:0, err:0, error:null};
       g.n++;
       if(e.dry_run) g.dry++; else g.real++;
-      if(e.is_error){ g.err++; if(!g.error) g.error = e.error; }
+      const failed = attributed ? !!r.failed : !!e.is_error;
+      if(failed){ g.err++; if(!g.error) g.error = r.error || e.error; }
       if(!g.note && e.note) g.note = e.note;
       seen.set(k, g);
     });

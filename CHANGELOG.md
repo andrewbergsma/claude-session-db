@@ -19,6 +19,29 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.5] - 2026-09-07
+
+### Added
+
+- **Console sidebar — the session id's first section on every row.** The
+  8-hex handle (`f682a93d`) sits at the top-right of the title line, in the
+  muted mono the meta line uses; the title ellipsizes before the id is ever
+  pushed off. Hover shows the full id, a click copies it. (3.24.4 is the CR
+  injection-label fix, on its own branch at the time of this cut.)
+- **Console — a status line under the composer**, the two rows Claude Code
+  prints under its own prompt, from the transcript: model · directory ·
+  ⎇ branch, then `105k (104k cached · exp 07:59 · 96% hit) / 1000k high
+  (session id)`. `/api/session` now carries `effort`, the last turn's `usage`
+  split and a `cache` block (TTL tier from `usage.cache_creation`, last-usage
+  timestamp, per-message hit tally). The window is inferred from the model id
+  (the transcript never records it) and says so in the tooltip.
+
+### Fixed
+
+- **Console — chat text matches the rest of the app.** Turn prose was 13.5px
+  against 12.5px sidebar titles and rail body; it is 12.5px now (inline and
+  fenced code 11.5px).
+
 ## [3.24.3] - 2026-09-07
 
 ### Fixed

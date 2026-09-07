@@ -19,6 +19,23 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.1] - 2026-09-07
+
+### Fixed
+
+- **Console sidebar — a search ignores the repo pill.** Typing in the search
+  box now suspends the selected project pill: the list, the per-pill hit
+  counts and the "all" highlight behave as if no pill were selected, and the
+  persisted choice returns the moment the query is cleared. Pasting a session
+  id with another repo's pill selected used to answer *no sessions match … in
+  this repo* (`activePill`).
+
+### Changed
+
+- **Console sidebar — repo pills lay out as a grid.** The pill strip is a
+  CSS grid (auto-fill columns at ~150px, aligned rows) instead of a ragged
+  wrap; labels ellipsize inside their cell and the count sits flush right.
+
 ## [3.24.0] - 2026-09-02
 
 The **code-defect batch** — schema **v10**. An adversarial review of the live

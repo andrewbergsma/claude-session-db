@@ -184,14 +184,17 @@
              display:grid; place-items:center; border:1.5px solid var(--surface); }
 
   /* repo pills: one per project (a project IS a repo here), each with its
-     session count; the selected pill filters the list below. Wraps, and
-     scrolls inside the sticky top once it outgrows ~4 rows. */
-  .pills { display:flex; flex-wrap:wrap; gap:5px; margin-top:8px; max-height:98px; overflow-y:auto;
-           scrollbar-gutter:stable; }
+     session count; the selected pill filters the list below. A GRID, not a
+     wrap — pills line up in columns (as many as fit at ~150px) and rows, so
+     the eye scans a column instead of hunting through a ragged flow; the
+     label ellipsizes inside its cell and the count sits flush right. Scrolls
+     inside the sticky top once it outgrows ~4 rows. */
+  .pills { display:grid; grid-template-columns:repeat(auto-fill, minmax(150px, 1fr)); gap:4px 5px;
+           margin-top:8px; max-height:98px; overflow-y:auto; scrollbar-gutter:stable; }
   .pill { cursor:pointer; padding:1px 8px; border:1px solid var(--border); border-radius:10px;
           color:var(--ink2); font:11px var(--mono); white-space:nowrap; user-select:none;
-          display:inline-flex; align-items:center; gap:5px; max-width:100%; min-width:0; }
-  .pill .pl { overflow:hidden; text-overflow:ellipsis; min-width:0; }
+          display:flex; align-items:center; gap:5px; min-width:0; }
+  .pill .pl { overflow:hidden; text-overflow:ellipsis; min-width:0; flex:1; }
   .pill b { font-weight:600; color:var(--muted); flex:none; }
   .pill .pw { color:var(--warn); font-weight:600; flex:none; font-size:9px; }  /* ● waiting-for-you count */
   .pill:hover { color:var(--ink); }
@@ -2157,9 +2160,14 @@ function navSearched(list){
 }
 /* the pill that is actually in effect: the persisted choice, unless the
    current tab's set has no such project — then "all", without clearing the
-   choice (it comes back when its sessions do) */
+   choice (it comes back when its sessions do). A SEARCH also suspends it:
+   a query is a question about every session, not about one repo, so while
+   the box is non-empty the list, the pill counts and the "all" highlight all
+   behave as if no pill were selected; clear the query and the choice is
+   back. (Pasting a session id and seeing "no sessions match … in this repo"
+   was the bug this prevents.) */
 function activePill(d){
-  if(!navOpenProj) return null;
+  if(!navOpenProj || navQuery.trim()) return null;
   return tabSessions(d).some(s => projKey(s)===navOpenProj) ? navOpenProj : null;
 }
 function selectPill(key){
@@ -2269,8 +2277,9 @@ function sessionTable(list, showProject){
 }
 
 /* ONE list for both tabs: the tab's set, narrowed by the search, then by the
-   selected pill. Grouping is gone — the pills are the project axis — so the
-   project name rides the meta line only while "all" is in effect. */
+   selected pill (which a non-empty search suspends — see activePill).
+   Grouping is gone — the pills are the project axis — so the project name
+   rides the meta line only while "all" is in effect. */
 function navVisible(d){
   const sel = activePill(d);
   return navSearched(tabSessions(d)).filter(s => !sel || projKey(s)===sel);

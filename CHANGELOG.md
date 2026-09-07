@@ -19,6 +19,17 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.2] - 2026-09-07
+
+### Added
+
+- **Console sidebar — the branch on every row.** Line 3 of a session row now
+  opens with `⎇ <branch>` at the lower left (the transcript's `gitBranch`,
+  which `/api/sessions` already carried), ahead of the project label and the
+  action strip. A tap opens the repos overlay for that session's repo focused
+  on the branch — the same jump as the chat header's `⎇` chip — without
+  loading the chat (`openRepoFor` takes an optional session id).
+
 ## [3.24.1] - 2026-09-07
 
 ### Fixed

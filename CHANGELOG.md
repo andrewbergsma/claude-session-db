@@ -19,6 +19,23 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.4] - 2026-09-07
+
+### Fixed
+
+- **CR — the injection rows say what they are.** The group once called
+  *skill injections* holds every non-prompt user-role record — skill bodies,
+  background-task notifications, cross-session messages, slash-command
+  wrappers, inline `!` runs, system-reminders — and labelled each by its
+  first 60 raw characters, so the list read as angle-bracket soup
+  (`<task-notification> <task-id>aad5d4b…`). `cr.injection_label` now
+  classifies by prefix and scrapes the informative tag: `skill
+  /session-summary`, `task-notification completed · Agent "…" finished`,
+  `cross-session from docingest-b2 · …`, `command /compact …`,
+  `local-command stdout · Compacted …`. The stub breadcrumb carries the same
+  label (`[CR: injected skill /session-summary — 44K elided]`) so the fork
+  knows what was elided, and the group is renamed *injected context*.
+
 ## [3.24.3] - 2026-09-07
 
 ### Fixed

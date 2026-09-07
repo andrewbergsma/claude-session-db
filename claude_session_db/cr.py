@@ -69,6 +69,7 @@ estimate is stated, never swallowed.
 import base64
 import hashlib
 import json
+import os
 import re
 import uuid as uuidlib
 from datetime import datetime, timezone
@@ -125,6 +126,72 @@ def _is_real_prompt(r, text) -> bool:
     if t.startswith("<") and "system-reminder" in t[:80]:
         return False
     return True
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]|\[\d+m")
+
+
+def _tag(text: str, name: str) -> str:
+    """Inner text of the first <name …>…</name> element, or ''."""
+    m = re.search(rf"<{name}(?:\s[^>]*)?>(.*?)</{name}>", text, re.S)
+    return m.group(1).strip() if m else ""
+
+
+def _first_line(s: str, n: int = 70) -> str:
+    s = _ANSI_RE.sub("", s or "").strip()
+    line = s.splitlines()[0].strip() if s else ""
+    return line if len(line) <= n else line[: n - 1] + "…"
+
+
+def injection_label(text: str) -> tuple:
+    """(name, hint) for an injected user-role record — what it IS, not its
+    first 60 raw characters.
+
+    The `injection` group is every user-role record that is not a prompt: a
+    skill body (`Base directory for this skill: …`), a background-task
+    notification, a cross-session message, a slash-command wrapper, an inline
+    `!` shell run, a system-reminder. Labelled by its raw head they all read
+    as angle-bracket soup; labelled by what they are, the operator can tell
+    the 11K skill body from the 4K agent result without opening either.
+    Pure code — every branch is a fixed prefix + a tag scrape; anything
+    unrecognised degrades to its first line.
+    """
+    t = (text or "").lstrip()
+    if t.startswith("Base directory for this skill:"):
+        path = t.splitlines()[0].split(":", 1)[1].strip().rstrip("/")
+        return "skill", f"/{os.path.basename(path)}"
+    if t.startswith("<task-notification>"):
+        status, summ = _tag(t, "status") or "?", _tag(t, "summary")
+        return "task-notification", f"{status} · {_first_line(summ)}" if summ else status
+    if t.startswith("Another Claude session sent a message"):
+        m = re.search(r'from-name="([^"]*)"', t)
+        body = _tag(t, "cross-session-message")
+        if not body:                       # unclosed tag: text after the opener
+            o = re.search(r"<cross-session-message[^>]*>", t)
+            body = t[o.end():] if o else ""
+        who = m.group(1) if m else "?"
+        return "cross-session", f"from {who} · {_first_line(body)}"
+    if t.startswith("<local-command-caveat>"):
+        return "local-command", "caveat"
+    if t.startswith("<local-command-stdout>"):
+        return "local-command", f"stdout · {_first_line(_tag(t, 'local-command-stdout'))}"
+    if t.startswith("<command-name>") or t.startswith("<command-message>"):
+        name = _tag(t, "command-name") or _tag(t, "command-message")
+        args = _tag(t, "command-args")
+        if name and not name.startswith("/"):
+            name = "/" + name
+        return "command", f"{name} {_first_line(args, 50)}".strip()
+    if t.startswith("<bash-input>"):
+        return "bash", f"! {_first_line(_tag(t, 'bash-input'))}"
+    if t.startswith("<bash-stdout>") or t.startswith("<bash-stderr>"):
+        which = "stdout" if t.startswith("<bash-stdout>") else "stderr"
+        return "bash", f"{which} · {_first_line(_tag(t, 'bash-' + which))}"
+    if t.startswith("<") and "system-reminder" in t[:80]:
+        return "system-reminder", _first_line(_tag(t, "system-reminder"))
+    if t.startswith("[Image: source:"):     # isMeta caption(s) for pasted images
+        n = t.count("[Image: source:")
+        return "image-caption", f"{n} pasted image{'s' if n > 1 else ''}"
+    return None, _first_line(t, 60)
 
 
 def _text_of(content) -> str:
@@ -435,8 +502,9 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 if _is_real_prompt(r, txt):
                     row(f"u:{uid}", "prompt", txt_chars)
                 else:
-                    row(f"s:{uid}", "injection", txt_chars,
-                        hint=txt.lstrip()[:60], dg=_digest(txt))
+                    iname, ihint = injection_label(txt)
+                    row(f"s:{uid}", "injection", txt_chars, name=iname,
+                        hint=ihint, dg=_digest(txt))
 
     groups: dict = {}
     for rw in rows:
@@ -497,7 +565,8 @@ def _breadcrumb(row) -> str:
         label = f"{row.get('name') or 'tool'} input" + \
             (f" {hint}" if hint else "")
     elif row["kind"] == "injection":
-        label = "injected context"
+        what = " ".join(x for x in (row.get("name"), row.get("hint")) if x)
+        label = f"injected {what}" if row.get("name") else "injected context"
     elif row["kind"] == "narration":
         label = "assistant narration"
     else:

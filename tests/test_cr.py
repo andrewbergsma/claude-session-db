@@ -164,7 +164,7 @@ def test_stub_both_copies_no_extra_block_keys():
     assert set(block) == {"type", "tool_use_id", "content"}
 
     s1 = next(r for r in recs if r.get("uuid") == "s1")
-    assert s1["message"]["content"].startswith("[CR: injected context — ")
+    assert s1["message"]["content"].startswith("[CR: injected command /session-summary — ")
 
     a1 = next(r for r in recs if r.get("uuid") == "a1")
     blocks = a1["message"]["content"]
@@ -483,3 +483,36 @@ def test_forge_fork_with_tool_use_and_image_stays_well_formed(tmp_path):
     assert list(uses["t9"]["input"]) == ["_cr_elided"]
     assert res["before_tokens"] > res["after_tokens"] > 0
     assert res["after_tokens"] == cr.surface_tokens(out)
+
+
+# ---- injection labels -------------------------------------------------------
+def test_injection_label_by_kind():
+    L = cr.injection_label
+    assert L("Base directory for this skill: /Users/x/.claude/skills/session-summary\n\n# Body") \
+        == ("skill", "/session-summary")
+    assert L("<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n"
+             "<summary>Agent \"Read up docingest\" finished</summary>\n<result>…</result>") \
+        == ("task-notification", "completed · Agent \"Read up docingest\" finished")
+    assert L("Another Claude session sent a message:\n<cross-session-message from=\"uds:/x\" "
+             "from-name=\"docingest-b2\" from-mode=\"bypass\">\nTerritory note: hands off\nmore") \
+        == ("cross-session", "from docingest-b2 · Territory note: hands off")
+    assert L("<local-command-caveat>Caveat: …</local-command-caveat>") == ("local-command", "caveat")
+    assert L("<local-command-stdout>\x1b[2mCompacted (ctrl+o)\x1b[0m\nmore</local-command-stdout>") \
+        == ("local-command", "stdout · Compacted (ctrl+o)")
+    assert L("<command-name>/compact</command-name>\n<command-message>compact</command-message>\n"
+             "<command-args>focus on x</command-args>") == ("command", "/compact focus on x")
+    assert L("<command-message>session-summary</command-message><command-args></command-args>") \
+        == ("command", "/session-summary")
+    assert L("<bash-input>csd angles</bash-input>") == ("bash", "! csd angles")
+    assert L("<system-reminder>\nThe file was modified.\n</system-reminder>") \
+        == ("system-reminder", "The file was modified.")
+    assert L("[Image: source: /a.png][Image: source: /b.png]") == ("image-caption", "2 pasted images")
+    assert L("something else entirely\nline 2") == (None, "something else entirely")
+
+
+def test_injection_row_carries_label_and_breadcrumb():
+    m = cr.build_manifest(_transcript())
+    by = {r["id"]: r for r in m["rows"]}
+    assert by["s:s1"]["name"] == "command"
+    assert by["s:s1"]["hint"] == "/session-summary"
+    assert cr._breadcrumb(by["s:s1"]).startswith("[CR: injected command /session-summary —")

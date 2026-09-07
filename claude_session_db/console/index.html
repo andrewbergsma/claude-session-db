@@ -224,6 +224,13 @@
   .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; min-width:0; }
   .ctitle .ttxt { flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tmark { color:var(--muted); font-size:9px; }
+  /* the session id's first section, top-right of the row: the 8-hex handle
+     the console, `csd digest` and the archive all accept as a prefix; the
+     title flexes and ellipsizes so the id is never pushed off. Click copies
+     the FULL id. */
+  .ctitle .sid { flex:none; margin-left:auto; font:10.5px var(--mono); color:var(--muted);
+                 letter-spacing:.2px; cursor:copy; }
+  .ctitle .sid:hover { color:var(--ink); }
   /* line 3: the row's action strip, right-aligned. Every action is one
      .rbtn in this flex row — a new button is one more span appended in
      sessRow(); the strip wraps before anything truncates. */
@@ -361,7 +368,9 @@
   .qcancel:hover { color:var(--bad); }
   .qerr { color:var(--bad); font-size:11.5px; margin-top:6px; }
   .turn.assistant .who { color:var(--ink2); }
-  .txt { white-space:pre-wrap; word-break:break-word; font-size:13.5px; }
+  /* 12.5px — the same size as a sidebar title and the rail's body text, so
+     the chat is not the one pane set a size larger than everything around it */
+  .txt { white-space:pre-wrap; word-break:break-word; font-size:12.5px; }
   .turn.assistant .txt { color:var(--ink); }
   /* --- markdown-rendered turn text (mdLite) --------------------------------
      .md drops pre-wrap: the renderer emits the block structure, so the raw
@@ -383,14 +392,14 @@
   .txt.md h1 { font-size:14px; }
   .txt.md h3, .txt.md h4 { font-size:10.5px; color:var(--md-subhead);
       text-transform:uppercase; letter-spacing:.6px; }
-  .txt.md code { font:12px var(--mono); background:var(--surface2);
+  .txt.md code { font:11.5px var(--mono); background:var(--surface2);
       border:1px solid var(--border); border-radius:4px; padding:0 4px;
       color:var(--md-code); }
   .txt.md pre { background:var(--surface2); border:1px solid var(--border);
       border-radius:6px; padding:8px 10px; margin:6px 0 8px;
       max-width:100%; overflow-x:auto; }
   .txt.md pre > code { display:block; white-space:pre; word-break:normal;
-      font:12px/1.45 var(--mono); background:none; border:0; padding:0;
+      font:11.5px/1.45 var(--mono); background:none; border:0; padding:0;
       color:var(--ink); }
   .txt.md pre > code .c { color:var(--md-comment); font-style:italic; }
   .txt.md pre[data-lang]::before { content:attr(data-lang); display:block;
@@ -519,6 +528,22 @@
                     background:var(--surface2); color:var(--ink); }
   #compose button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   #compose button:disabled { opacity:.4; cursor:not-allowed; }
+  /* composer foot — the status line Claude Code prints under its own prompt,
+     from the same data: row 1 model · dir · ⎇ branch, row 2 context budget
+     (cached · exp · hit%) / window, effort, (session id). Colors follow the
+     statusline script: green <75% of the window, amber <90%, red past;
+     expiry green while >60s remain, amber inside, red once lapsed. */
+  #cfoot { display:none; padding:0 20px 10px; background:var(--surface);
+           font:11px/1.5 var(--mono); color:var(--muted); white-space:nowrap; overflow:hidden; }
+  #cfoot.on { display:block; }
+  #cfoot .r { display:flex; gap:14px; min-width:0; }
+  #cfoot .r > span { flex:none; overflow:hidden; text-overflow:ellipsis; }
+  #cfoot .r > .dir { flex:0 1 auto; min-width:0; }
+  #cfoot .br { color:var(--purple); cursor:pointer; }
+  #cfoot .br:hover { text-decoration:underline; }
+  #cfoot .ok { color:var(--good); }  #cfoot .warn { color:var(--warn); }  #cfoot .bad { color:var(--bad); }
+  #cfoot .dim { color:var(--muted); }
+  #cfoot .sid { cursor:copy; }  #cfoot .sid:hover { color:var(--ink); }
   #cstatus { color:var(--muted); font:11px var(--mono); padding:0 20px 10px;
              min-height:14px; background:var(--surface); }
   #cstatus.ok { color:var(--good); }
@@ -1501,6 +1526,7 @@
       <button id="bcr" disabled onclick="toggleCR()"
         title="CR — context reduction: fork with curation. Pick which context survives (keep / stub / → ref), compile kmcp refs into a preamble, and write a NEW reduced session file. The original is never touched.">CR</button>
     </div>
+    <div id="cfoot"></div>
   </main>
 
   <aside id="rail">
@@ -2089,6 +2115,13 @@ function cyclePrio(e, id){
   post("/api/priority", {session_id:id, priority: nxt==="normal" ? null : nxt});
 }
 
+/* copy a row's full session id (the chip shows only its first section) */
+function copySid(e, id){
+  e.stopPropagation();
+  const done = () => toast(`copied ${id}`);
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done, () => toast("copy failed", true));
+  else toast(id);
+}
 /* inline title editing */
 function startTitleEdit(e, id){ e.stopPropagation(); navEditing = id; renderNav(); }
 function titleKey(e, id){
@@ -2261,10 +2294,13 @@ function sessRow(s, showProject){
   const abr = s.branch
     ? `<span class="abr" title="branch: ${esc(s.branch)} — open this repo focused on it" onclick="event.stopPropagation();openRepoFor('${esc(s.branch)}','${id}')">⎇ ${esc(s.branch)}</span>` : "";
   const acts = `<div class="acts">${abr}${aproj}${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
+  // The id's first section, top-right: a child key (<parent>:<agent>) shows the
+  // parent's section — it IS the file the child lives in. Click copies the whole id.
+  const sid = `<span class="sid" title="session id ${esc(id)} — click to copy" onclick="copySid(event,'${esc(id)}')">${esc(id.slice(0,8))}</span>`;
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div><div class="m">${meta}</div></div>`
     : `<div class="ctitle">
-         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span></div>
+         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span>${sid}</div>
          <div class="m">${meta}</div>${snip}${acts}
        </div>`;
   /* batch mode: the row toggles selection instead of opening, and the state
@@ -2591,7 +2627,7 @@ async function refreshSession(scrollBottom, force){
   if(s.error) return;
   sessETag = r.headers.get("ETag"); sessETagFor = curId;
   curSession = s;
-  renderHeader(s); renderStream(s); renderAngles(s); renderContext(s);
+  renderHeader(s); renderFoot(s); renderStream(s); renderAngles(s); renderContext(s);
   renderWrites(s); renderSummary(s); maybeLoadGit(false);
   // Files never piggybacks the poll loops — only a session SWITCH while the
   // tab is showing needs a fresh root listing.
@@ -2723,6 +2759,66 @@ function summaryStateChip(s){
       title="${esc(sumChipTip(su, false))}">Σ ${esc(sumStateText(su))}</span>`;
 }
 
+/* ---------- composer foot: the Claude Code status line, from the transcript ----------
+   Model display name from the id (claude-fable-5-1 → Fable 5.1); the window is
+   INFERRED (the transcript never records context_window_size): 1M for a
+   [1m]-tagged or Claude 5-family id, else 200k, and never smaller than what
+   the session already carries. Everything else is measured: context = the
+   last turn's input+cache_read+cache_creation (Claude Code's own basis),
+   cached = its cache_read, expiry = last usage ts + the TTL tier the last
+   cache write used, hit% = messages with a cache read / messages. Each
+   segment degrades on its own; nothing here blanks the row. */
+function modelName(id){
+  if(!id) return "";
+  const parts = id.replace(/^claude-/,"").replace(/\[1m\]/i,"").split("-").filter(Boolean);
+  const words = [], nums = [];
+  for(const p of parts){ if(/^\d+$/.test(p)) nums.push(p); else if(!/^\d{8}$/.test(p)) words.push(p[0].toUpperCase()+p.slice(1)); }
+  return (words.join(" ") + (nums.length ? " " + nums.join(".") : "")).trim();
+}
+function ctxWindow(s){
+  const id = (s.model||"").toLowerCase();
+  let w = (/\[1m\]|1m|fable|opus-5|sonnet-5/.test(id)) ? 1000000 : 200000;
+  if((s.ctx_tokens||0) > w) w = 1000000;
+  return w;
+}
+function homeDir(p){
+  if(!p) return "";
+  const m = p.match(/^\/Users\/[^/]+(\/.*)?$/);
+  return m ? "~" + (m[1]||"") : p;
+}
+function renderFoot(s){
+  const el = document.getElementById("cfoot"); if(!el) return;
+  if(!s){ el.className = ""; el.innerHTML = ""; return; }
+  const k = n => Math.round(n/1000) + "k";
+  const win = ctxWindow(s), tot = s.ctx_tokens;
+  const r1 = [];
+  if(s.model) r1.push(`<span class="dim" title="${esc(s.model)}">${esc(modelName(s.model))}</span>`);
+  if(s.cwd)   r1.push(`<span class="dim dir" title="${esc(s.cwd)}">${esc(homeDir(s.cwd))}</span>`);
+  if(s.branch) r1.push(`<span class="br" title="branch ${esc(s.branch)} — open this repo focused on it" onclick="openRepoFor('${esc(s.branch)}')">⎇ ${esc(s.branch)}</span>`);
+  let r2 = "";
+  if(tot != null){
+    const pct = win ? tot*100/win : 0;
+    const cls = pct < 75 ? "ok" : pct < 90 ? "warn" : "bad";
+    const bits = [];
+    const u = s.usage || {}, c = s.cache || {};
+    if(u.cache_read > 0) bits.push(`${k(u.cache_read)} cached`);
+    if(c.ttl && c.last_ts){
+      const ttl = c.ttl === "1h" ? 3600 : 300;
+      const exp = Date.parse(c.last_ts)/1000 + ttl, remain = exp - Date.now()/1000;
+      const ec = remain <= 0 ? "bad" : remain <= 60 ? "warn" : "ok";
+      const clock = new Date(exp*1000).toLocaleTimeString([], {hour:"2-digit", minute:"2-digit", hour12:false});
+      bits.push(`<span class="${ec}" title="prompt cache (${esc(c.ttl)} tier) ${remain<=0?"lapsed":"expires"} ${clock} — last cache use + ${esc(c.ttl)}">${remain<=0?"cold":"exp "+clock}</span>`);
+    }
+    if(c.requests > 0) bits.push(`<span title="${c.hits} of ${c.requests} API messages read from the cache">${Math.round(c.hits*100/c.requests)}% hit</span>`);
+    r2 = `<span class="${cls}" title="context carried into the last turn: input + cache reads + cache writes = ${tot.toLocaleString()} tokens, ${pct.toFixed(1)}% of a ${k(win)} window (window inferred from the model id)">${k(tot)}${bits.length?` (${bits.join(" · ")})`:""} / ${k(win)}</span>`;
+  } else {
+    r2 = `<span class="dim" title="no usage recorded yet">—k / ${k(win)}</span>`;
+  }
+  if(s.effort) r2 += `<span class="dim" title="effort level of the last agent turn">${esc(s.effort)}</span>`;
+  r2 += `<span class="dim sid" title="session id — click to copy" onclick="copySid(event,'${esc(s.session_id)}')">(${esc(s.session_id)})</span>`;
+  el.className = "on";
+  el.innerHTML = `<div class="r">${r1.join("")}</div><div class="r">${r2}</div>`;
+}
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const dtitle = s.user_title || s.title;   // user-set title overrides derived

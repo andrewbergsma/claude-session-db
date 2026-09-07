@@ -19,6 +19,16 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.5] - 2026-09-07
+
+### Added
+
+- **Console sidebar — the session id's first section on every row.** The
+  8-hex handle (`f682a93d`) sits at the top-right of the title line, in the
+  muted mono the meta line uses; the title ellipsizes before the id is ever
+  pushed off. Hover shows the full id, a click copies it. (3.24.4 is the CR
+  injection-label fix, on its own branch at the time of this cut.)
+
 ## [3.24.3] - 2026-09-07
 
 ### Fixed

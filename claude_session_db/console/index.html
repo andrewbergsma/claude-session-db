@@ -224,6 +224,13 @@
   .ctitle .t { display:flex; align-items:center; gap:5px; font-size:12.5px; min-width:0; }
   .ctitle .ttxt { flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .tmark { color:var(--muted); font-size:9px; }
+  /* the session id's first section, top-right of the row: the 8-hex handle
+     the console, `csd digest` and the archive all accept as a prefix; the
+     title flexes and ellipsizes so the id is never pushed off. Click copies
+     the FULL id. */
+  .ctitle .sid { flex:none; margin-left:auto; font:10.5px var(--mono); color:var(--muted);
+                 letter-spacing:.2px; cursor:copy; }
+  .ctitle .sid:hover { color:var(--ink); }
   /* line 3: the row's action strip, right-aligned. Every action is one
      .rbtn in this flex row — a new button is one more span appended in
      sessRow(); the strip wraps before anything truncates. */
@@ -2089,6 +2096,13 @@ function cyclePrio(e, id){
   post("/api/priority", {session_id:id, priority: nxt==="normal" ? null : nxt});
 }
 
+/* copy a row's full session id (the chip shows only its first section) */
+function copySid(e, id){
+  e.stopPropagation();
+  const done = () => toast(`copied ${id}`);
+  if(navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(id).then(done, () => toast("copy failed", true));
+  else toast(id);
+}
 /* inline title editing */
 function startTitleEdit(e, id){ e.stopPropagation(); navEditing = id; renderNav(); }
 function titleKey(e, id){
@@ -2261,10 +2275,13 @@ function sessRow(s, showProject){
   const abr = s.branch
     ? `<span class="abr" title="branch: ${esc(s.branch)} — open this repo focused on it" onclick="event.stopPropagation();openRepoFor('${esc(s.branch)}','${id}')">⎇ ${esc(s.branch)}</span>` : "";
   const acts = `<div class="acts">${abr}${aproj}${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
+  // The id's first section, top-right: a child key (<parent>:<agent>) shows the
+  // parent's section — it IS the file the child lives in. Click copies the whole id.
+  const sid = `<span class="sid" title="session id ${esc(id)} — click to copy" onclick="copySid(event,'${esc(id)}')">${esc(id.slice(0,8))}</span>`;
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div><div class="m">${meta}</div></div>`
     : `<div class="ctitle">
-         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span></div>
+         <div class="t"><span class="ttxt${ghost?" tghost":""}" ${ghost?`title="proposed by the tl;dr — raw title: ${esc(s.title||"")}"`:""}>${esc(disp)}${mark}</span>${sid}</div>
          <div class="m">${meta}</div>${snip}${acts}
        </div>`;
   /* batch mode: the row toggles selection instead of opening, and the state

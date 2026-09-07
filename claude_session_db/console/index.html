@@ -233,6 +233,12 @@
   .ctitle .acts .aproj { flex:1 1 auto; min-width:0; margin-right:auto; overflow:hidden;
                          text-overflow:ellipsis; white-space:nowrap;
                          font:10.5px var(--mono); color:var(--muted); cursor:default; }
+  /* the branch sits first on line 3; it shrinks (ellipsis) before the buttons
+     do, and pushes the strip right on its own when no project label follows */
+  .ctitle .acts .abr { flex:0 1 auto; min-width:0; margin-right:auto; overflow:hidden;
+                       text-overflow:ellipsis; white-space:nowrap; cursor:pointer;
+                       font:10.5px var(--mono); color:var(--purple); }
+  .ctitle .acts .abr:hover { color:var(--ink); }
   .rbtn { cursor:pointer; color:var(--muted); font-size:11px; line-height:18px; min-width:18px;
           text-align:center; border-radius:4px; padding:0 3px; }
   .rbtn:hover { color:var(--ink); background:var(--surface2); }
@@ -2250,7 +2256,11 @@ function sessRow(s, showProject){
   const prioBtn = `<span class="rbtn prio ${p}" title="priority: ${p} — click to cycle" onclick="cyclePrio(event,'${id}')">${p==="normal"?"⚐":"⚑"}</span>`;
   const aproj = showProject
     ? `<span class="aproj" title="project: ${esc(s.project_label||s.project||"")}">${esc(s.project_label||s.project||"")}</span>` : "";
-  const acts = `<div class="acts">${aproj}${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
+  // The branch the transcript's last record was on (gitBranch) — lower left,
+  // always; a tap opens the repos overlay focused on it, like the header chip.
+  const abr = s.branch
+    ? `<span class="abr" title="branch: ${esc(s.branch)} — open this repo focused on it" onclick="event.stopPropagation();openRepoFor('${esc(s.branch)}','${id}')">⎇ ${esc(s.branch)}</span>` : "";
+  const acts = `<div class="acts">${abr}${aproj}${acc}${editBtn}${digestChips(s)}${prioBtn}</div>`;
   const titleCell = navEditing===id
     ? `<div class="ctitle"><div class="t"><input class="tedit" value="${esc(s.user_title||s.title||"")}" onclick="event.stopPropagation()" onkeydown="titleKey(event,'${id}')" onblur="commitTitle('${id}',this.value)"></div><div class="m">${meta}</div></div>`
     : `<div class="ctitle">
@@ -6059,13 +6069,16 @@ function repoSetGroupMode(ev, m){
   if(repoDetailData) renderRepoDetail(repoDetailData);
 }
 
-async function openRepoFor(branch){
-  if(!curId) return;
+/* sid defaults to the open session (the header chips); a sidebar row passes
+   its own id so the overlay opens for THAT session's repo without loading it */
+async function openRepoFor(branch, sid){
+  const id = sid || curId;
+  if(!id) return;
   repoFocusBranch = branch || null;
   if(!reposOpen){ reposOpen = true;
     document.getElementById("repos").classList.add("open"); ovOpen();
     refreshRepos(false); }
-  await loadRepoDetail(`/api/repo?id=${encodeURIComponent(curId)}`);
+  await loadRepoDetail(`/api/repo?id=${encodeURIComponent(id)}`);
 }
 
 async function openRepoDetail(root){

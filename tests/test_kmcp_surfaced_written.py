@@ -303,3 +303,124 @@ def test_bash_shim_admits_writes():
         {"command": "knowledge-cli call import_entries --application csd "
                     "--path design/x --dry-run"})
     assert base == "import_entries" and inp["dry_run"] is True
+
+
+# ---- a batch import's refs and its per-entry errors (3.24.3) ---------------
+# Real shape from session 8b371714 (2026-09-06): five documents, one of them a
+# task whose `references:` list cites eight OTHER entries by `path:`; the
+# dry-run refused entry 4 alone (`scope` must be array). Every row of the
+# Context tab read "1 failed" and eight phantom task rows appeared.
+BATCH_YAML = """application: docingest
+entity_type: knowledge
+path: charter
+title: "docingest — App Charter"
+description: >-
+  Cohesion contract.
+content:
+  see_also:
+    - path: "docingest:overview"
+    - path: "orchestration:pmo/registry"
+---
+application: docingest
+entity_type: event
+path: event/2026-09-06/charter-rulings
+title: "Charter rulings"
+---
+application: docingest
+entity_type: task
+path: task/curation/absorb-doc-ingest
+title: 'Absorb doc ingest'   # a comment
+content:
+  references:
+    - type: knowledge
+      path: "docingest:charter"
+    - type: knowledge
+      path: "knowledge_mcp:process/composing-entries-safely"
+"""
+
+BATCH_DRY_RESULT = json.dumps({
+    "created": [
+        {"entry": 1, "path": "charter", "entity_type": "knowledge",
+         "would_create": True, "would_update": False},
+        {"entry": 3, "path": "task/curation/absorb-doc-ingest",
+         "entity_type": "task", "would_create": True, "would_update": False}],
+    "skipped": [],
+    "errors": [{"entry": 2, "path": "event/2026-09-06/charter-rulings",
+                "error": "Content validation failed: Section 'scope' must be "
+                         "array, got str."}],
+    "dry_run": True,
+    "summary": {"total": 3, "created": 2, "skipped": 0, "errors": 1}})
+
+
+def test_yaml_scrape_takes_only_the_documents_own_keys():
+    docs = S._import_docs({"content": BATCH_YAML})
+    assert [(d["path"], d["etype"]) for d in docs] == [
+        ("charter", "knowledge"),
+        ("event/2026-09-06/charter-rulings", "event"),
+        ("task/curation/absorb-doc-ingest", "task")]
+    # a nested references[].path is a citation, never a declared entry
+    assert not any(":" in d["path"] for d in docs)
+    assert [d["title"] for d in docs] == [
+        "docingest — App Charter", "Charter rulings", "Absorb doc ingest"]
+
+
+def test_yaml_scrape_top_level_list_and_concatenated_docs():
+    lst = S._import_docs({"content":
+        "- application: a\n  path: p/1\n  entity_type: lesson\n"
+        "  content:\n    references:\n      - path: x:y\n"
+        "- application: a\n  path: p/2\n  entity_type: task\n"})
+    assert [(d["path"], d["etype"]) for d in lst] == [("p/1", "lesson"),
+                                                     ("p/2", "task")]
+    cat = S._import_docs({"content":
+        "application: a\npath: p/1\nentity_type: lesson\n"
+        "application: a\npath: p/2\nentity_type: task\n"})
+    assert [(d["path"], d["etype"]) for d in cat] == [("p/1", "lesson"),
+                                                     ("p/2", "task")]
+
+
+def test_parse_write_result_keeps_per_entry_error_attribution():
+    r = S._parse_write_result(BATCH_DRY_RESULT)
+    assert list(r["failed"]) == ["event/2026-09-06/charter-rulings"]
+    assert "must be array" in r["failed"]["event/2026-09-06/charter-rulings"]
+    assert len(r["errors"]) == 1        # the joined text is unchanged
+    # a string error names no entry — nothing is attributed
+    assert S._parse_write_result(json.dumps(
+        {"errors": ["boom"], "created": []}))["failed"] == {}
+
+
+def test_write_meta_marks_only_the_refused_entry():
+    wres = S._parse_write_result(BATCH_DRY_RESULT)
+    op, refs, _ = S._write_meta("import_entries", {"content": BATCH_YAML,
+                                                   "dry_run": True}, wres)
+    by = {r["path"]: r for r in refs}
+    assert set(by) == {"charter", "event/2026-09-06/charter-rulings",
+                       "task/curation/absorb-doc-ingest"}
+    assert by["event/2026-09-06/charter-rulings"]["failed"] is True
+    assert "must be array" in by["event/2026-09-06/charter-rulings"]["error"]
+    assert "failed" not in by["charter"]
+    assert "failed" not in by["task/curation/absorb-doc-ingest"]
+    # a refused path the input scrape could not read still gets its row
+    _, refs2, _ = S._write_meta("import_entries", {"content": "«»"}, wres)
+    bad = [r for r in refs2 if r.get("failed")]
+    assert [r["path"] for r in bad] == ["event/2026-09-06/charter-rulings"]
+
+
+def test_run_writes_charges_an_attributed_error_to_its_entry_only(monkeypatch):
+    wres = S._parse_write_result(BATCH_DRY_RESULT)
+    _, refs, _ = S._write_meta("import_entries", {"content": BATCH_YAML,
+                                                  "dry_run": True}, wres)
+    ev = {"kind": "write", "tool": "import_entries", "dry_run": True,
+          "is_error": True, "error": "; ".join(wres["errors"]), "refs": refs,
+          "ts": "2026-09-06T10:00:00Z"}
+    monkeypatch.setattr(S, "build_session", lambda sid: {"events": [ev]})
+    rows = {r["path"]: r for r in S._run_writes("s1", [])}
+    assert rows["event/2026-09-06/charter-rulings"]["verdict"] == "error"
+    assert rows["charter"]["verdict"] == "dry-run"
+    assert rows["task/curation/absorb-doc-ingest"]["verdict"] == "dry-run"
+    assert rows["charter"]["error"] is None
+    # an UNattributed error (no ref marked) is still the whole call's
+    ev2 = {**ev, "refs": [{k: v for k, v in r.items()
+                            if k not in ("failed", "error")} for r in refs],
+           "error": "connection refused"}
+    monkeypatch.setattr(S, "build_session", lambda sid: {"events": [ev2]})
+    assert {r["verdict"] for r in S._run_writes("s1", [])} == {"error"}

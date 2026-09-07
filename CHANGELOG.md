@@ -19,6 +19,29 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.24.3] - 2026-09-07
+
+### Fixed
+
+- **Context tab — a batch import's one refused entry no longer fails every
+  row.** `import_entries` reports a validation error per entry
+  (`{entry, path, error}`); the extractor now keeps that attribution
+  (`_parse_write_result` → `failed`, marked on the ref in `_write_meta`) and
+  both consumers — the Context tab's written list and the Summary tab's
+  `_run_writes` — charge an attributed error to its entry alone. An error no
+  ref owns (a whole-call refusal, a transport error) is still every ref's.
+  A five-document import whose dry run refused entry 4 over a bad `scope`
+  section used to read *1 failed* on all five rows, including the four that
+  landed.
+- **Context tab — nested `path:` lines are citations, not entries.** The
+  parser-free YAML scrape read every `path:` at any depth, so a task's
+  `references[]` and a charter's `see_also` list became phantom *created*
+  rows (`docingest:charter`, `orchestration:pmo/registry`, …) wearing the
+  LAST `entity_type` in the file. `_yaml_docs` now splits on `---`, fixes the
+  key indent from each document's first own key, ignores deeper keys, yields
+  one document per top-level list item, and reads `entity_type` per
+  document. Five documents now yield five refs, not twenty.
+
 ## [3.24.2] - 2026-09-07
 
 ### Added

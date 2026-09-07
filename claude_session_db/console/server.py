@@ -872,6 +872,55 @@ def _read_meta(base, inp):
     return "full", None
 
 
+_YAML_DOC_KEY_RE = re.compile(
+    r'^(\s*)(- )?"?(application|path|entity_type|title)"?\s*:\s*(.*)$')
+
+
+def _yaml_scalar(v):
+    """The value of a `key: value` line as a row needs it: quotes stripped, a
+    trailing comment dropped, a block-scalar marker (`>-`, `|`) read as none."""
+    v = (v or "").strip()
+    if not v or v[0] in "|>":
+        return None
+    if v[0] in "\"'":
+        end = v.find(v[0], 1)
+        return v[1:end] if end > 0 else v[1:]
+    return v.split(" #", 1)[0].strip() or None
+
+
+def _yaml_docs(raw):
+    """Entry refs scraped out of a YAML import document WITHOUT a YAML parser
+    (a lens must not fail because a document body confuses a full loader).
+
+    Only the DOCUMENT's own keys count: the first `application`/`path`/
+    `entity_type`/`title` line of a `---`-separated document fixes the key
+    indent, and every deeper `path:` — a `references[].path`, a task's
+    `scope`, a `see_also` list — is a citation, not an entry. Scraping every
+    `path:` at any depth used to turn a task's reference list into a dozen
+    phantom "created" rows wearing the last `entity_type` in the file. A
+    top-level list (`- application: …`) yields one document per item, and a
+    repeated key at the document indent (two documents concatenated without
+    `---`) starts a new document rather than clobbering the first."""
+    docs = []
+    for chunk in re.split(r'^---\s*$', raw, flags=re.M):
+        cur, base = None, None
+        for line in chunk.splitlines():
+            m = _YAML_DOC_KEY_RE.match(line)
+            if not m:
+                continue
+            indent = len(m.group(1)) + (2 if m.group(2) else 0)
+            if base is None:
+                base = indent
+            if indent != base:
+                continue
+            key = m.group(3)
+            if cur is None or m.group(2) or key in cur:
+                cur = {}
+                docs.append(cur)
+            cur[key] = _yaml_scalar(m.group(4))
+    return [d for d in docs if d.get("path")]
+
+
 def _import_docs(inp):
     """Entry refs declared by an import_entries / import_lessons input.
 
@@ -903,19 +952,7 @@ def _import_docs(inp):
         elif isinstance(obj, list):
             docs += [d for d in obj if isinstance(d, dict)]
         else:
-            # YAML (the documented form): scrape only the scalars a row needs.
-            # No YAML parser is imported for this — a lens must not fail
-            # because a document body confuses a full loader.
-            app = re.search(r'^\s*-?\s*"?application"?\s*:\s*"?([\w.\-]+)',
-                            raw, re.M)
-            et = dict(re.findall(
-                r'^\s*-?\s*"?(path|entity_type)"?\s*:\s*"?([^"\'\n,}]+)',
-                raw, re.M))
-            for m in re.finditer(r'^\s*-?\s*"?path"?\s*:\s*"?([^"\'\n,}]+)',
-                                 raw, re.M):
-                docs.append({"application": app.group(1) if app else None,
-                             "path": m.group(1).strip(),
-                             "entity_type": et.get("entity_type")})
+            docs += _yaml_docs(raw)
     out, seen = [], set()
     for d in docs:
         p = d.get("path")
@@ -970,9 +1007,17 @@ def _parse_write_result(text):
                                             or key == "updated")})
         return out
 
-    errs = []
+    errs, failed = [], {}
     _e = d.get("errors")
     for e in (_e if isinstance(_e, list) else ([_e] if isinstance(_e, str) else [])):
+        if isinstance(e, dict) and isinstance(e.get("path"), str) and e["path"]:
+            # An import's validation error names the ONE entry it refused
+            # ({entry, path, error}); the four beside it in the batch landed
+            # (or would have). Keep that attribution — charging the whole
+            # batch with it is how every row of a five-document import came
+            # to read "1 failed" over a single entry's bad section.
+            failed[e["path"]] = str(e.get("error") or e.get("message")
+                                    or json.dumps(e, default=str))[:300]
         errs.append(e if isinstance(e, str) else json.dumps(e, default=str)[:300])
     # A REFUSED write ("Missing input", "Import path not allowed") comes back
     # as {error, message} with is_error unset — the tool answered, it just did
@@ -981,7 +1026,7 @@ def _parse_write_result(text):
         errs.append(" — ".join(str(d[k]) for k in ("error", "message")
                                if d.get(k))[:300])
     return {"created": refs("created"), "updated": refs("updated"),
-            "skipped": refs("skipped"), "errors": errs,
+            "skipped": refs("skipped"), "errors": errs, "failed": failed,
             "dry_run": bool(d.get("dry_run")), "summary": d.get("summary")}
 
 
@@ -1014,6 +1059,20 @@ def _write_meta(base, inp, wres):
             if d["path"] not in seen:
                 landed.append({**{k: d[k] for k in ("app", "path", "etype")},
                                "op": op})
+                seen.add(d["path"])
+        # A per-entry refusal rides on ITS ref only (`failed` + the reason);
+        # a refused path the input scrape missed still gets a row. A refusal
+        # with no path (a whole-call error) marks nothing here — the event's
+        # is_error carries it, and the consumer charges every ref.
+        failed = (wres or {}).get("failed") or {}
+        for r in landed:
+            if r["path"] in failed:
+                r["failed"], r["error"] = True, failed[r["path"]]
+        for path, why in failed.items():
+            if path not in seen:
+                landed.append({"app": (declared[0]["app"] if declared else None),
+                               "path": path, "etype": _etype_hint(path),
+                               "op": op, "failed": True, "error": why})
         # A staged-file import declares no refs at all — the row identifies as
         # the file, and `path` stays None so it never links into /browse as if
         # a filesystem path were an entry path.
@@ -3685,16 +3744,21 @@ def _run_writes(sid: str, warnings: list) -> list:
             continue
         refs = e.get("refs") or [{"app": e.get("app"), "path": e.get("path"),
                                   "etype": e.get("etype"), "op": "wrote"}]
+        # An error the result attributed to specific entries is theirs alone;
+        # an unattributed one (is_error with no ref marked) is the whole call's.
+        attributed = any(r.get("failed") for r in refs)
         for r in refs:
             if not r.get("path"):
                 continue          # a staged-file import names no entry
-            verdict = (_classify_error(e.get("error")) if e.get("is_error") else
+            failed = r.get("failed") if attributed else bool(e.get("is_error"))
+            err = r.get("error") or e.get("error")
+            verdict = (_classify_error(err) if failed else
                        "dry-run" if e.get("dry_run") else
                        r.get("op") or "wrote")
             out.append({"app": r.get("app"), "path": r["path"],
                         "etype": r.get("etype") or _etype_hint(r.get("path")),
                         "verdict": verdict, "tool": e.get("tool"),
-                        "note": e.get("note"), "error": e.get("error"),
+                        "note": e.get("note"), "error": err if failed else None,
                         "ts": e.get("ts"), "by": sid})
     return out
 

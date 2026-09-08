@@ -1479,6 +1479,8 @@
     .tline.cmd:active, .read:active, .ang-i:active, .sess:active{ background:var(--surface2); }
     .subhdr .back:active{ border-color:var(--accent); color:var(--accent); }
   }
+/* a labelled CR estimate (floor + AFTER) until the fork's first measured turn */
+.est{font-style:italic}
 </style>
 </head>
 <body>
@@ -2080,6 +2082,14 @@ function idleTxt(s){
 }
 const kfmt = t => Math.round(t/1000)+"k";
 const ckCls = t => t>=350000 ? "bad" : t>=200000 ? "warn" : "";
+/* A fresh CR fork carries its SOURCE's last usage block verbatim, so its ctx
+   is an ESTIMATE (floor + curated AFTER) until its first own turn is billed. */
+function crEstTip(s){
+  const c = s.cr || {};
+  return `CR estimate ≈ ${(s.ctx_tokens||0).toLocaleString()} tokens = floor ${kfmt(c.floor||0)} + curated ${kfmt(c.after||0)}`
+       + ` (reduced from ${kfmt(c.before||0)} file-visible / ${c.billed?kfmt(c.billed)+" billed":"? billed"} in ${(c.source||"").slice(0,8)})`
+       + ` — measured once the fork's first turn is billed`;
+}
 /* three-bar context gauge — still used by the rail Context pane (renderContext) */
 function ctxGauge(tok){
   if(tok == null) return "";
@@ -2268,7 +2278,7 @@ function sessRow(s, showProject){
   if(s.agents && s.agents.total)
     segs.push(`<span class="agc" title="${s.agents.total} subagent(s) spawned by this session${s.agents.live?`, ${s.agents.live} still running (▶)`:""}">⇲${s.agents.total}${s.agents.live?` ${s.agents.live}▶`:""}</span>`);
   segs.push(`<span title="user + agent messages in the transcript, subagent turns included">${s.msg_count!=null?s.msg_count:"—"} turns</span>`);
-  segs.push(`<span class="${ckCls(s.ctx_tokens||0)}" title="${s.ctx_tokens!=null?"context window ≈ "+s.ctx_tokens.toLocaleString()+" tokens carried into the last agent turn — amber past 200k, red past 350k":"context unknown — no usage recorded yet"}">${s.ctx_tokens!=null?kfmt(s.ctx_tokens):"—"} ctx</span>`);
+  segs.push(`<span class="${ckCls(s.ctx_tokens||0)}${s.ctx_est?" est":""}" title="${s.ctx_tokens!=null?(s.ctx_est?crEstTip(s):"context window ≈ "+s.ctx_tokens.toLocaleString()+" tokens carried into the last agent turn — amber past 200k, red past 350k"):"context unknown — no usage recorded yet"}">${s.ctx_tokens!=null?(s.ctx_est?"≈":"")+kfmt(s.ctx_tokens):"—"} ctx</span>`);
   const working = s.state==="working";
   segs.push(`<span class="mdates${working?" hot":""}" title="started → last activity">${rangeTxt(s)}</span>`);
   const it = idleTxt(s);
@@ -2810,7 +2820,9 @@ function renderFoot(s){
       bits.push(`<span class="${ec}" title="prompt cache (${esc(c.ttl)} tier) ${remain<=0?"lapsed":"expires"} ${clock} — last cache use + ${esc(c.ttl)}">${remain<=0?"cold":"exp "+clock}</span>`);
     }
     if(c.requests > 0) bits.push(`<span title="${c.hits} of ${c.requests} API messages read from the cache">${Math.round(c.hits*100/c.requests)}% hit</span>`);
-    r2 = `<span class="${cls}" title="context carried into the last turn: input + cache reads + cache writes = ${tot.toLocaleString()} tokens, ${pct.toFixed(1)}% of a ${k(win)} window (window inferred from the model id)">${k(tot)}${bits.length?` (${bits.join(" · ")})`:""} / ${k(win)}</span>`;
+    r2 = s.ctx_est
+      ? `<span class="${cls}" title="${esc(crEstTip(s))}">≈${k(tot)} (CR estimate) / ${k(win)}</span>`
+      : `<span class="${cls}" title="context carried into the last turn: input + cache reads + cache writes = ${tot.toLocaleString()} tokens, ${pct.toFixed(1)}% of a ${k(win)} window (window inferred from the model id)">${k(tot)}${bits.length?` (${bits.join(" · ")})`:""} / ${k(win)}</span>`;
   } else {
     r2 = `<span class="dim" title="no usage recorded yet">—k / ${k(win)}</span>`;
   }
@@ -2822,7 +2834,10 @@ function renderFoot(s){
 function renderHeader(s){
   const folder = s.cwd ? s.cwd.replace(/^.*\/([^/]+)$/,"$1") : s.project;
   const dtitle = s.user_title || s.title;   // user-set title overrides derived
-  const ctx = s.ctx_tokens ? `<span class="chip" title="context carried into the last agent turn — input + cache reads + cache writes; the ceiling depends on the model">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>` : "";
+  const ctx = s.ctx_tokens ? (s.ctx_est
+    ? `<span class="chip" title="${esc(crEstTip(s))}">ctx <b>≈${(s.ctx_tokens/1000).toFixed(0)}k</b> est</span>`
+    : `<span class="chip" title="context carried into the last agent turn — input + cache reads + cache writes; the ceiling depends on the model">ctx <b>${(s.ctx_tokens/1000).toFixed(0)}k</b> tok</span>`) : "";
+  const crc = s.cr && s.cr.source ? `<span class="chip" title="CR fork — reduced from session ${esc(s.cr.source)}: ${kfmt(s.cr.before||0)} → ${kfmt(s.cr.after||0)} file-visible tokens${s.cr.measured?" (now measured)":" (estimate until the first turn)"}; click to open the source" onclick="openSession('${esc(s.cr.source)}')">⑂ CR of ${esc(s.cr.source.slice(0,8))}</span>` : "";
   const model = s.model ? `<span class="chip" title="the model this session's last agent turn ran on">${esc(s.model.replace(/^claude-/,""))}</span>` : "";
   const sub = s.subagent;
   const subhdr = sub ? `<div class="subhdr">
@@ -2951,6 +2966,7 @@ function renderHeader(s){
   document.getElementById("bans").disabled = false;
   document.getElementById("bfork").disabled = false;
   document.getElementById("bcr").disabled = false;
+  if(crMode) crComposerLabels(true);   // the poll must not undo the CR labels
 }
 
 /* "app:path" ref → [app, path] (path may itself contain no colon worth splitting) */
@@ -5008,6 +5024,26 @@ function crTotals(){
           kept, stubs, stubTok, refs, cartTok, residual};
 }
 function crK(n){ return `≈${(n/1000).toFixed(n < 9950 ? 1 : 0)}K`; }
+/* The floor is MEASURED from turn-1 usage when the transcript has usage
+   (≈32K on a real session); the 70–100K band is the usage-less fallback. */
+function crFloorTxt(f){
+  if(!f) return "≈?K";
+  return f.source === "usage"
+    ? `≈${(f.est/1000).toFixed(0)}K (turn-1 usage)`
+    : `≈${(f.low/1000)|0}–${(f.high/1000)|0}K (band — no usage in transcript)`;
+}
+/* BEFORE is the reducible, file-visible content. What the API billed is
+   more: floor + reducible + this turn's thinking (stored only as signatures)
+   + the chars/4 estimate error. Print the reconciliation, signed. */
+function crBilledLine(m){
+  const b = m.billed;
+  if(!b || !b.ctx) return "";
+  const K = n => `${(Math.abs(n)/1000).toFixed(0)}K`;
+  const rest = b.unexplained >= 0 ? `+ estimate error ≈${K(b.unexplained)}` : `− over-estimate ≈${K(b.unexplained)}`;
+  return `<div class="cr-floor" title="usage of the last API call (${b.calls} calls in the transcript): input + cache reads + cache writes — the header's ctx chip. Reducible = Σ rows below. Last-turn thinking ≤ Σ output tokens of this turn's earlier calls; it is in context now but a resumed fork drops it. The remainder is the chars/4 shortfall on JSON-shaped tool traffic, shown rather than absorbed.">
+    BILLED ctx ≈${K(b.ctx)} = floor ≈${K(b.floor)} + reducible ≈${K(b.reducible)}
+    + last-turn thinking ≤${K(b.last_turn_output)} ${rest}</div>`;
+}
 function crPayload(){
   const keep = [], stub = [];
   for(const r of crManifest.rows)
@@ -5042,12 +5078,32 @@ async function toggleCR(){
   crMode = true;
   document.body.classList.add("crmode");
   document.getElementById("bcr").classList.add("on");
-  actmsg("CR mode — pick what survives, then Preview / Fork");
+  crComposerLabels(true);
+  actmsg("CR mode — pick what survives, then Preview / Fork, or just type: Enter forks and answers INTO the fork");
   renderStream(curSession); renderCrCart();
   openRailSheet();   // ≤1100px the cart lives in the bottom sheet
 }
+/* While CR is on, the composer sends into the REDUCED fork, never this
+   session — say so on the controls themselves. */
+function crComposerLabels(on){
+  const inp = document.getElementById("cin"), bans = document.getElementById("bans"),
+        bfork = document.getElementById("bfork");
+  if(on){
+    inp.placeholder = "CR mode — Enter writes the reduced fork and sends this message INTO it (this session is never touched)";
+    bans.textContent = "⑂ CR answer";
+    bans.title = "Write the reduced session file with your keep / stub / ref picks, then start a headless turn with this message in the NEW session. The original is never touched.";
+    bfork.disabled = true;
+    bfork.title = "In CR mode, Answer already forks — the message goes into the reduced session";
+  } else {
+    bans.textContent = "Answer";
+    bans.title = "Send this message into THIS session — a headless claude -p --resume appends it and replies. Queued if the session is busy.";
+    bfork.title = "Branch the conversation: your message starts a NEW session file copied from this one. The original session is never changed.";
+    if(inp.placeholder.startsWith("CR mode")) inp.placeholder = "answer this session…";
+  }
+}
 function exitCR(){
   crMode = false; crManifest = null; crHits = null;
+  crComposerLabels(false);
   document.body.classList.remove("crmode");
   document.getElementById("bcr").classList.remove("on");
   if(curSession) renderStream(curSession);
@@ -5138,7 +5194,9 @@ function renderCrCart(){
     <h3>CR — context reduction</h3>
     <div class="cr-tot">BEFORE ≈${(t.before/1000).toFixed(0)}K →
       <span class="aft">AFTER ≈${(t.after/1000).toFixed(0)}K</span>
-      <span class="pct">(−${pct}%)</span></div>
+      <span class="pct">(−${pct}%)</span>
+      <span class="dim" title="what the API will bill the fork's first turn: the scaffolding floor plus what you kept — prior-turn thinking is dropped on resume">· resume ≈${((m.floor.est + t.after)/1000).toFixed(0)}K</span></div>
+    ${crBilledLine(m)}
     <div class="cr-math" title="AFTER is the sum of exactly these lines — nothing hidden">
       kept ${crK(t.kept)} + stubs ${t.stubs}·${CR_STUB_TOK} = ${crK(t.stubTok)}
       + cart ${t.refs} ref${t.refs === 1 ? "" : "s"} ${crK(t.cartTok)}${
@@ -5151,7 +5209,7 @@ function renderCrCart(){
       ${Math.round((m.excluded?.image_payload_chars || 0)/1000)}K image bytes +
       ${Math.round((m.excluded?.json_envelope_chars || 0)/1000)}K envelope chars
       are in the file but are not tokens).</div>
-    <div class="cr-floor">+ scaffolding floor ≈${(m.floor.low/1000)|0}–${(m.floor.high/1000)|0}K
+    <div class="cr-floor">+ scaffolding floor ${crFloorTxt(m.floor)}
       (system prompt, tools, memory — not reducible from here) · all numbers ≈</div>
     ${groups}
     <div class="cr-grp"><span class="gl">last ${m.recent_turns} turns</span>
@@ -5228,8 +5286,12 @@ async function crPreview(intentFork){
     <div class="cr-tot">BEFORE ≈${(d.before_tokens/1000).toFixed(0)}K →
       <span class="aft">AFTER ≈${(d.after_tokens/1000).toFixed(0)}K</span>
       <span class="pct">(−${d.saved_pct}%)</span>
-      · ${d.stubbed} block(s) stubbed</div>
-    <div class="cr-floor">+ scaffolding floor ≈${(d.floor.low/1000)|0}–${(d.floor.high/1000)|0}K on resume · numbers are chars/4 ≈</div>
+      · ${d.stubbed} block(s) stubbed
+      <span class="dim" title="floor + AFTER — what the fork's first turn will bill">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K</span></div>
+    ${crBilledLine(d)}
+    <div class="cr-floor">+ scaffolding floor ${crFloorTxt(d.floor)} on resume · numbers are chars/4 ≈</div>
+    <div class="cr-floor">resume from a terminal: <code>${esc(crResumeCmd(d.cwd, "‹fork id›"))}</code>
+      — the fork is written beside its source, so <code>--resume</code> finds it only from that cwd</div>
     ${d.ignored?.length ? `<div class="cr-err">ignored ids: ${esc(d.ignored.join(", "))}</div>` : ""}
     ${hyd}
     ${d.preamble ? `<div class="cr-sec">preamble draft (ONE user record at the fork tip)</div>
@@ -5246,12 +5308,36 @@ async function crForkNow(){
   actmsg("forging CR fork…");
   const [ok, d] = await post("/api/cr", {...crPayload(), confirm: true});
   if(!ok || !d.ok){ actmsg("CR fork failed: " + (d.error || ""), true); return; }
-  closeCrDlg();
   try { localStorage.removeItem(crKey()); } catch(e){}
   exitCR();
   toast(`⑂ CR fork → ${d.new_session.slice(0,8)} · ≈${(d.before_tokens/1000).toFixed(0)}K → ≈${(d.after_tokens/1000).toFixed(0)}K (−${d.saved_pct}%)`);
   actmsg(`⑂ CR fork ${d.new_session.slice(0,8)} written — it's in the sidebar`);
+  crWrittenDlg(d);
   loadNav();     // pull not push: the fork appears in the sidebar, no spawn
+}
+function crResumeCmd(cwd, id){
+  return cwd ? `cd ${/[^\w@%+=:,./-]/.test(cwd) ? "'" + cwd.replace(/'/g, "'\\''") + "'" : cwd} && claude --resume ${id}`
+             : `claude --resume ${id}   # from the source session's cwd`;
+}
+/* After the write: the fork id, what it carries, and the one command that
+   resumes it — with the cwd, because --resume resolves inside the CURRENT
+   cwd's project dir and this file sits beside its source. */
+function crWrittenDlg(d){
+  const cmd = d.resume_cmd || crResumeCmd(d.cwd, d.new_session);
+  openCrDlg(`
+    <div class="rd-h"><span class="rd-t">⑂ CR fork written — ${esc(d.new_session.slice(0,8))}</span>
+      <span class="rd-x" onclick="closeCrDlg()">✕</span></div>
+    <div class="cr-tot">≈${(d.before_tokens/1000).toFixed(0)}K → <span class="aft">≈${(d.after_tokens/1000).toFixed(0)}K</span>
+      <span class="pct">(−${d.saved_pct}%)</span>
+      <span class="dim">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K (floor ${crFloorTxt(d.floor)} + AFTER)</span></div>
+    ${d.spawn_error ? `<div class="cr-err">fork written, but the answer did not start — ${esc(d.spawn_error)}. Open the fork and answer it from there.</div>` : ""}
+    <div class="cr-sec">resume it from a terminal (the fork lives beside its source — run from that cwd)</div>
+    <pre id="crcmd">${esc(cmd)}</pre>
+    <div class="cr-acts">
+      <button class="act sm" title="copy the resume command" onclick="navigator.clipboard?.writeText(document.getElementById('crcmd').textContent).then(()=>toast('copied'))">⧉ copy command</button>
+      <button class="act sm primary" title="open the fork in the console" onclick="closeCrDlg();openSession('${esc(d.new_session)}')">open fork →</button>
+      <button class="act sm" onclick="closeCrDlg()">close</button>
+    </div>`);
 }
 async function crCompile(){
   const refs = crAllRefs();
@@ -5319,6 +5405,33 @@ async function send(isFork){
                         if(pend){ dropPending(pend); inp.value = inp.value || text; renderStream(curSession); } };
   st.className = ""; st.textContent = isFork ? "forking…" : "answering…";
   try {
+    if(crMode && crManifest){
+      // CR mode: the message belongs to the REDUCED fork, never this session.
+      // One POST forges the fork with the current curation and starts the
+      // headless turn in it; on success we land in the fork.
+      st.textContent = "forging CR fork + answering into it…";
+      if(pend) dropPending(pend);
+      const r = await fetch("/api/cr", { method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({...crPayload(), confirm:true, cwd:curSession.cwd, text}) });
+      const ct = r.headers.get("content-type") || "";
+      let d = null;
+      if(ct.includes("application/json")){ try { d = await r.json(); } catch(e){ fail(r.status+" malformed JSON from server"); return; } }
+      else { const t = (await r.text()).trim(); fail(r.status+" "+(t.slice(0,300) || r.statusText || "empty response")); return; }
+      if(!r.ok || !d.ok){ fail(d.error || (r.status+" "+r.statusText)); return; }
+      try { localStorage.removeItem(crKey()); } catch(e){}
+      exitCR();
+      st.className = d.spawned ? "ok" : "bad";
+      st.textContent = d.spawned
+        ? `⑂ CR fork → ${d.new_session.slice(0,8)} · ≈${(d.before_tokens/1000).toFixed(0)}K → ≈${(d.after_tokens/1000).toFixed(0)}K (−${d.saved_pct}%) — headless turn running in the fork`
+        : `⑂ CR fork ${d.new_session.slice(0,8)} written, but the answer did not start — ${d.spawn_error || ""}`;
+      inp.value = ""; growComposer();
+      toast(`⑂ CR fork → ${d.new_session.slice(0,8)} · resume from ${d.cwd || "the source cwd"}`);
+      crWrittenDlg(d);
+      await loadNav();
+      openSession(d.new_session);
+      return;
+    }
     const r = await fetch(isFork?"/api/fork":"/api/answer", { method:"POST",
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({session_id:curId, cwd:curSession.cwd, text}) });

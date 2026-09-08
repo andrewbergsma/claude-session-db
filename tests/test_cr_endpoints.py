@@ -210,3 +210,102 @@ def test_cr_compile_document(monkeypatch):
     assert r["ok"] and r["hydrated"]
     assert "## claudecode:performance/context-reduction-playbook" in r["document"]
     assert "Playbook — how" in r["document"]
+
+
+# ---- fork fidelity: the stamp, the resume command, the composer's spawn ------
+@pytest.fixture
+def meta(tmp_path, monkeypatch):
+    monkeypatch.setattr(server, "CONSOLE_STATE", tmp_path / "console")
+    monkeypatch.setattr(server, "META_FILE", tmp_path / "console" / "meta.json")
+    return tmp_path / "console" / "meta.json"
+
+
+def test_confirm_stamps_fork_meta_and_prints_resume_cmd(env, meta, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    payload, code = server.cr_apply(SID, ["t:t2"], [], confirm=True)
+    assert code == 200 and payload["spawned"] is False
+    new_id = payload["new_session"]
+    assert payload["cwd"] == "/tmp/proj"
+    assert payload["resume_cmd"] == f"cd /tmp/proj && claude --resume {new_id}"
+    assert payload["resume_tokens"] == payload["floor"]["est"] + payload["after_tokens"]
+    m = server._meta_of(server._read_meta_overlay(), new_id)
+    assert m["cr_source"] == SID
+    assert m["cr_after"] == payload["after_tokens"]
+    assert m["cr_before"] == payload["before_tokens"]
+    assert m["cr_floor"] == payload["floor"]["est"]
+    assert m["cr_at"].endswith("Z")
+
+
+def test_confirm_with_text_spawns_into_the_fork(env, meta, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    calls = []
+    monkeypatch.setattr(server, "spawn_claude",
+                        lambda args, cwd, sid=None, **kw: calls.append((args, cwd, sid)))
+    src_bytes = env.read_bytes()
+    payload, code = server.cr_apply(SID, [], [], confirm=True,
+                                    text="continue from here", cwd="/elsewhere")
+    assert code == 200 and payload["spawned"] and payload["action"] == "cr-fork-answer"
+    new_id = payload["new_session"]
+    (args, cwd, sid), = calls
+    assert args == ["-p", "--resume", new_id, "continue from here"]
+    assert cwd == "/tmp/proj"          # the transcript's cwd wins over the body's
+    assert sid == new_id               # registered under the FORK, so Stop aims right
+    assert env.read_bytes() == src_bytes
+
+
+def test_confirm_spawn_failure_keeps_the_fork(env, meta, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    def boom(*a, **k):
+        raise FileNotFoundError("`claude` binary not found")
+    monkeypatch.setattr(server, "spawn_claude", boom)
+    payload, code = server.cr_apply(SID, [], [], confirm=True, text="go")
+    assert code == 200 and payload["spawned"] is False
+    assert "not found" in payload["spawn_error"]
+    assert (env.parent / f"{payload['new_session']}.jsonl").exists()
+
+
+def test_confirm_without_text_never_spawns(env, meta, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    monkeypatch.setattr(server, "spawn_claude",
+                        lambda *a, **k: pytest.fail("spawned without text"))
+    payload, _ = server.cr_apply(SID, [], [], confirm=True, text="   ")
+    assert payload["spawned"] is False
+
+
+def test_preview_carries_floor_billed_and_cwd(env, monkeypatch):
+    monkeypatch.setattr(server, "_kmcp_call", _kmcp_down)
+    payload, _ = server.cr_apply(SID, [], [], confirm=False)
+    assert payload["floor"]["source"] == "band"     # fixture has no usage
+    assert payload["billed"] is None
+    assert payload["cwd"] == "/tmp/proj"
+    assert payload["resume_tokens"] == payload["floor"]["est"] + payload["after_tokens"]
+
+
+def test_cr_overlay_estimates_until_a_post_fork_turn_is_billed():
+    m = {"cr_source": SID, "cr_before": 98_000, "cr_after": 44_000,
+         "cr_floor": 32_000, "cr_billed": 230_000,
+         "cr_at": "2026-09-08T10:00:00.000Z"}
+    # fresh fork: the copied usage block predates the stamp → estimate
+    s = {"ctx_tokens": 230_000}
+    server._cr_overlay(s, m, "2026-09-07T22:00:00.000Z")
+    assert s["ctx_tokens"] == 76_000 and s["ctx_est"] == "cr"
+    assert s["cr"]["measured"] is False and s["cr"]["source"] == SID
+    # no usage at all → still the estimate
+    s = {"ctx_tokens": None}
+    server._cr_overlay(s, m, None)
+    assert s["ctx_tokens"] == 76_000
+    # first own turn billed after the stamp → measured wins, estimate gone
+    s = {"ctx_tokens": 81_500}
+    server._cr_overlay(s, m, "2026-09-08T10:05:00.000Z")
+    assert s["ctx_tokens"] == 81_500 and "ctx_est" not in s
+    assert s["cr"]["measured"] is True
+    # not a CR fork → untouched
+    s = {"ctx_tokens": 5}
+    server._cr_overlay(s, {}, "2026-09-08T10:05:00.000Z")
+    assert s == {"ctx_tokens": 5}
+
+
+def test_resume_cmd_quotes_an_awkward_cwd():
+    cmd = server.cr_resume_cmd("/Users/andrew/My Repo", "abc")
+    assert cmd == "cd '/Users/andrew/My Repo' && claude --resume abc"
+    assert server.cr_resume_cmd(None, "abc").startswith("claude --resume abc")

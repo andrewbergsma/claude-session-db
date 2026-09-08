@@ -41,6 +41,22 @@ history and dated by their last commit.
 - **Console — chat text matches the rest of the app.** Turn prose was 13.5px
   against 12.5px sidebar titles and rail body; it is 12.5px now (inline and
   fenced code 11.5px).
+## [3.24.4] - 2026-09-07
+
+### Fixed
+
+- **CR — the injection rows say what they are.** The group once called
+  *skill injections* holds every non-prompt user-role record — skill bodies,
+  background-task notifications, cross-session messages, slash-command
+  wrappers, inline `!` runs, system-reminders — and labelled each by its
+  first 60 raw characters, so the list read as angle-bracket soup
+  (`<task-notification> <task-id>aad5d4b…`). `cr.injection_label` now
+  classifies by prefix and scrapes the informative tag: `skill
+  /session-summary`, `task-notification completed · Agent "…" finished`,
+  `cross-session from docingest-b2 · …`, `command /compact …`,
+  `local-command stdout · Compacted …`. The stub breadcrumb carries the same
+  label (`[CR: injected skill /session-summary — 44K elided]`) so the fork
+  knows what was elided, and the group is renamed *injected context*.
 
 ## [3.24.3] - 2026-09-07
 

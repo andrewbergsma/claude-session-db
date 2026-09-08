@@ -83,6 +83,7 @@ import os
 import queue as queuelib
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -374,7 +375,11 @@ _TOPICS_LOCK = threading.Lock()
 # restart — meta.json is the only durable record of a console-minted run
 # (SUMMARY_RUNS is in-process, and an events-only run never touches the ledger).
 META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed",
-               "summary_of", "summary_child", "summary_pass", "summary_kind")
+               "summary_of", "summary_child", "summary_pass", "summary_kind",
+               # CR fork stamp (cr_apply confirm): what the fork was reduced
+               # from and to, so the nav can show an ESTIMATE until measured.
+               "cr_source", "cr_before", "cr_after", "cr_floor", "cr_billed",
+               "cr_at")
 MAX_TITLE_LEN = 200
 MAX_TOPIC_LEN = 80
 
@@ -1371,6 +1376,7 @@ def summarize_nav(path: Path):
     last_user = None
     usage = None
     last_ts = None
+    last_usage_ts = None
     for r in recs:
         t = r.get("type")
         if t == "ai-title":
@@ -1393,6 +1399,7 @@ def summarize_nav(path: Path):
                 u = (r.get("message") or {}).get("usage")
                 if isinstance(u, dict):
                     usage = u
+                    last_usage_ts = r.get("timestamp") or last_usage_ts
     mtime_age = max(0, time.time() - path.stat().st_mtime)   # guard clock skew
     # title_src: "set" = a real title record (ai-title/custom-title);
     # "prompt"/"id" = raw fallbacks — those rows may show the tldr's proposed
@@ -1431,7 +1438,46 @@ def summarize_nav(path: Path):
         "started_at": stats["started_at"],
         "msg_count": stats["msg_count"],
         "ctx_tokens": ctx_tokens,
+        "last_usage_ts": last_usage_ts,
     }
+
+
+def _ts_after(a, b) -> bool:
+    """True when transcript timestamp `a` is strictly after `b` (both ISO-8601,
+    Z or offset). Unparseable → False: an estimate is never dropped on a
+    malformed stamp."""
+    try:
+        da = datetime.fromisoformat(str(a).replace("Z", "+00:00"))
+        db = datetime.fromisoformat(str(b).replace("Z", "+00:00"))
+        if da.tzinfo is None:
+            da = da.replace(tzinfo=timezone.utc)
+        if db.tzinfo is None:
+            db = db.replace(tzinfo=timezone.utc)
+        return da > db
+    except (TypeError, ValueError):
+        return False
+
+
+def _cr_overlay(s: dict, m: dict, last_usage_ts) -> None:
+    """A CR fork copies its source's last usage block verbatim, so until the
+    fork's first own turn its ctx reads as the PARENT's (230k on a fork that
+    was just reduced to 44K). While no assistant usage postdates the fork
+    stamp, show the estimate the fork was written with — floor + AFTER, as
+    the API will bill it — and label it; the first measured turn replaces it.
+    Mutates the row in place; a session without a CR stamp is untouched."""
+    after = m.get("cr_after")
+    if not after:
+        return
+    floor = m.get("cr_floor") or 0
+    cr = {"source": m.get("cr_source"), "before": m.get("cr_before"),
+          "after": after, "floor": floor, "billed": m.get("cr_billed"),
+          "at": m.get("cr_at"),
+          "measured": bool(last_usage_ts and m.get("cr_at")
+                           and _ts_after(last_usage_ts, m["cr_at"]))}
+    if not cr["measured"]:
+        s["ctx_tokens"] = int(after) + int(floor)
+        s["ctx_est"] = "cr"
+    s["cr"] = cr
 
 
 def _nav_row(p: Path, idx: dict, meta: dict):
@@ -1451,6 +1497,7 @@ def _nav_row(p: Path, idx: dict, meta: dict):
     s["subtopic"] = m.get("subtopic")
     s["summary_of"] = m.get("summary_of")
     s["summary_child"] = m.get("summary_child")
+    _cr_overlay(s, m, s.pop("last_usage_ts", None))
     # Cached-or-nothing; stale rows queue an async regeneration.
     s["tldr"] = tldr.payload(p.stem, p)
     # Per-row digest presence for the sidebar glance: does a
@@ -2166,6 +2213,7 @@ def build_session(sid: str):
             "spawn_depth": meta.get("spawnDepth"),
             "anchor_uuid": anchor,
         }
+    _cr_overlay(out, _m, last_usage_ts)
     return out
 
 
@@ -2944,9 +2992,14 @@ def point_fork(session_id: str, at_uuid: str):
 # file (redaction fork — every record kept structurally, unkept content swapped
 # for breadcrumbs in both copies) plus ONE synthetic preamble user record
 # carrying the compiled kmcp cart. Two-phase like curate(): confirm:false is a
-# PREVIEW (nothing written), confirm:true forges the fork. No spawn — the fork
-# appears in the sidebar; pull not push. The original is never touched, and the
-# fork id is minted HERE (house doctrine — never inferred from claude).
+# PREVIEW (nothing written), confirm:true forges the fork. Without `text` there
+# is no spawn — the fork appears in the sidebar; pull not push. With `text` (the
+# composer in CR mode) the message starts a headless run in the NEW session, so
+# Enter never lands on the original. The fork is stamped on meta.json
+# (cr_source/before/after/floor/billed/at) so the nav can show floor+AFTER as
+# a labelled estimate until the fork's first measured turn. The original is
+# never touched, and the fork id is minted HERE (house doctrine — never
+# inferred from claude).
 #
 # kmcp is optional at every step: search surfaces a visible {error}, cart
 # hydration failure degrades the preamble to plain text pointers. Neither ever
@@ -3023,10 +3076,26 @@ def cr_compile(refs):
             "hydrated": bool(refs) and err is None, "error": err}
 
 
-def cr_apply(sid: str, stub, refs, confirm: bool):
+def cr_resume_cmd(cwd, new_id: str) -> str:
+    """The command that resumes a CR fork from a terminal. `claude --resume ID`
+    resolves the id inside the project dir of the CURRENT cwd, and the fork is
+    written beside its source — so it resumes only from the source session's
+    cwd (lesson/claude-resume-resolves-id-within-current-cwd-project-dir)."""
+    if cwd:
+        return f"cd {shlex.quote(str(cwd))} && claude --resume {new_id}"
+    return f"claude --resume {new_id}   # from the source session's cwd"
+
+
+def cr_apply(sid: str, stub, refs, confirm: bool, text=None, cwd=None):
     """Two-phase CR (house curate idiom): confirm:false previews the before/
     after totals + the compiled preamble draft; confirm:true writes the
-    redacted COPY and returns new_session. Original never touched."""
+    redacted COPY and returns new_session. Original never touched.
+
+    confirm:true with `text` is the composer's path: the fork is written AND
+    the message starts a headless `claude -p --resume` in the NEW session —
+    the same direct spawn point_fork uses (a file the console itself just
+    wrote is not a second writer, so the two-writer guard does not apply).
+    Without `text` nothing is spawned — the fork appears in the sidebar."""
     path = find_session(sid)
     if path is None:
         return {"error": "not found"}, 404
@@ -3063,7 +3132,10 @@ def cr_apply(sid: str, stub, refs, confirm: bool):
                 "after_tokens": after_tok,
                 "saved_pct": round((before_tok - after_tok) / before_tok * 100,
                                    1) if before_tok else 0,
-                "floor": dict(crlib.FLOOR_TOKENS),
+                "floor": manifest["floor"],
+                "billed": manifest["billed"],
+                "resume_tokens": manifest["floor"]["est"] + after_tok,
+                "cwd": _records_cwd(records) or cwd,
                 "stubbed": len(stats["stubbed"]), "ignored": stats["ignored"],
                 "preamble": preamble, "refs": refs,
                 "hydrated": bool(refs) and err is None,
@@ -3072,14 +3144,52 @@ def cr_apply(sid: str, stub, refs, confirm: bool):
     new_id = str(uuidlib.uuid4())        # the console mints the fork id itself
     res = crlib.forge_fork(path, stub, preamble_text=preamble, new_id=new_id,
                            bash_kmcp=_bash_kmcp)
-    return {"ok": True, "phase": "forked", "action": "cr-fork",
-            "new_session": res["new_session"], "path": res["path"],
-            "before_tokens": res["before_tokens"],
-            "after_tokens": res["after_tokens"],
-            "saved_pct": res["saved_pct"],
-            "stubbed": len(res["stubbed"]), "ignored": res["ignored"],
-            "refs": refs, "hydrated": bool(refs) and err is None,
-            "hydrate_error": err}, 200
+    fork_cwd = res.get("cwd") or cwd
+    # Stamp the fork: source + before/after/floor/billed, and WHEN — the nav
+    # shows floor+AFTER as a labelled estimate until an assistant usage record
+    # postdates this stamp (see _cr_overlay). Durable across a restart.
+    stamped_at = (datetime.now(timezone.utc)
+                  .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")
+    try:
+        _update_meta(new_id, cr_source=sid,
+                     cr_before=int(res["before_tokens"] or 0),
+                     cr_after=int(res["after_tokens"] or 0),
+                     cr_floor=int(res["floor"]["est"] or 0),
+                     cr_billed=int(res["billed_before"] or 0),
+                     cr_at=stamped_at)
+    except Exception as e:                       # the fork exists regardless
+        print(f"cr: meta stamp failed for {new_id[:8]}: {e}", file=sys.stderr)
+    payload = {"ok": True, "phase": "forked", "action": "cr-fork",
+               "new_session": res["new_session"], "path": res["path"],
+               "cwd": fork_cwd,
+               "resume_cmd": cr_resume_cmd(fork_cwd, new_id),
+               "before_tokens": res["before_tokens"],
+               "after_tokens": res["after_tokens"],
+               "saved_pct": res["saved_pct"],
+               "floor": res["floor"],
+               "billed_before": res["billed_before"],
+               "resume_tokens": res["resume_tokens"],
+               "stubbed": len(res["stubbed"]), "ignored": res["ignored"],
+               "refs": refs, "hydrated": bool(refs) and err is None,
+               "hydrate_error": err, "spawned": False}
+    text = (text or "").strip()
+    if text:
+        try:
+            spawn_claude(["-p", "--resume", new_id, text], fork_cwd, new_id)
+            payload["spawned"] = True
+            payload["action"] = "cr-fork-answer"
+        except Exception as e:
+            # Never lose the fork over a failed spawn: it is written and in
+            # the sidebar; the operator can answer it from there.
+            payload["spawn_error"] = str(e)[:300]
+    return payload, 200
+
+
+def _records_cwd(records):
+    for r in reversed(records):
+        if r.get("cwd"):
+            return r["cwd"]
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -6564,7 +6674,8 @@ class Handler(SimpleHTTPRequestHandler):
             try:
                 payload, code = cr_apply(sid, body.get("stub"),
                                          body.get("refs"),
-                                         bool(body.get("confirm")))
+                                         bool(body.get("confirm")),
+                                         text=body.get("text"), cwd=cwd)
                 return self._json(payload, code)
             except crlib.CRUnsupported as e:
                 return self._json({"error": str(e)[:300]}, 409)

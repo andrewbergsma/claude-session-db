@@ -516,3 +516,68 @@ def test_injection_row_carries_label_and_breadcrumb():
     assert by["s:s1"]["name"] == "command"
     assert by["s:s1"]["hint"] == "/session-summary"
     assert cr._breadcrumb(by["s:s1"]).startswith("[CR: injected command /session-summary —")
+
+
+# ---- billed context (usage) — the floor and the thinking the file cannot see
+def _assistant_usage(uuid, mid, parent, inp, cr, cc, out, text="ok"):
+    r = _assistant(uuid, text, parent=parent)
+    r["message"]["id"] = mid
+    r["message"]["usage"] = {"input_tokens": inp, "cache_read_input_tokens": cr,
+                             "cache_creation_input_tokens": cc,
+                             "output_tokens": out}
+    return r
+
+
+def _usage_transcript():
+    return [
+        _user("u1", "first question"),
+        # turn 1: one API response split across two records (same message.id)
+        _assistant_usage("a1", "m1", "u1", 100, 14_536, 17_632, 500),
+        _assistant_usage("a1b", "m1", "a1", 100, 14_536, 17_632, 500),
+        _user("u2", "second question", parent="a1b"),
+        # turn 2: three calls; the last one is the billed context
+        _assistant_usage("a2", "m2", "u2", 50, 40_000, 3_000, 9_000),
+        _assistant_usage("a3", "m3", "a2", 50, 43_000, 12_000, 30_000),
+        _assistant_usage("a4", "m4", "a3", 60, 55_000, 5_049, 800),
+    ]
+
+
+def test_billed_context_reads_usage_once_per_message_id():
+    b = cr.billed_context(_usage_transcript())
+    assert b["floor"] == 100 + 14_536 + 17_632           # turn-1 context
+    assert b["ctx"] == 60 + 55_000 + 5_049                # the last call
+    # last turn's earlier calls only (the final call's output is not in
+    # anyone's input yet); turn 1 is not counted
+    assert b["last_turn_output"] == 9_000 + 30_000
+    assert b["calls"] == 4                                # m1 counted once
+
+
+def test_billed_context_without_usage_is_empty():
+    b = cr.billed_context(_transcript())
+    assert b == {"ctx": None, "floor": None, "last_turn_output": 0, "calls": 0}
+
+
+def test_manifest_floor_is_measured_when_usage_exists_else_band():
+    m = cr.build_manifest(_usage_transcript())
+    assert m["floor"]["source"] == "usage"
+    assert m["floor"]["low"] == m["floor"]["high"] == m["floor"]["est"] == 32_268
+    b = m["billed"]
+    assert b["ctx"] == 60_109 and b["floor"] == 32_268
+    assert b["reducible"] == m["totals"]["est_tokens"]
+    assert b["last_turn_output"] == 39_000
+    # the decomposition is exact by construction — the remainder is shown
+    assert b["floor"] + b["reducible"] + b["last_turn_output"] + b["unexplained"] == b["ctx"]
+
+    m0 = cr.build_manifest(_transcript())
+    assert m0["floor"]["source"] == "band" and m0["floor"]["low"] == 70_000
+    assert m0["billed"] is None
+
+
+def test_forge_fork_reports_floor_cwd_and_resume_estimate(tmp_path):
+    src = tmp_path / "src-sid.jsonl"
+    cr.dump(_usage_transcript(), src)
+    res = cr.forge_fork(src, [], new_id="fork-1")
+    assert res["cwd"] == "/tmp/proj"
+    assert res["floor"]["source"] == "usage" and res["floor"]["est"] == 32_268
+    assert res["billed_before"] == 60_109
+    assert res["resume_tokens"] == res["floor"]["est"] + res["after_tokens"]

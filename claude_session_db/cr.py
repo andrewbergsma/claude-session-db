@@ -113,6 +113,67 @@ DUP_MIN_CHARS = 1         # zero-char content never counts as a duplicate
 FLOOR_TOKENS = {"low": 70_000, "high": 100_000, "est": 85_000}
 
 
+def _usage_ctx(u: dict) -> int:
+    """Context the API billed for one call — the same sum the console's ctx
+    chip shows (input + cache reads + cache writes)."""
+    return ((u.get("input_tokens") or 0)
+            + (u.get("cache_read_input_tokens") or 0)
+            + (u.get("cache_creation_input_tokens") or 0))
+
+
+def billed_context(records) -> dict:
+    """What the API actually billed, read from `usage` — the only place the
+    scaffolding floor and encrypted thinking are visible.
+
+    A file-based count (the manifest) sees the reducible, file-visible content
+    and nothing else. Three things the API bills never appear as countable
+    text: the floor (system prompt, tools, memory — measurable as the FIRST
+    call's context), the model's thinking when it is stored as a signature
+    only (turn 5 of one real session put ≈42K of it into context), and the
+    chars/4 shortfall on JSON-shaped tool traffic. So:
+
+        billed ≈ floor + Σ rows + last-turn thinking + estimate error
+
+    `last_turn_output` is Σ output_tokens of the last turn's API calls before
+    the final one — an upper bound on the thinking still in context (a resumed
+    fork drops prior-turn thinking anyway). One API response is split across
+    several assistant records sharing a `message.id`; usage is counted once
+    per id. Every key is None/0 when the transcript carries no usage — the
+    caller falls back to the documented band, never to a guess.
+    """
+    seen = set()
+    first = last = None
+    turn_out: list = []
+    for r in records:
+        if r.get("isSidechain"):
+            continue
+        t = r.get("type")
+        msg = r.get("message") or {}
+        if t == "user":
+            content = msg.get("content")
+            if _is_real_prompt(r, _text_of(content)):
+                turn_out = []
+        elif t == "assistant":
+            u = msg.get("usage")
+            if not isinstance(u, dict):
+                continue
+            mid = msg.get("id") or r.get("uuid")
+            if mid in seen:
+                continue
+            seen.add(mid)
+            ctx = _usage_ctx(u)
+            if first is None:
+                first = ctx
+            last = ctx
+            turn_out.append(u.get("output_tokens") or 0)
+    return {
+        "ctx": last,                       # what the last call was billed
+        "floor": first,                    # turn-1 context ≈ the floor
+        "last_turn_output": sum(turn_out[:-1]),
+        "calls": len(seen),
+    }
+
+
 def _is_real_prompt(r, text) -> bool:
     """Same semantics as the console's _is_real_user_turn (kept local to avoid
     a cr -> console import cycle; the console imports cr)."""
@@ -524,6 +585,29 @@ def build_manifest(records, bash_kmcp=None) -> dict:
     envelope = max(0, surface - (row_chars - img_b64_chars) - sig_chars
                    - img_b64_chars)
 
+    # The floor is MEASURED when the transcript carries usage (turn-1 context
+    # ≈32K on a real session, against the 70–100K band); the band is the
+    # fallback for a usage-less transcript, and says so.
+    bc = billed_context(records)
+    if bc["floor"]:
+        floor = {"low": bc["floor"], "high": bc["floor"], "est": bc["floor"],
+                 "source": "usage"}
+    else:
+        floor = dict(FLOOR_TOKENS, source="band")
+    billed = None
+    if bc["ctx"]:
+        # billed = floor + reducible + last-turn thinking (≤) + the rest.
+        # `unexplained` is the estimate error, signed — shown, never absorbed.
+        billed = {
+            "ctx": bc["ctx"], "floor": floor["est"],
+            "floor_source": floor["source"],
+            "reducible": row_tokens,
+            "last_turn_output": bc["last_turn_output"],
+            "unexplained": (bc["ctx"] - floor["est"] - row_tokens
+                            - bc["last_turn_output"]),
+            "calls": bc["calls"],
+        }
+
     return {
         "version_ok": not bad,
         "unsupported_versions": bad,
@@ -541,7 +625,8 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                      "json_envelope_chars": envelope},
         "surface_chars": surface,
         "totals": {"chars": row_chars, "est_tokens": row_tokens},
-        "floor": dict(FLOOR_TOKENS),
+        "floor": floor,
+        "billed": billed,
     }
 
 
@@ -790,6 +875,8 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
     before = context_surface(records)
     manifest = build_manifest(records, bash_kmcp=bash_kmcp)
     before_tok = manifest["totals"]["est_tokens"]
+    floor = manifest["floor"]
+    billed = manifest["billed"]
     stats = apply_stubs(records, manifest, stub_ids)
 
     new_id = new_id or str(uuidlib.uuid4())
@@ -802,6 +889,9 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
     for r in records:
         if r.get("sessionId"):
             r["sessionId"] = new_id
+    # The session's cwd: tool-result records carry none, so the last record
+    # that has one wins (not the last record).
+    cwd = next((r.get("cwd") for r in reversed(records) if r.get("cwd")), None)
 
     if preamble_text:
         # ONE synthetic user record at the fork tip (parentUuid = last kept
@@ -816,7 +906,7 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
                                  .strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
             "isSidechain": False,
             "userType": "external",
-            "cwd": template.get("cwd"),
+            "cwd": cwd or template.get("cwd"),
             "gitBranch": template.get("gitBranch"),
             "version": template.get("version"),
             "message": {"role": "user",
@@ -835,9 +925,17 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
     return {
         "new_session": new_id,
         "path": str(dst),
+        # The fork lives BESIDE its source (same project dir), so it resumes
+        # only from the source session's cwd — say which.
+        "cwd": cwd,
         "before_chars": before, "after_chars": after,
         "before_tokens": before_tok, "after_tokens": after_tok,
         "saved_pct": round((before_tok - after_tok) / before_tok * 100, 1)
         if before_tok else 0,
+        "floor": floor,
+        "billed_before": billed["ctx"] if billed else None,
+        # What the fork will carry on resume: prior-turn thinking is dropped
+        # by the API on a new user turn, so it is floor + AFTER, not AFTER.
+        "resume_tokens": floor["est"] + after_tok,
         **stats,
     }

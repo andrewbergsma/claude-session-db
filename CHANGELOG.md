@@ -19,6 +19,45 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.25.0] - 2026-09-08
+
+### Added
+
+- **CR — the composer sends INTO the fork.** With CR mode on, Enter (or the
+  Answer button, relabelled *⑂ CR answer*) no longer resumes the original
+  session: one `POST /api/cr {confirm:true, text}` writes the reduced fork
+  with the current keep / stub / ref picks and starts the headless turn in
+  the NEW session, registered under the fork's id so Stop aims at it. The
+  console then opens the fork. Fork is disabled while CR is on (Answer
+  already forks). Without `text` the endpoint is unchanged — write only, no
+  spawn. The original transcript is never touched, and a failed spawn keeps
+  the fork (`spawn_error` in the payload, shown in the dialog).
+- **CR — the fork's context is an estimate until it is measured.** A CR
+  fork copies its source's last usage block verbatim, so a session just
+  reduced to 44K read *ctx 230k* in the sidebar and header. `cr_apply`
+  now stamps `cr_source / cr_before / cr_after / cr_floor / cr_billed /
+  cr_at` on the fork's meta.json (durable); `_cr_overlay` shows
+  **floor + AFTER** as `≈76k ctx` (italic, labelled *CR estimate*) on the
+  nav row, the header chip (`ctx ≈76k est`, plus a `⑂ CR of ‹source›` chip
+  linking back) and the status line, until an assistant usage record
+  postdates the stamp — then the measured figure replaces it.
+- **CR — BEFORE reconciled to what the API billed.** `cr.billed_context`
+  reads usage: the last call's context (the header's ctx), the floor as
+  turn-1 context (≈32K on a real session, against the hard-coded 70–100K
+  band, which is now only the usage-less fallback and says so), and
+  `last_turn_output` (Σ output tokens of the last turn's earlier calls — an
+  upper bound on the encrypted thinking still in context). The cart and the
+  preview print the decomposition, signed: `BILLED ctx ≈230K = floor ≈32K
+  + reducible ≈98K + last-turn thinking ≤42K + estimate error ≈58K`, and a
+  `resume ≈ floor + AFTER` figure, since a resumed fork drops prior-turn
+  thinking. Σ rows remains exactly the reducible measure; nothing is
+  absorbed.
+- **CR — the resume command, with the cwd.** `claude --resume ID` resolves
+  the id inside the *current* cwd's project dir, and the fork is written
+  beside its source — so the preview, the post-write dialog and the
+  payload (`resume_cmd`) print `cd ‹source cwd› && claude --resume ‹id›`
+  with a copy button and an *open fork* button.
+
 ## [3.24.5] - 2026-09-07
 
 ### Added

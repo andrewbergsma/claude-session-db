@@ -370,6 +370,31 @@ to BEFORE. `residual_tokens` exists only so a future drift would be *shown*
 instead of absorbed. Locked kinds (thinking, unrecognised blocks) are counted
 but never stubbed. Preview, fork and manifest all report this one measure.
 
+**Σ rows is the REDUCIBLE context, not the context.** The API bills more than
+any file count can see: the scaffolding floor, the model's thinking when the
+transcript stores it as a signature only, and the chars/4 shortfall on JSON
+tool traffic. `cr.billed_context` reads `usage` — the last call's context (the
+header's ctx chip), the floor as turn-1 context (≈32K on a real session; the
+70–100K band is only the usage-less fallback, labelled `source: band`), and
+`last_turn_output`, an upper bound on the thinking still in context — and the
+cart/preview print the reconciliation signed: `BILLED ctx ≈230K = floor ≈32K
++ reducible ≈98K + last-turn thinking ≤42K + estimate error ≈58K`. What a
+fork will bill on resume is `floor + AFTER` (prior-turn thinking is dropped),
+and that figure is printed beside AFTER.
+
+**The fork behaves like the reduced session it claims to be.** With CR mode
+on, the composer sends INTO the fork: one `POST /api/cr {confirm:true, text}`
+writes the fork and starts the headless turn in the NEW session (registered
+under the fork's id; the same direct spawn `point_fork` uses — a file the
+console just wrote is not a second writer), then the console opens it. The
+fork is stamped on meta.json (`cr_source/before/after/floor/billed/at`), and
+because it copies its source's last usage block verbatim, `_cr_overlay` shows
+`≈floor+AFTER` as a labelled *CR estimate* on the row, header and status line
+until an assistant usage record postdates the stamp. `claude --resume ID`
+resolves inside the CURRENT cwd's project dir and the fork lives beside its
+source, so the preview, the post-write dialog and `resume_cmd` print
+`cd ‹source cwd› && claude --resume ‹id›`.
+
 **Per-source control.** Each group header expands into an itemized list (one
 line per source, heaviest first, turn number + breadcrumb + size + dup marker),
 with per-item keep/stub/ref buttons writing the same `crAct` state as the group

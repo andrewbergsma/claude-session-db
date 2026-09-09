@@ -204,6 +204,38 @@ def _first_line(s: str, n: int = 70) -> str:
     return line if len(line) <= n else line[: n - 1] + "…"
 
 
+HEAD_CHARS = 140          # the opening of a row's content, shown on its line
+
+
+def _head(text, n: int = HEAD_CHARS) -> str:
+    """The first `n` characters of a row's content, whitespace-collapsed —
+    what the row IS, on its own line, instead of its uuid. A uuid tells the
+    operator nothing about whether to keep or stub; the opening words do."""
+    t = " ".join(_ANSI_RE.sub("", text or "").split())
+    return t if len(t) <= n else t[: n - 1] + "…"
+
+
+def _result_text(content) -> str:
+    """The text of a tool_result `content` as the API sees it — a string, or
+    the text sub-blocks joined (an image sub-block is its own row and renders
+    as a placeholder here; an unknown sub-block is its JSON)."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return json.dumps(content, ensure_ascii=False)
+    parts = []
+    for b in content:
+        if isinstance(b, str):
+            parts.append(b)
+        elif isinstance(b, dict) and b.get("type") == "image":
+            parts.append("[image — its own CR row]")
+        elif isinstance(b, dict) and isinstance(b.get("text"), str):
+            parts.append(b["text"])
+        else:
+            parts.append(json.dumps(b, ensure_ascii=False))
+    return "\n".join(parts)
+
+
 def injection_label(text: str) -> tuple:
     """(name, hint) for an injected user-role record — what it IS, not its
     first 60 raw characters.
@@ -437,7 +469,7 @@ def build_manifest(records, bash_kmcp=None) -> dict:
 
         def row(rid, kind, chars, *, name=None, hint=None, refs=None,
                 dg=None, locked=False, tid=None, est=None, bidx=None,
-                sub=None, extra=None):
+                sub=None, extra=None, head=None):
             dup = False
             if dg is not None and chars >= DUP_MIN_CHARS:
                 if dg in seen:
@@ -464,6 +496,7 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 "dup": dup, "dup_of": seen.get(dg) if dup else None,
                 "turn": turn, "recent": recent, "bidx": bidx, "sub": sub,
                 "locked": locked, "default": default, "ts": r.get("timestamp"),
+                "head": head or "",
             }
             if extra:
                 rw.update(extra)
@@ -479,7 +512,7 @@ def build_manifest(records, bash_kmcp=None) -> dict:
             row(rid, "image", b64, est=est, bidx=bidx, sub=sub,
                 name=src.get("media_type") or "image", hint=label,
                 dg=_digest(src.get("data") or rid),
-                extra={"dims": label, "b64_chars": b64})
+                extra={"dims": label, "b64_chars": b64}, head=label)
 
         if t == "assistant":
             narr = 0
@@ -489,7 +522,8 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 if not isinstance(b, dict):
                     row(f"o:{uid}#{bidx}", "other",
                         len(json.dumps(b, ensure_ascii=False)), locked=True,
-                        bidx=bidx, name="unrecognised block")
+                        bidx=bidx, name="unrecognised block",
+                        head=_head(json.dumps(b, ensure_ascii=False)))
                     continue
                 bt = b.get("type")
                 if bt == "text":
@@ -501,7 +535,8 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                     rid = f"th:{uid}" if n_think == 0 else f"th:{uid}#{n_think}"
                     n_think += 1
                     row(rid, "thinking", len(b.get("thinking") or ""),
-                        locked=True, bidx=bidx, name="thinking")
+                        locked=True, bidx=bidx, name="thinking",
+                        head=_head(b.get("thinking") or ""))
                 elif bt == "tool_use":
                     inp = b.get("input")
                     inp = inp if isinstance(inp, dict) else {}
@@ -509,17 +544,20 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                     row(f"x:{b.get('id')}", "tool_use",
                         len(json.dumps(inp, ensure_ascii=False)),
                         tid=b.get("id"), bidx=bidx, name=name,
-                        hint=input_hint(name, inp), dg=_digest([name, inp]))
+                        hint=input_hint(name, inp), dg=_digest([name, inp]),
+                        head=_head(json.dumps(inp, ensure_ascii=False)))
                 elif bt == "image":
                     image_row(b, bidx)
                 else:
                     row(f"o:{uid}#{bidx}", "other",
                         len(json.dumps(b, ensure_ascii=False)), locked=True,
-                        bidx=bidx, name=str(bt or "block"))
+                        bidx=bidx, name=str(bt or "block"),
+                        head=_head(json.dumps(b, ensure_ascii=False)))
             if isinstance(content, str):
                 narr = len(content)
             if narr:
-                row(f"a:{uid}", "narration", narr)
+                row(f"a:{uid}", "narration", narr,
+                    head=_head(_text_of(content)))
         else:   # user
             txt_chars = 0
             for bidx, b in enumerate(content if isinstance(content, list)
@@ -537,13 +575,13 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                         row(f"t:{tid}", "kmcp", chars, tid=tid, bidx=bidx,
                             name=meta.get("kmcp"),
                             refs=_kmcp_refs(meta["kmcp"], meta.get("input", {})),
-                            dg=_digest(body))
+                            dg=_digest(body), head=_head(_result_text(body)))
                     else:
                         row(f"t:{tid}", "result", chars, tid=tid, bidx=bidx,
                             name=meta.get("name", "?"),
                             hint=input_hint(meta.get("name", "?"),
                                             meta.get("input", {})),
-                            dg=_digest(body))
+                            dg=_digest(body), head=_head(_result_text(body)))
                     for si, sb in enumerate(body if isinstance(body, list)
                                             else []):
                         if isinstance(sb, dict) and sb.get("type") == "image":
@@ -555,17 +593,18 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 else:
                     row(f"o:{uid}#{bidx}", "other",
                         len(json.dumps(b, ensure_ascii=False)), locked=True,
-                        bidx=bidx, name=str(bt or "block"))
+                        bidx=bidx, name=str(bt or "block"),
+                        head=_head(json.dumps(b, ensure_ascii=False)))
             if isinstance(content, str):
                 txt_chars = len(content)
             if txt_chars:
                 txt = _text_of(content)
                 if _is_real_prompt(r, txt):
-                    row(f"u:{uid}", "prompt", txt_chars)
+                    row(f"u:{uid}", "prompt", txt_chars, head=_head(txt))
                 else:
                     iname, ihint = injection_label(txt)
                     row(f"s:{uid}", "injection", txt_chars, name=iname,
-                        hint=ihint, dg=_digest(txt))
+                        hint=ihint, dg=_digest(txt), head=_head(txt))
 
     groups: dict = {}
     for rw in rows:
@@ -628,6 +667,78 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         "floor": floor,
         "billed": billed,
     }
+
+
+def row_body(records, row) -> dict:
+    """The FULL content behind one manifest row, as the API would see it —
+    what the operator reviews before deciding keep / stub. Text kinds return
+    `text`; an image returns `image` {media_type, data} (base64) instead. A
+    row whose record or block cannot be found returns None (a transcript
+    that changed under the manifest), never a guess.
+
+    Locates by the row's own coordinates: uuid → record, then tid (tool_use
+    / tool_result pairing) or bidx (+ sub for an image inside a result)."""
+    if not isinstance(row, dict):
+        return None
+    uid, kind = row.get("uuid"), row.get("kind")
+    rec = next((r for r in records if r.get("uuid") == uid
+                and not r.get("isSidechain")), None)
+    if rec is None:
+        return None
+    content = (rec.get("message") or {}).get("content")
+    blocks = content if isinstance(content, list) else []
+    out = {"id": row.get("id"), "kind": kind, "name": row.get("name"),
+           "hint": row.get("hint"), "refs": row.get("refs"),
+           "turn": row.get("turn"), "uuid": uid, "chars": row.get("chars"),
+           "est_tokens": row.get("est_tokens"), "text": None, "image": None}
+
+    def at(idx):
+        return blocks[idx] if isinstance(idx, int) and 0 <= idx < len(blocks) \
+            else None
+
+    if kind in ("prompt", "injection", "narration"):
+        out["text"] = _text_of(content)
+    elif kind == "thinking":
+        b = at(row.get("bidx"))
+        if not (isinstance(b, dict) and b.get("type") == "thinking"):
+            return None
+        out["text"] = b.get("thinking") or ""
+    elif kind == "tool_use":
+        b = next((x for x in blocks if isinstance(x, dict)
+                  and x.get("type") == "tool_use"
+                  and x.get("id") == row.get("tid")), None)
+        if b is None:
+            return None
+        inp = b.get("input")
+        out["text"] = json.dumps(inp if isinstance(inp, dict) else {},
+                                 indent=2, ensure_ascii=False)
+    elif kind in ("result", "kmcp"):
+        b = next((x for x in blocks if isinstance(x, dict)
+                  and x.get("type") == "tool_result"
+                  and x.get("tool_use_id") == row.get("tid")), None)
+        if b is None:
+            return None
+        out["text"] = _result_text(b.get("content", ""))
+    elif kind == "image":
+        b = at(row.get("bidx"))
+        if isinstance(b, dict) and b.get("type") == "tool_result" \
+                and row.get("sub") is not None:
+            inner = b.get("content")
+            sub = row.get("sub")
+            b = inner[sub] if isinstance(inner, list) and 0 <= sub < len(inner) \
+                else None
+        if not (isinstance(b, dict) and b.get("type") == "image"):
+            return None
+        src = b.get("source") or {}
+        out["image"] = {"media_type": src.get("media_type") or "image/png",
+                        "data": src.get("data") or ""}
+        out["text"] = f"image {row.get('dims') or ''}".strip()
+    else:                                   # other — the block verbatim
+        b = at(row.get("bidx"))
+        if b is None:
+            return None
+        out["text"] = json.dumps(b, indent=2, ensure_ascii=False)
+    return out
 
 
 def surface_tokens(records, bash_kmcp=None) -> int:

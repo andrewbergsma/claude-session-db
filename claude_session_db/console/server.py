@@ -65,6 +65,8 @@ Endpoints
   POST /api/title/dismiss          {session_id, proposal} -> dismiss a proposed title
   POST /api/batch                  {actions, session_ids|scope, options?:{force}}
                                    -> queue a fan-out (see the batch-ops section)
+  GET  /api/cr/row?id=<sid>&row=<rid>  the FULL content behind one manifest
+                                   row (text, or image {media_type,data})
   GET  /api/cr/manifest?id=<sid>   CR manifest: one row per context block, with
                                    deterministic defaults + scaffolding floor
   POST /api/cr                     {session_id, stub[], refs[], confirm} —
@@ -3005,16 +3007,57 @@ def point_fork(session_id: str, at_uuid: str):
 # hydration failure degrades the preamble to plain text pointers. Neither ever
 # blocks the fork.
 # ----------------------------------------------------------------------------
-def cr_manifest_payload(sid: str):
+_CR_MEMO = {}       # path -> ((mtime_ns, size), records, manifest, truncated)
+
+
+def _cr_load(sid: str):
+    """(records, manifest, truncated) for a session, memoized on the file's
+    (mtime_ns, size) so the row-body endpoint — one call per row the operator
+    opens — does not rebuild the manifest of a 7MB transcript per click.
+    One entry per path, replaced when the transcript changes."""
     path = find_session(sid)
     if path is None:
-        return {"error": "not found"}, 404
+        return None
+    st = path.stat()
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _CR_MEMO.get(path)
+    if hit and hit[0] == sig:
+        return hit[1], hit[2], hit[3]
     records, truncated = all_records(path)
     records = [r for r in records if not r.get("isSidechain")]
     m = crlib.build_manifest(records, bash_kmcp=_bash_kmcp)
+    _CR_MEMO.clear()
+    _CR_MEMO[path] = (sig, records, m, truncated)
+    return records, m, truncated
+
+
+def cr_manifest_payload(sid: str):
+    loaded = _cr_load(sid)
+    if loaded is None:
+        return {"error": "not found"}, 404
+    _, m, truncated = loaded
+    m = dict(m)
     m["session_id"] = sid
     m["truncated"] = truncated
     return m, 200
+
+
+def cr_row_payload(sid: str, rid: str):
+    """GET /api/cr/row — the full content behind ONE manifest row, so the
+    operator can read what a keep / stub decision is about. Text kinds ship
+    `text`; an image ships `image` {media_type, data}. Unknown row → 404;
+    a row whose block has moved under the manifest → 409, never a guess."""
+    loaded = _cr_load(sid)
+    if loaded is None:
+        return {"error": "not found"}, 404
+    records, m, _ = loaded
+    row = next((r for r in m["rows"] if r.get("id") == rid), None)
+    if row is None:
+        return {"error": "row not in manifest"}, 404
+    body = crlib.row_body(records, row)
+    if body is None:
+        return {"error": "row's block not found — transcript changed?"}, 409
+    return body, 200
 
 
 def cr_search(q: str, app):
@@ -6471,6 +6514,17 @@ class Handler(SimpleHTTPRequestHandler):
                 return self._json({"error": "id required"}, 400)
             try:
                 payload, code = cr_manifest_payload(sid)
+                return self._json(payload, code)
+            except Exception as e:
+                return self._json({"error": str(e)[:300]}, 500)
+        if u.path == "/api/cr/row":
+            q = parse_qs(u.query)
+            sid = (q.get("id") or [""])[0]
+            rid = (q.get("row") or [""])[0]
+            if not sid or not rid:
+                return self._json({"error": "id and row required"}, 400)
+            try:
+                payload, code = cr_row_payload(sid, rid)
                 return self._json(payload, code)
             except Exception as e:
                 return self._json({"error": str(e)[:300]}, 500)

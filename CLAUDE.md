@@ -396,7 +396,10 @@ source, so the preview, the post-write dialog and `resume_cmd` print
 `cd ‹source cwd› && claude --resume ‹id›`.
 
 **Per-source control.** Each group header expands into an itemized list (one
-line per source, heaviest first, turn number + breadcrumb + size + dup marker),
+line per source, heaviest first or by turn, turn number + what-it-is + the
+row's opening words (`head`) + size + dup marker; tapping a line opens the
+row's FULL content in place via `GET /api/cr/row` — text as the API sees it,
+an image rendered — with a jump to the message in the chat),
 with per-item keep/stub/ref buttons writing the same `crAct` state as the group
 buttons and the stream chips — the three surfaces cannot disagree about a row.
 Capped at 40 items with a "show all N" toggle; open/closed remembered in

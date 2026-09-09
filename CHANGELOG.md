@@ -19,6 +19,28 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.26.0] - 2026-09-09
+
+### Added
+
+- **CR — every source row shows what it IS, and opens to its full content.**
+  The itemized list under a group used to print a row's uuid, which says
+  nothing about whether to keep or stub it. Every manifest row now carries
+  `head` — the opening ~140 characters of its content, whitespace-collapsed
+  (a prompt's or narration's words, a tool input's JSON, a result's first
+  line, a thinking block's opening, an image's dimensions) — and the line
+  prints the tool/hint or kmcp ref followed by that head. Tapping a line
+  opens the row's FULL content in place: `GET /api/cr/row?id=&row=` returns
+  the text as the API sees it (a tool input pretty-printed, a result's
+  sub-blocks joined, an image as `{media_type, data}` rendered inline), with
+  the current verb, size, a *↗ in chat* jump to the message and close. The
+  body is fetched once per row on demand — never shipped in the manifest,
+  so a 7MB transcript does not multiply into the rail. Works for every kind,
+  locked rows included. A `heaviest first | by turn` toggle (remembered per
+  browser) orders the list for review in conversation order. The console
+  memoizes the parsed records + manifest per transcript `(mtime_ns, size)`
+  so opening rows does not rebuild the manifest per click.
+
 ## [3.25.0] - 2026-09-08
 
 ### Added

@@ -309,3 +309,38 @@ def test_resume_cmd_quotes_an_awkward_cwd():
     cmd = server.cr_resume_cmd("/Users/andrew/My Repo", "abc")
     assert cmd == "cd '/Users/andrew/My Repo' && claude --resume abc"
     assert server.cr_resume_cmd(None, "abc").startswith("claude --resume abc")
+
+
+# ---- row bodies (GET /api/cr/row) -------------------------------------------
+def test_row_payload_returns_the_full_content(env):
+    server._CR_MEMO.clear()
+    body, code = server.cr_row_payload(SID, "t:t2")
+    assert code == 200 and body["kind"] == "result"
+    assert body["text"] == "y" * 8000
+    body, code = server.cr_row_payload(SID, "u:u1")
+    assert code == 200 and body["text"] == "dig into the bug"
+    body, code = server.cr_row_payload(SID, "x:t1")
+    assert code == 200 and json.loads(body["text"])["path"] == "lesson/x"
+
+
+def test_row_payload_404_for_unknown_row_or_session(env):
+    server._CR_MEMO.clear()
+    assert server.cr_row_payload(SID, "t:nope")[1] == 404
+    assert server.cr_row_payload("00000000-0000-0000-0000-000000000000",
+                                 "u:u1")[1] == 404
+
+
+def test_manifest_rows_ship_heads_and_memo_follows_the_file(env):
+    server._CR_MEMO.clear()
+    payload, _ = server.cr_manifest_payload(SID)
+    by = {r["id"]: r for r in payload["rows"]}
+    assert by["u:u1"]["head"] == "dig into the bug"
+    assert by["a:a1"]["head"] == "reading the entry"
+    assert len(server._CR_MEMO) == 1
+    # the memo is keyed on (mtime_ns, size): a changed transcript rebuilds
+    recs = _recs()
+    recs[0]["message"]["content"] = "dig into the OTHER bug"
+    env.write_text("\n".join(json.dumps(r) for r in recs) + "\n")
+    payload, _ = server.cr_manifest_payload(SID)
+    assert {r["id"]: r for r in payload["rows"]}["u:u1"]["head"] \
+        == "dig into the OTHER bug"

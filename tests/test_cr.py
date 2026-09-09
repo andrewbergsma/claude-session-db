@@ -581,3 +581,59 @@ def test_forge_fork_reports_floor_cwd_and_resume_estimate(tmp_path):
     assert res["floor"]["source"] == "usage" and res["floor"]["est"] == 32_268
     assert res["billed_before"] == 60_109
     assert res["resume_tokens"] == res["floor"]["est"] + res["after_tokens"]
+
+
+# ─── Row heads and bodies — what a keep/stub decision is ABOUT ──────────────
+def test_every_row_carries_its_opening_words():
+    m = cr.build_manifest(_rich_transcript())
+    by = {r["id"]: r for r in m["rows"]}
+    assert by["u:u1"]["head"] == "here is the screenshot"
+    assert by["u:u2"]["head"] == "what is wrong with it?"
+    assert by["a:a1"]["head"] == "writing the file"
+    assert by["th:a1"]["head"] == "short"
+    assert by["x:t9"]["head"].startswith('{"file_path": "/tmp/big.py"')
+    assert by["t:t9"]["head"].startswith("screenshot attached")
+    assert by["i:u2#0"]["head"] == "1200x900"
+    assert all("head" in r for r in m["rows"])
+    assert all(len(r["head"]) <= cr.HEAD_CHARS for r in m["rows"])
+
+
+def test_head_collapses_whitespace_and_ansi():
+    assert cr._head("  a\n\n  b\t c ") == "a b c"
+    assert cr._head("\x1b[31mred\x1b[0m") == "red"
+    assert cr._head("x" * 500).endswith("…")
+    recs = _rich_transcript()
+    recs[2]["message"]["content"][0]["thinking"] = ""
+    th = next(r for r in cr.build_manifest(recs)["rows"] if r["id"] == "th:a1")
+    assert th["head"].startswith("(signature only")
+    assert len(cr._head("x" * 500)) == cr.HEAD_CHARS
+
+
+def test_row_body_every_kind():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    by = {r["id"]: r for r in m["rows"]}
+    assert cr.row_body(recs, by["u:u1"])["text"] == "here is the screenshot"
+    assert cr.row_body(recs, by["a:a1"])["text"] == "writing the file"
+    assert cr.row_body(recs, by["th:a1"])["text"] == "short"
+    tu = cr.row_body(recs, by["x:t9"])
+    assert json.loads(tu["text"])["file_path"] == "/tmp/big.py"
+    res = cr.row_body(recs, by["t:t9"])
+    assert res["text"].startswith("screenshot attached")
+    assert "[image" in res["text"]                # the sub-image is its own row
+    img = cr.row_body(recs, by["i:u2#0"])
+    assert img["image"]["media_type"] == "image/png"
+    assert img["image"]["data"] == recs[1]["message"]["content"][0]["source"]["data"]
+    sub = cr.row_body(recs, by["i:r10#0.1"])      # image INSIDE a tool_result
+    assert sub["image"]["data"] == recs[3]["message"]["content"][0]["content"][1]["source"]["data"]
+
+
+def test_row_body_reports_missing_not_guessed():
+    recs = _rich_transcript()
+    m = cr.build_manifest(recs)
+    row = dict(next(r for r in m["rows"] if r["id"] == "t:t9"))
+    row["tid"] = "nope"
+    assert cr.row_body(recs, row) is None
+    row = dict(next(r for r in m["rows"] if r["id"] == "u:u1"), uuid="ghost")
+    assert cr.row_body(recs, row) is None
+    assert cr.row_body(recs, None) is None

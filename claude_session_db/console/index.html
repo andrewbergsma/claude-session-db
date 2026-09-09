@@ -1088,6 +1088,26 @@
   .cr-it .ib:hover { color:var(--ink); }
   .cr-it .ib.on { color:var(--accent); border-color:var(--accent); }
   .cr-it .ilock { color:var(--ink2); flex:none; }
+  .cr-it .il { cursor:pointer; }
+  .cr-it .il:hover { text-decoration:underline dotted; }
+  .cr-it .il .ih { color:var(--muted); }
+  .cr-it.open .il { white-space:normal; }
+  /* the row's full content, opened in place under its line */
+  .cr-body { margin:0 0 6px 35px; border:1px solid var(--border); border-radius:6px;
+             background:var(--bg2, rgba(255,255,255,.02)); }
+  .cr-body pre { margin:0; padding:6px 8px; max-height:260px; overflow:auto;
+                 white-space:pre-wrap; word-break:break-word;
+                 font:10.5px/1.45 var(--mono); color:var(--ink); }
+  .cr-body img { display:block; max-width:100%; max-height:260px; margin:6px auto; }
+  .cr-body .bf { display:flex; gap:10px; align-items:baseline; padding:3px 8px;
+                 border-top:1px solid var(--border); color:var(--muted);
+                 font:10px var(--mono); }
+  .cr-body .bf a { color:var(--accent); cursor:pointer; }
+  .cr-body .bf .err { color:var(--bad); }
+  .cr-sort { display:flex; gap:8px; padding:2px 0 2px 9px; color:var(--muted);
+             font:10px var(--mono); }
+  .cr-sort span { cursor:pointer; }
+  .cr-sort span.on { color:var(--accent); }
   .cr-more { cursor:pointer; color:var(--accent); font:10.5px var(--mono);
              padding:3px 0 4px 9px; }
   .cr-sec { font:10px var(--mono); text-transform:uppercase; letter-spacing:.5px;
@@ -4935,6 +4955,52 @@ function crGrpToggle(k){
 }
 function crShowAllToggle(k){ crShowAll[k] = !crShowAll[k]; renderCrCart(); }
 
+/* THE ROW'S CONTENT. A line that reads `a:6aa6b103-…` tells the operator
+   nothing about whether to keep it; the opening words do, and the full body
+   is one tap away — fetched on demand from /api/cr/row (never shipped in the
+   manifest, which would multiply a 7MB transcript into the rail). Open rows
+   and their bodies survive a re-render; a body is fetched once per row. */
+const CRS_KEY = "csd.crSort";        // "size" (heaviest first) | "turn"
+let crOpenRows = {};                 // row id -> true (open in place)
+let crBodies = {};                   // row id -> payload | {error} | "loading"
+function crSort(){ try { return localStorage.getItem(CRS_KEY) || "size"; } catch(e){ return "size"; } }
+function crSetSort(v){ try { localStorage.setItem(CRS_KEY, v); } catch(e){} renderCrCart(); }
+async function crRowToggle(id){
+  if(crOpenRows[id]){ delete crOpenRows[id]; renderCrCart(); return; }
+  crOpenRows[id] = true;
+  if(!crBodies[id]){
+    crBodies[id] = "loading"; renderCrCart();
+    try {
+      const r = await fetch("/api/cr/row?id=" + encodeURIComponent(curId)
+                            + "&row=" + encodeURIComponent(id));
+      crBodies[id] = await r.json();
+    } catch(e){ crBodies[id] = {error: "unreachable"}; }
+  }
+  renderCrCart();
+}
+function crRowBody(r){
+  const b = crBodies[r.id];
+  const a = crAct(r.id);
+  const jump = r.uuid ? `<a onclick="crJump('${esc(r.uuid)}')" title="scroll the chat to this message">↗ in chat</a>` : "";
+  const size = `${(r.chars||0).toLocaleString()} chars · ${crK(r.est_tokens)}`;
+  const verb = r.locked ? "locked — always travels"
+    : a === "keep" ? "kept in full" : a === "stub" ? "stubbed to a breadcrumb" : "stubbed, app:path in the preamble";
+  let inner;
+  if(!b || b === "loading") inner = `<pre>loading…</pre>`;
+  else if(b.error) inner = `<pre class="err">${esc(b.error)}</pre>`;
+  else if(b.image) inner = `<img src="data:${esc(b.image.media_type)};base64,${b.image.data}" alt="${esc(b.text||"image")}">`;
+  else inner = `<pre>${esc(b.text || "(empty)")}</pre>`;
+  return `<div class="cr-body"><div class="bf"><span>${esc(verb)}</span><span>${esc(size)}</span>${jump}
+    <a style="margin-left:auto" onclick="crRowToggle('${esc(r.id)}')">✕ close</a></div>${inner}</div>`;
+}
+function crJump(uuid){
+  const el = document.getElementById("ev-" + uuid);
+  if(!el){ toast("that message is not in the rendered stream"); return; }
+  el.scrollIntoView({block:"center"});
+  el.classList.add("anchor-flash");
+  setTimeout(()=>el.classList.remove("anchor-flash"), 2500);
+}
+
 function crKey(){ return "csd.cr." + curId; }
 function crSave(){
   try { localStorage.setItem(crKey(),
@@ -5067,6 +5133,7 @@ async function toggleCR(){
   }
   d.byId = {}; d.rows.forEach(r => d.byId[r.id] = r);
   crManifest = d; crActions = {}; crCart = []; crHits = null;
+  crOpenRows = {}; crBodies = {};
   try {          // restore this session's saved curation, if any
     const saved = JSON.parse(localStorage.getItem(crKey()) || "null");
     if(saved){
@@ -5103,6 +5170,7 @@ function crComposerLabels(on){
 }
 function exitCR(){
   crMode = false; crManifest = null; crHits = null;
+  crOpenRows = {}; crBodies = {};
   crComposerLabels(false);
   document.body.classList.remove("crmode");
   document.getElementById("bcr").classList.remove("on");
@@ -5116,9 +5184,16 @@ function exitCR(){
    cannot blow up the rail, and wired to the same crAct state as everything
    else. Locked rows render without buttons: they are counted, never hidden. */
 function crItems(kind, rows){
-  const sorted = rows.slice().sort((a, b) => b.est_tokens - a.est_tokens);
+  const byTurn = crSort() === "turn";
+  const sorted = rows.slice().sort((a, b) => byTurn
+    ? (a.turn - b.turn) || String(a.ts||"").localeCompare(String(b.ts||""))
+    : b.est_tokens - a.est_tokens);
   const all = !!crShowAll[kind];
   const shown = all ? sorted : sorted.slice(0, CR_ITEM_CAP);
+  const sortBar = rows.length > 1 ? `<div class="cr-sort">
+    <span class="${byTurn ? "" : "on"}" onclick="crSetSort('size')" title="the rows that move the number first">heaviest first</span>
+    <span class="${byTurn ? "on" : ""}" onclick="crSetSort('turn')" title="in conversation order">by turn</span>
+    <span style="cursor:default;margin-left:auto" title="tap a line to read the full content under it">tap a line to read it</span></div>` : "";
   const lines = shown.map(r => {
     const a = crAct(r.id);
     const ib = (v, txt) => `<span class="ib ${a === v ? "on" : ""}"
@@ -5128,20 +5203,28 @@ function crItems(kind, rows){
         onclick="crSetAct('${esc(r.id)}','${v}')">${txt}</span>`;
     const btns = r.locked ? `<span class="ilock" title="counted, never stubbed">locked</span>`
       : ib("keep", "☑") + ib("stub", "☐") + (r.kind === "kmcp" ? ib("ref", "◫") : "");
+    // label = what it is (tool + hint, or kmcp refs) + the opening words of
+    // its content; a prompt / narration / thinking row is its opening words.
     const nm = r.refs?.length ? r.refs.join(", ")
-      : [r.name, r.hint].filter(Boolean).join(" ") || r.id;
-    return `<div class="cr-it ${a}">
+      : [r.name, r.hint].filter(Boolean).join(" ");
+    const head = r.head || "";
+    const open = !!crOpenRows[r.id];
+    const lbl = (nm ? `<span class="in">${esc(nm.slice(0, 70))}</span>` : "")
+      + (head ? `${nm ? " · " : ""}<span class="ih">${esc(open ? head : head.slice(0, 120))}</span>` : "")
+      || esc(r.id);
+    return `<div class="cr-it ${a}${open ? " open" : ""}">
       <span class="itn" title="turn ${r.turn}${r.recent ? " (recent)" : ""}">t${r.turn}</span>
-      <span class="il" title="${esc(r.id + " — " + nm)}">${esc(nm.slice(0, 90))}</span>
+      <span class="il" title="${esc((nm ? nm + " — " : "") + head + "\n(tap to read the full content)")}"
+            onclick="crRowToggle('${esc(r.id)}')">${lbl}</span>
       ${r.dup ? `<span class="idup" title="sha1-duplicate of ${esc(r.dup_of || "an earlier row")}">⧉</span>` : ""}
-      <span class="isz">${crK(r.est_tokens)}</span>${btns}</div>`;
+      <span class="isz">${crK(r.est_tokens)}</span>${btns}</div>${open ? crRowBody(r) : ""}`;
   }).join("");
   const more = sorted.length > CR_ITEM_CAP
     ? `<div class="cr-more" onclick="crShowAllToggle('${kind}')">${
         all ? "▴ show top " + CR_ITEM_CAP + " only"
             : "▾ show all " + sorted.length + " (" + (sorted.length - CR_ITEM_CAP) + " more)"}</div>`
     : "";
-  return `<div class="cr-items">${lines}${more}</div>`;
+  return `<div class="cr-items">${sortBar}${lines}${more}</div>`;
 }
 
 function renderCrCart(){

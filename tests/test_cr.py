@@ -602,6 +602,10 @@ def test_head_collapses_whitespace_and_ansi():
     assert cr._head("  a\n\n  b\t c ") == "a b c"
     assert cr._head("\x1b[31mred\x1b[0m") == "red"
     assert cr._head("x" * 500).endswith("…")
+    recs = _rich_transcript()
+    recs[2]["message"]["content"][0]["thinking"] = ""
+    th = next(r for r in cr.build_manifest(recs)["rows"] if r["id"] == "th:a1")
+    assert th["head"].startswith("(signature only")
     assert len(cr._head("x" * 500)) == cr.HEAD_CHARS
 
 

@@ -536,7 +536,8 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                     n_think += 1
                     row(rid, "thinking", len(b.get("thinking") or ""),
                         locked=True, bidx=bidx, name="thinking",
-                        head=_head(b.get("thinking") or ""))
+                        head=_head(b.get("thinking") or "")
+                        or "(signature only — thinking text not stored)")
                 elif bt == "tool_use":
                     inp = b.get("input")
                     inp = inp if isinstance(inp, dict) else {}

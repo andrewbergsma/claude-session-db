@@ -12,31 +12,60 @@ Verified against **Claude Code v2.1.259** (2026-09).
 
 ```
 Opus 5  ~/GitHub/knowledge  ⎇ fix/foo ⧉ ±3 ↑1
-316k (314k cached · exp 08:02 · 91% hit 2 miss) / 1000k  high  (9c799c1b)
+316k / 1000k  R 41.2M · W 352k · exp 08:02 · 91% hit 2 miss  high  (9c799c1b)
 ```
 
 - **Row 1** — model, cwd, and a compact git segment: branch, `⧉` linked-worktree
   marker, `±N` dirty count, `↑/↓` ahead/behind. Omitted outside a repo.
-- **Row 2** — context budget `total (cache detail) / window`, then effort or
-  output style, then the session id.
+- **Row 2** — context budget `in-window / window`, then the cache segment,
+  then effort or output style, then the session id.
 
-Row 2 is colored by **percentage of the actual window**, not by an absolute
-token count: green `<75%`, yellow `<90%`, red `≥90%`. (Before the 2026-09 fix
-the thresholds were the absolute 150k/200k marks, which pinned every 1M-context
-session to red.)
+The budget is colored by **percentage of the actual window**, not by an
+absolute token count: green `<75%`, yellow `<90%`, red `≥90%`. (Before the
+2026-09 fix the thresholds were the absolute 150k/200k marks, which pinned
+every 1M-context session to red.)
 
-### Cache detail
+### Cache segment
 
-Everything inside the parentheses comes from the payload and each piece is
-independently optional:
+Each piece is independently optional:
 
 | Piece | Source | Shown when |
 |---|---|---|
-| `314k cached` | `context_window.current_usage.cache_read_input_tokens` | non-zero |
+| `R 41.2M` | Session-total `cache_read_input_tokens`, summed from the transcript (see below) | non-zero |
+| `W 352k` | Session-total `cache_creation_input_tokens`, same sum; falls back to `prompt_cache.cache_write_tokens` when there is no transcript | non-zero |
 | `exp 08:02` | `prompt_cache.expires_at` | `prompt_cache.warm == true` |
 | `cold` | `prompt_cache.warm == false` | `prompt_cache` present |
 | `91% hit` | `prompt_cache.hit_ratio` | non-null |
 | `2 miss` | `prompt_cache.misses` | `> 0` |
+
+`R`/`W` are cumulative for the session's main thread — every request's cache
+reads and writes, not the current turn's. They are the two sides of the cache
+bill: reads at ~0.1× input price, writes at 1.25× (5m) or 2× (1h). Numbers
+scale `950` → `352k` → `41.2M` → `1.2B`.
+
+#### How the totals are summed
+
+The payload has a cumulative write count (`prompt_cache.cache_write_tokens`)
+but **no cumulative read count**, and `current_usage` is only the last request.
+Status-line runs are debounced and cancelled, so accumulating `current_usage`
+per render would miss requests. The totals are therefore summed from
+`transcript_path`, incrementally:
+
+- A state file `$SL_STATE_DIR/<session_id>.tot` (default
+  `${TMPDIR:-/tmp}/claude-statusline`) holds the transcript path, the byte
+  offset already summed, the running sums, and the last message id. Each render
+  reads only the bytes appended since — typically a few KB.
+- Lines are de-duplicated by `message.id` (the transcript repeats a message's
+  usage on every content-block line; last one wins, across chunk boundaries).
+  `isSidechain` lines are skipped, matching `prompt_cache`'s main-thread scope.
+  A trailing line still being written is left for the next render.
+- A resumed session with a large transcript catches up in `SL_TAIL_CAP`-byte
+  chunks (default 16 MB, ~120ms each), one per render. Until it has caught up
+  the totals carry a trailing `+` (`R 12.1M+`), meaning "at least".
+- A different transcript path, or a file that shrank, resets the sums.
+- Reads use `dd skip=N count=0` to seek, not `tail -c +N`: BSD `tail` writes
+  in tiny chunks (~30ms/MB), which put a 16 MB chunk at 470ms — past the
+  debounce.
 
 `exp HH:MM` is the local clock time the warm prefix leaves its TTL. Claude Code
 re-runs the status line when a warm cache's `expires_at` passes, so the segment
@@ -64,7 +93,8 @@ reads, and their absence rules:
 | `prompt_cache` | v2.1.251+. **Absent until the main conversation's first API response.** `warm`, `ttl`, `expires_at` (epoch s, `null` when cold), `hit_ratio` (`null` while all counts are zero), `misses`, `requests`, `cache_write_tokens`, … Subagent requests are not counted |
 | `effort.level` | Absent when the model has no effort parameter |
 | `output_style.name` | |
-| `transcript_path` | Only read on the legacy fallback path (see below) |
+| `transcript_path` | Summed incrementally for `R`/`W` (see "How the totals are summed"); its tail is also the legacy budget fallback |
+| `prompt_cache.cache_write_tokens` | `W` fallback when there is no transcript |
 
 Fields the script deliberately does **not** use: `cost.*`, `rate_limits.*`
 (incl. `spend_limit`, v2.1.251+), `exceeds_200k_tokens`, `pr.*`, `vim.*`,
@@ -94,7 +124,9 @@ the context/cache area render intermittently or wrongly.
    therefore shows stale content or nothing. The old version grepped the entire
    transcript twice per render — 649ms on a 37 MB JSONL, and worse as the
    session grows. Everything it was mining from the transcript is now in the
-   payload; the current version is ~130ms, dominated by one `git status`.
+   payload, except session-total cache reads, which are summed from a
+   remembered byte offset so each render reads only new bytes. The current
+   version is ~130ms, dominated by one `git status`.
 2. **One `jq` pass.** The payload is parsed once into a `\037`-joined row.
    Not tab-joined: tab is IFS whitespace, so bash collapses runs of tabs and a
    single absent field silently shifts every field after it.
@@ -110,17 +142,22 @@ the context/cache area render intermittently or wrongly.
 SL_SCRIPT=/other/statusline.sh ./test_statusline.sh --show   # compare versions
 ```
 
-`samples/` holds eleven payloads covering the shapes the contract allows:
+`samples/` holds twelve payloads covering the shapes the contract allows:
 no `context_window`; first turn with `null`s; a normal 200k turn with a warm 5m
 cache; a 1M window with a warm 1h cache; a near-full 1M window; post-`/compact`
 (`current_usage` null, cache cold); `used_percentage` absent with
 `current_usage` present; a resumed session with no `prompt_cache` yet;
 a legacy payload resolved from `samples/transcript-fixture.jsonl`; a full
-payload with `rate_limits.spend_limit`; and a truncated, unparseable payload.
+payload with `rate_limits.spend_limit`; a truncated, unparseable payload; and
+session totals summed from `samples/totals-fixture.jsonl` (duplicate
+content-block lines, a sidechain line, a malformed line, a 2 KB tool result,
+and a trailing line still being written).
 
 Assertions run against the last output row with ANSI stripped, because row 1
 carries live git state. Each sample also asserts exit 0, empty stderr, 1–2 rows,
-and a 250ms wall-clock budget.
+and a 250ms wall-clock budget. A final check replays sample 12 with a 600-byte
+`SL_TAIL_CAP` and asserts the chunked catch-up shows `+` and then converges on
+exactly the uncapped totals. State files go to a throwaway `SL_STATE_DIR`.
 
 ## Wiring
 
@@ -139,8 +176,9 @@ well as on events; the event triggers go quiet while the main session is idle
 
 ## Dependencies
 
-`bash`, `jq`, `git`, `awk`, `date`. `date` conversion tries BSD/macOS
-`date -r` first and falls back to GNU `date -d @…`, so it works on macOS and
+`bash`, `jq` (1.6+ for `utf8bytelength`), `git`, `awk`, `date`, `stat`, `dd`,
+`head`. `date` conversion tries BSD/macOS `date -r` first and falls back to GNU
+`date -d @…`; `stat` tries GNU `-c %s` then BSD `-f %z`. Works on macOS and
 Linux.
 
 ## Version notes

@@ -24,6 +24,7 @@ pip install -e .              # csd is a zsh function, not a PATH binary
 csd ingest [--rebuild|--force] ; csd stats ; csd recent ; csd query "SQL"
 csd sweep-health ; csd summarize-health          # DB-free watchers
 csd digest REF ; csd summary-scope REF           # the /session-summary seam
+csd digest REF --cr [--since TS] [--out F]      # the summarizer's CR cut; --row ID expands a stub
 csd angles [--session ID] ; csd console          # miner + the web UI (:4462)
 pytest                                           # tests
 ```

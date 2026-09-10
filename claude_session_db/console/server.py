@@ -381,7 +381,7 @@ META_FIELDS = ("title", "priority", "topic", "subtopic", "tp_dismissed",
                # CR fork stamp (cr_apply confirm): what the fork was reduced
                # from and to, so the nav can show an ESTIMATE until measured.
                "cr_source", "cr_before", "cr_after", "cr_floor", "cr_billed",
-               "cr_at")
+               "cr_resume", "cr_at")
 MAX_TITLE_LEN = 200
 MAX_TOPIC_LEN = 80
 
@@ -1471,13 +1471,16 @@ def _cr_overlay(s: dict, m: dict, last_usage_ts) -> None:
     if not after:
         return
     floor = m.get("cr_floor") or 0
+    # The stamped resume figure already subtracts the stored thinking text
+    # the API drops on a new turn; a pre-3.27 stamp has none → floor+AFTER.
+    resume = m.get("cr_resume") or (int(after) + int(floor))
     cr = {"source": m.get("cr_source"), "before": m.get("cr_before"),
           "after": after, "floor": floor, "billed": m.get("cr_billed"),
-          "at": m.get("cr_at"),
+          "resume": resume, "at": m.get("cr_at"),
           "measured": bool(last_usage_ts and m.get("cr_at")
                            and _ts_after(last_usage_ts, m["cr_at"]))}
     if not cr["measured"]:
-        s["ctx_tokens"] = int(after) + int(floor)
+        s["ctx_tokens"] = int(resume)
         s["ctx_est"] = "cr"
     s["cr"] = cr
 
@@ -3167,8 +3170,10 @@ def cr_apply(sid: str, stub, refs, confirm: bool, text=None, cwd=None):
         after = crlib.context_surface(records) + len(preamble or "")
         # Same accounting model as the manifest the operator is looking at —
         # Σ rows, images at image-token rates, signatures excluded.
-        after_tok = (crlib.surface_tokens(records, bash_kmcp=_bash_kmcp)
-                     + crlib.est_tokens(len(preamble or "")))
+        mf_after = crlib.build_manifest(records, bash_kmcp=_bash_kmcp)
+        pre_tok = crlib.est_tokens(len(preamble or ""))
+        after_tok = mf_after["totals"]["est_tokens"] + pre_tok
+        resume = crlib.resume_estimate(manifest["floor"]["est"], mf_after)
         return {"ok": True, "phase": "preview",
                 "before_chars": before, "after_chars": after,
                 "before_tokens": before_tok,
@@ -3177,7 +3182,8 @@ def cr_apply(sid: str, stub, refs, confirm: bool, text=None, cwd=None):
                                    1) if before_tok else 0,
                 "floor": manifest["floor"],
                 "billed": manifest["billed"],
-                "resume_tokens": manifest["floor"]["est"] + after_tok,
+                "resume_tokens": resume["resume_tokens"] + pre_tok,
+                "dropped_on_resume": resume["dropped_on_resume"],
                 "cwd": _records_cwd(records) or cwd,
                 "stubbed": len(stats["stubbed"]), "ignored": stats["ignored"],
                 "preamble": preamble, "refs": refs,
@@ -3199,6 +3205,7 @@ def cr_apply(sid: str, stub, refs, confirm: bool, text=None, cwd=None):
                      cr_after=int(res["after_tokens"] or 0),
                      cr_floor=int(res["floor"]["est"] or 0),
                      cr_billed=int(res["billed_before"] or 0),
+                     cr_resume=int(res["resume_tokens"] or 0),
                      cr_at=stamped_at)
     except Exception as e:                       # the fork exists regardless
         print(f"cr: meta stamp failed for {new_id[:8]}: {e}", file=sys.stderr)
@@ -3212,6 +3219,7 @@ def cr_apply(sid: str, stub, refs, confirm: bool, text=None, cwd=None):
                "floor": res["floor"],
                "billed_before": res["billed_before"],
                "resume_tokens": res["resume_tokens"],
+               "dropped_on_resume": res["dropped_on_resume"],
                "stubbed": len(res["stubbed"]), "ignored": res["ignored"],
                "refs": refs, "hydrated": bool(refs) and err is None,
                "hydrate_error": err, "spawned": False}

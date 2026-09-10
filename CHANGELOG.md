@@ -19,6 +19,34 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.27.0] - 2026-09-09
+
+### Changed
+
+- **CR — the thinking group says what is readable and what a resume bills,
+  instead of forty lines of "signature only".** Nearly every thinking block
+  in a real transcript is encrypted: the file keeps a signature and no text,
+  so the row was unreadable and worth 0 tokens, and the group header's
+  `42/42 · 0.4K kept of 0.4K` said nothing. Every thinking row now records
+  how it is stored (`stored`: `text` / `signature` / `redacted`), the
+  manifest carries a `thinking` census (blocks, with text, signature-only,
+  redacted, text tokens), the group header reads `3 with text ≈1.2K · 39
+  signature-only · 0 on resume`, and the itemized list shows only the rows
+  that have text to read — the rest fold behind one `show 39 signature-only
+  thinking blocks` line.
+- **The resume estimate no longer counts stored thinking text.** Thinking
+  rows are locked (they survive every fork), but the API drops prior-turn
+  thinking when a new user turn arrives — and a resume is one. New
+  `cr.resume_estimate(floor, manifest)` gives `floor + AFTER − thinking
+  text` with `dropped_on_resume` stated beside it; fork, preview, both
+  dialogs, the cart's `· resume` line and the fork's meta stamp
+  (`cr_resume`, read first by `_cr_overlay`; an older stamp still falls
+  back to floor + AFTER) all use it.
+- **`redacted_thinking` blocks join the thinking group at 0 tokens.** They
+  used to land in "other blocks" with their opaque payload counted as JSON
+  chars, which inflated BEFORE; the payload is now reported under
+  `excluded.redacted_thinking_chars` beside the signatures.
+
 ## [3.26.0] - 2026-09-09
 
 ### Added

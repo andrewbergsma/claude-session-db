@@ -88,6 +88,7 @@ def test_manifest_payload_reconciles_and_ships_the_new_kinds(env):
     assert payload["residual_tokens"] == 0
     # additive fields the client needs; old names still parse
     assert set(payload["excluded"]) == {"signature_chars",
+                                        "redacted_thinking_chars",
                                         "image_payload_chars",
                                         "json_envelope_chars"}
     assert payload["fixed_tokens"] == 0 and payload["surface_chars"] > 0
@@ -227,10 +228,12 @@ def test_confirm_stamps_fork_meta_and_prints_resume_cmd(env, meta, monkeypatch):
     new_id = payload["new_session"]
     assert payload["cwd"] == "/tmp/proj"
     assert payload["resume_cmd"] == f"cd /tmp/proj && claude --resume {new_id}"
-    assert payload["resume_tokens"] == payload["floor"]["est"] + payload["after_tokens"]
+    assert payload["resume_tokens"] == (payload["floor"]["est"] + payload["after_tokens"]
+                                        - payload["dropped_on_resume"])
     m = server._meta_of(server._read_meta_overlay(), new_id)
     assert m["cr_source"] == SID
     assert m["cr_after"] == payload["after_tokens"]
+    assert m["cr_resume"] == payload["resume_tokens"]
     assert m["cr_before"] == payload["before_tokens"]
     assert m["cr_floor"] == payload["floor"]["est"]
     assert m["cr_at"].endswith("Z")
@@ -278,7 +281,17 @@ def test_preview_carries_floor_billed_and_cwd(env, monkeypatch):
     assert payload["floor"]["source"] == "band"     # fixture has no usage
     assert payload["billed"] is None
     assert payload["cwd"] == "/tmp/proj"
-    assert payload["resume_tokens"] == payload["floor"]["est"] + payload["after_tokens"]
+    assert payload["resume_tokens"] == (payload["floor"]["est"] + payload["after_tokens"]
+                                        - payload["dropped_on_resume"])
+
+
+def test_cr_overlay_prefers_the_stamped_resume_figure():
+    # 3.27+ stamp: resume already subtracts the thinking text the API drops
+    m = {"cr_source": SID, "cr_after": 44_000, "cr_floor": 32_000,
+         "cr_resume": 74_500, "cr_at": "2026-09-08T10:00:00.000Z"}
+    s = {"ctx_tokens": 230_000}
+    server._cr_overlay(s, m, None)
+    assert s["ctx_tokens"] == 74_500 and s["cr"]["resume"] == 74_500
 
 
 def test_cr_overlay_estimates_until_a_post_fork_turn_is_billed():

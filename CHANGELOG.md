@@ -19,6 +19,40 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.28.0] - 2026-09-10
+
+### Added
+
+- **`csd digest REF --cr` — the context-reduced cut `/session-summary` hands
+  a fresh subagent.** Built on `cr.build_manifest` (the console's CR panel),
+  so the console and the summarizer agree on what a session is made of —
+  same row taxonomy, same row ids, same token model. Prompts and narration
+  are kept verbatim; stored thinking (rare) is kept; subagent results are
+  kept head-capped at 2,000 chars, and so are BACKGROUND agents' reports,
+  which arrive as `<task-notification>` injections rather than in the Agent
+  tool_result; failed tool results keep their first 400 chars as
+  `TOOL ERROR <row-id> (<tool> <hint>)`; slash-command args are kept (they
+  are the user's words). Everything else is ONE line carrying its row id: a
+  tool call + its successful result collapse to
+  `[t:<id> Bash git status — in 0.1K / out 2.3K elided]`, Edit/Write carry
+  the full file path, injections carry CR's label, images CR's image crumb.
+  kmcp reads render as `KMCP READ t:<id>: app:path, …` (never bodies) and
+  kmcp WRITES — which CR does not classify — as
+  `KMCP WRITE x:<id>: <op> <target>` (import_entries lists each document,
+  create_relationship reads `app:src -> tgt (type)`, move/rename
+  `old -> new`), with ` ✗ <error>` when the write failed or was refused, via
+  the MCP surface or the knowledge-cli shim. Sidechains and compaction
+  carriers are dropped. The header's first line is
+  `SESSION DIGEST  ·  <uuid>   [cr]` (bare uuid — the summarizer reads the
+  session_id off it). `--since TS` windows it exactly as the plain digest
+  does; `--out PATH` writes the file and prints only its path; stderr always
+  gets `kept N of M rows · ~XK of ~YK est tokens (Z%)`. Unlike the
+  curated-digest prior art, an elided row is a breadcrumb, never an absence.
+  The keep/stub rules are one table each at the top of `digest_cr.py`.
+- **`csd digest REF --row ROW_ID`** — the stub dereference: the full body of
+  one CR manifest row (`cr.row_body`), plain text. Exit 2 when the id is not
+  in the manifest.
+
 ## [3.27.0] - 2026-09-09
 
 ### Changed

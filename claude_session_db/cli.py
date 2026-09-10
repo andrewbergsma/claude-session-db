@@ -842,11 +842,25 @@ def angles(ctx: click.Context, spec: tuple[str, ...], session_id: str | None,
               help="Chars of each tool_result to keep (default 200).")
 @click.option("--full-inputs", is_flag=True,
               help="Verbatim tool_use inputs instead of one-field hints.")
+@click.option("--cr", "cr_cut", is_flag=True,
+              help="The context-reduced cut /session-summary hands a fresh "
+                   "subagent: prompts + narration verbatim, subagent results "
+                   "and tool errors head-capped, kmcp reads/writes as one-line "
+                   "refs, every other row a one-line stub carrying its CR row "
+                   "id. Accounting line on stderr.")
+@click.option("--out", "out_path", default=None, metavar="PATH",
+              help="(--cr) Write the digest to PATH and print only the path.")
+@click.option("--row", "row_id", default=None, metavar="ROW_ID",
+              help="Print the FULL body of one CR manifest row (the stub "
+                   "dereference, e.g. t:toolu_01…). Exit 2 if the id is not "
+                   "in the manifest.")
 @click.option("--kmcp-dsn", default=None, help="(unused here; accepted for symmetry).")
 @click.pass_context
 def digest(ctx: click.Context, session_ref: str, since: str | None,
            full_digest: bool, head: int | None, tail: int | None,
-           result_head: int, full_inputs: bool, kmcp_dsn: str | None) -> None:
+           result_head: int, full_inputs: bool, cr_cut: bool,
+           out_path: str | None, row_id: str | None,
+           kmcp_dsn: str | None) -> None:
     """Print one session's transcript digest (the /session-summary input).
 
     SESSION_REF is a full session UUID or a unique prefix. Resolution is
@@ -868,6 +882,13 @@ def digest(ctx: click.Context, session_ref: str, since: str | None,
     Default scope is the FULL transcript (session_digest's own default), which
     can be megabytes; `csd angles digest REF` is the head/tail-windowed
     sibling for interactive use.
+
+    \b
+    The --cr cut (what /session-summary's fresh subagent reads):
+      csd digest 4f2a1c9e --cr                       stdout; accounting on stderr
+      csd digest 4f2a1c9e --cr --since TS --out F    write F, print its path
+      csd digest 4f2a1c9e --row t:toolu_01…          expand one stub (exit 2 if
+                                                     the row id is unknown)
     """
     if ":" in session_ref:
         # A `<parent>:<agent_id>` child key. session_digest renders MAIN-chain
@@ -880,6 +901,18 @@ def digest(ctx: click.Context, session_ref: str, since: str | None,
                    f"renders main-chain records only. Try: csd digest {parent}",
                    err=True)
         sys.exit(1)
+    if row_id is not None or cr_cut:
+        _digest_cr(ctx, session_ref, since=since, cr_cut=cr_cut,
+                   out_path=out_path, row_id=row_id,
+                   plain_flags={"--full": full_digest, "--head": head is not None,
+                                "--tail": tail is not None,
+                                "--full-inputs": full_inputs,
+                                "--result-head": ctx.get_parameter_source(
+                                    "result_head")
+                                == click.core.ParameterSource.COMMANDLINE})
+        return
+    if out_path is not None:
+        raise click.UsageError("--out goes with --cr")
     try:
         click.echo(mgmt.digest_for(
             session_ref, dsn=ctx.obj["dsn"], kmcp_dsn=None, since=since,
@@ -890,6 +923,52 @@ def digest(ctx: click.Context, session_ref: str, since: str | None,
         click.echo(f"NO TRANSCRIPT FOUND for {session_ref}", err=True)
         click.echo(f"  {exc}", err=True)
         sys.exit(1)
+
+
+def _digest_cr(ctx: click.Context, session_ref: str, *, since: str | None,
+               cr_cut: bool, out_path: str | None, row_id: str | None,
+               plain_flags: dict) -> None:
+    """`csd digest --cr` / `--row`: resolve the ref exactly as the plain digest
+    does, then hand the transcript to digest_cr."""
+    from . import digest_cr
+
+    clash = [f for f, on in plain_flags.items() if on]
+    if clash:
+        raise click.UsageError(f"{', '.join(clash)} do not apply to "
+                               f"{'--row' if row_id is not None else '--cr'}")
+    try:
+        sid, file_path = mgmt.resolve_session_ref(session_ref, ctx.obj["dsn"])
+        path = mgmt.resolve_transcript(sid, file_path)
+        if path is None:
+            raise ValueError(f"no transcript on disk for session {sid}")
+    except ValueError as exc:
+        click.echo(f"NO TRANSCRIPT FOUND for {session_ref}", err=True)
+        click.echo(f"  {exc}", err=True)
+        sys.exit(1)
+
+    if row_id is not None:
+        text = digest_cr.row_text(path, row_id)
+        if text is None:
+            click.echo(f"no row {row_id!r} in the CR manifest of {sid}", err=True)
+            sys.exit(2)
+        click.echo(text, nl=False)
+        return
+
+    since_dt = None
+    if since is not None:
+        since_dt = mgmt._parse_ts(since)
+        if since_dt is None:
+            raise click.BadParameter(
+                f"unparseable timestamp {since!r} (ISO 8601, e.g. "
+                "2026-08-21T14:02:11Z)", param_hint="--since")
+    text, stats = digest_cr.render_cr(path, session_id=sid, since=since_dt)
+    if out_path:
+        dest = Path(out_path).expanduser()
+        dest.write_text(text, encoding="utf-8")
+        click.echo(str(dest))
+    else:
+        click.echo(text, nl=False)
+    click.echo(digest_cr.accounting_line(stats), err=True)
 
 
 @main.command(name="summary-scope")

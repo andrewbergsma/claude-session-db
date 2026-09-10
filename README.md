@@ -76,6 +76,8 @@ csd recent 10
 | `csd angles sessions` | Session-management lens: open-thread inventory + delta-after-summary verdicts |
 | `csd angles digest REF` | Per-session digest (`--delta` for the post-summary tail, `--head/--tail/--full`) |
 | `csd digest REF` | THE session digest by id — worktree-aware, works with no database, `--since TS` for the continuation tail |
+| `csd digest REF --cr` | The context-reduced cut `/session-summary`'s fresh subagent reads: prose verbatim, subagent reports + tool errors head-capped, kmcp reads/writes as one-line refs, every other row a stub with its CR row id (`--since TS`, `--out PATH`; accounting on stderr) |
+| `csd digest REF --row ID` | Expand one stub — the full body of one CR manifest row (`t:<tool_id>` result, `x:<tool_id>` input, `s:`/`u:`/`a:` records); exit 2 if unknown |
 | `csd summary-scope REF` | Already summarized? What a NEXT pass would cover (`full` / `delta` / `none`, `--json`) |
 | `csd angles-watch` | Headless miner: keep the angles state dir warm (serves nothing) |
 | `csd console` | The web UI: reply-capable session console — chat, kmcp reads, angle rail, threads lens, subagent drill-down (127.0.0.1:4462; token-authed on LAN binds) |

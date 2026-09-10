@@ -580,7 +580,59 @@ def test_forge_fork_reports_floor_cwd_and_resume_estimate(tmp_path):
     assert res["cwd"] == "/tmp/proj"
     assert res["floor"]["source"] == "usage" and res["floor"]["est"] == 32_268
     assert res["billed_before"] == 60_109
-    assert res["resume_tokens"] == res["floor"]["est"] + res["after_tokens"]
+    assert res["resume_tokens"] == (res["floor"]["est"] + res["after_tokens"]
+                                    - res["dropped_on_resume"])
+
+
+# ─── Thinking: stored text vs signature-only, and what a resume bills ───────
+def _thinking_transcript():
+    recs = _usage_transcript()
+    recs.append({"type": "assistant", "uuid": "th-a", "parentUuid": recs[-1]["uuid"],
+                 "sessionId": "src-sid", "timestamp": "2026-09-08T00:10:00.000Z",
+                 "cwd": "/tmp/proj",
+                 "message": {"role": "assistant", "id": "msg-th",
+                             "content": [
+                                 {"type": "thinking", "thinking": "Plan: read the file first.",
+                                  "signature": "s" * 400},
+                                 {"type": "thinking", "thinking": "", "signature": "s" * 600},
+                                 {"type": "redacted_thinking", "data": "r" * 300},
+                                 {"type": "text", "text": "Reading."}]}})
+    return recs
+
+
+def test_thinking_rows_say_how_they_are_stored():
+    m = cr.build_manifest(_thinking_transcript())
+    th = [r for r in m["rows"] if r["kind"] == "thinking"]
+    stored = {r["stored"] for r in th}
+    assert stored == {"text", "signature", "redacted"}
+    by = {r["stored"]: r for r in th}
+    assert by["text"]["head"].startswith("Plan: read") and by["text"]["est_tokens"] > 0
+    assert by["signature"]["est_tokens"] == 0 and "signature only" in by["signature"]["head"]
+    assert by["redacted"]["est_tokens"] == 0 and "redacted" in by["redacted"]["head"]
+    assert all(r["locked"] for r in th)
+    # a redacted block is no longer an "other" row with its payload counted
+    assert not [r for r in m["rows"] if r["kind"] == "other"]
+    assert m["excluded"]["redacted_thinking_chars"] == 300
+    assert m["excluded"]["signature_chars"] >= 1000
+
+
+def test_manifest_thinking_census_and_resume_drops_text():
+    m = cr.build_manifest(_thinking_transcript())
+    th = m["thinking"]
+    assert (th["blocks"], th["with_text"], th["signature_only"], th["redacted"]) == (3, 1, 1, 1)
+    assert th["text_tokens"] == cr.est_tokens(len("Plan: read the file first."))
+    r = cr.resume_estimate(32_000, m)
+    assert r["dropped_on_resume"] == th["text_tokens"]
+    assert r["resume_tokens"] == 32_000 + m["totals"]["est_tokens"] - th["text_tokens"]
+
+
+def test_forge_fork_resume_drops_thinking_text(tmp_path):
+    src = tmp_path / "src-sid.jsonl"
+    cr.dump(_thinking_transcript(), src)
+    res = cr.forge_fork(src, [], new_id="fork-th")
+    assert res["dropped_on_resume"] > 0
+    assert res["resume_tokens"] == (res["floor"]["est"] + res["after_tokens"]
+                                    - res["dropped_on_resume"])
 
 
 # ─── Row heads and bodies — what a keep/stub decision is ABOUT ──────────────

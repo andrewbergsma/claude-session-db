@@ -4934,11 +4934,21 @@ const CR_KINDS = [                   // group rows for the cart summary
   ["prompt", "user prompts"], ["narration", "assistant narration"],
   ["result", "tool results"], ["tool_use", "tool inputs"],
   ["kmcp", "kmcp reads"], ["image", "images"],
-  ["injection", "injected context"], ["thinking", "thinking (locked)"],
+  ["injection", "injected context"], ["thinking", "thinking"],
   ["other", "other blocks (locked)"]];
 const CR_ITEM_CAP = 40;              // initial itemized render per group
 const CRG_KEY = "csd.crGroupsOpen";  // which groups are expanded (per browser)
 let crShowAll = {};                  // kind -> render past the cap
+let crShowSig = false;               // list the signature-only thinking rows too
+/* A thinking row with no stored text (encrypted — the transcript keeps a
+   signature only) is 0 tokens and unreadable; nearly every thinking block
+   is one. They are counted in the header and hidden from the list. */
+function crThinkHidden(r){ return r.kind === "thinking" && r.stored !== "text"; }
+function crShowSigToggle(){ crShowSig = !crShowSig; renderCrCart(); }
+/* Stored thinking text survives every fork (locked) but the API drops
+   prior-turn thinking on a new user turn — so it is in AFTER, not on the
+   fork's first bill. */
+function crDropped(m){ return (m.thinking && m.thinking.text_tokens) || 0; }
 let crGrpState = null;
 function crGrpLoad(){
   if(crGrpState) return crGrpState;
@@ -5185,6 +5195,19 @@ function exitCR(){
    else. Locked rows render without buttons: they are counted, never hidden. */
 function crItems(kind, rows){
   const byTurn = crSort() === "turn";
+  let sigFoot = "";
+  if(kind === "thinking"){
+    const hidden = rows.filter(crThinkHidden);
+    if(hidden.length){
+      const th = crManifest.thinking || {};
+      const what = [th.signature_only ? `${th.signature_only} signature-only` : "",
+                    th.redacted ? `${th.redacted} redacted` : ""].filter(Boolean).join(" + ");
+      sigFoot = `<div class="cr-more" onclick="crShowSigToggle()" title="encrypted thinking: the transcript stores a signature, never the text — 0 tokens in the file, and the API drops prior-turn thinking on resume anyway">${
+        crShowSig ? "▴ hide" : "▾ show"} ${what} thinking block${hidden.length === 1 ? "" : "s"} — no text to read, 0 tokens</div>`;
+      if(!crShowSig) rows = rows.filter(r => !crThinkHidden(r));
+    }
+  }
+  if(!rows.length) return `<div class="cr-items">${sigFoot}</div>`;
   const sorted = rows.slice().sort((a, b) => byTurn
     ? (a.turn - b.turn) || String(a.ts||"").localeCompare(String(b.ts||""))
     : b.est_tokens - a.est_tokens);
@@ -5224,7 +5247,7 @@ function crItems(kind, rows){
         all ? "▴ show top " + CR_ITEM_CAP + " only"
             : "▾ show all " + sorted.length + " (" + (sorted.length - CR_ITEM_CAP) + " more)"}</div>`
     : "";
-  return `<div class="cr-items">${sortBar}${lines}${more}</div>`;
+  return `<div class="cr-items">${sortBar}${lines}${more}${sigFoot}</div>`;
 }
 
 function renderCrCart(){
@@ -5247,10 +5270,17 @@ function renderCrCart(){
     const btns = locked ? "" :
       btn("keep", "keep") + btn("stub", "stub") + (k === "kmcp" ? btn("ref", "ref") : "");
     const open = crGrpOpen(k);
+    // thinking: what is READABLE (stored text) vs what is only a signature,
+    // and that none of it bills on resume — not "N/N kept", which said nothing.
+    const th = m.thinking || {};
+    const n = k === "thinking"
+      ? `${th.with_text || 0} with text ${crK(th.text_tokens || 0)} · ${
+          (th.signature_only || 0) + (th.redacted || 0)} signature-only · <span title="the API drops prior-turn thinking on a new user turn, so a resume bills none of it">0 on resume</span>`
+      : `${keptRows.length}/${g.count} · ${crK(keptTok)} kept of ${crK(g.est_tokens)}`;
     const head = `<div class="cr-grp" title="${esc("click to " + (open ? "fold" : "list every " + label + " source"))}"
         onclick="crGrpToggle('${k}')">
       <span class="gc">${open ? "▾" : "▸"}</span><span class="gl">${esc(label)}</span>${btns}
-      <span class="n">${keptRows.length}/${g.count} · ${crK(keptTok)} kept of ${crK(g.est_tokens)}</span></div>`;
+      <span class="n">${n}</span></div>`;
     return head + (open ? crItems(k, rows) : "");
   }).join("");
   const refs = crAllRefs();
@@ -5278,7 +5308,7 @@ function renderCrCart(){
     <div class="cr-tot">BEFORE ≈${(t.before/1000).toFixed(0)}K →
       <span class="aft">AFTER ≈${(t.after/1000).toFixed(0)}K</span>
       <span class="pct">(−${pct}%)</span>
-      <span class="dim" title="what the API will bill the fork's first turn: the scaffolding floor plus what you kept — prior-turn thinking is dropped on resume">· resume ≈${((m.floor.est + t.after)/1000).toFixed(0)}K</span></div>
+      <span class="dim" title="what the API will bill the fork's first turn: floor + AFTER − stored thinking text (${crK(crDropped(m))}) — the API drops prior-turn thinking on a new user turn">· resume ≈${(Math.max(0, m.floor.est + t.after - crDropped(m))/1000).toFixed(0)}K</span></div>
     ${crBilledLine(m)}
     <div class="cr-math" title="AFTER is the sum of exactly these lines — nothing hidden">
       kept ${crK(t.kept)} + stubs ${t.stubs}·${CR_STUB_TOK} = ${crK(t.stubTok)}
@@ -5288,7 +5318,7 @@ function renderCrCart(){
     <div class="cr-floor">BEFORE = Σ of the groups below (${m.rows.length} sources).
       Text at chars/4, tool inputs at JSON/4, images at (w×h)/750;
       thinking signatures and JSON envelope excluded (${
-        Math.round((m.excluded?.signature_chars || 0)/1000)}K sig +
+        Math.round(((m.excluded?.signature_chars || 0) + (m.excluded?.redacted_thinking_chars || 0))/1000)}K sig +
       ${Math.round((m.excluded?.image_payload_chars || 0)/1000)}K image bytes +
       ${Math.round((m.excluded?.json_envelope_chars || 0)/1000)}K envelope chars
       are in the file but are not tokens).</div>
@@ -5370,7 +5400,7 @@ async function crPreview(intentFork){
       <span class="aft">AFTER ≈${(d.after_tokens/1000).toFixed(0)}K</span>
       <span class="pct">(−${d.saved_pct}%)</span>
       · ${d.stubbed} block(s) stubbed
-      <span class="dim" title="floor + AFTER — what the fork's first turn will bill">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K</span></div>
+      <span class="dim" title="floor + AFTER − stored thinking text (${crK(d.dropped_on_resume||0)}, dropped by the API on a new turn) — what the fork's first turn will bill">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K</span></div>
     ${crBilledLine(d)}
     <div class="cr-floor">+ scaffolding floor ${crFloorTxt(d.floor)} on resume · numbers are chars/4 ≈</div>
     <div class="cr-floor">resume from a terminal: <code>${esc(crResumeCmd(d.cwd, "‹fork id›"))}</code>
@@ -5412,7 +5442,7 @@ function crWrittenDlg(d){
       <span class="rd-x" onclick="closeCrDlg()">✕</span></div>
     <div class="cr-tot">≈${(d.before_tokens/1000).toFixed(0)}K → <span class="aft">≈${(d.after_tokens/1000).toFixed(0)}K</span>
       <span class="pct">(−${d.saved_pct}%)</span>
-      <span class="dim">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K (floor ${crFloorTxt(d.floor)} + AFTER)</span></div>
+      <span class="dim">· resume ≈${((d.resume_tokens||0)/1000).toFixed(0)}K (floor ${crFloorTxt(d.floor)} + AFTER${d.dropped_on_resume ? ` − thinking ${crK(d.dropped_on_resume)}` : ""})</span></div>
     ${d.spawn_error ? `<div class="cr-err">fork written, but the answer did not start — ${esc(d.spawn_error)}. Open the fork and answer it from there.</div>` : ""}
     <div class="cr-sec">resume it from a terminal (the fork lives beside its source — run from that cwd)</div>
     <pre id="crcmd">${esc(cmd)}</pre>

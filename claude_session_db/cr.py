@@ -456,7 +456,12 @@ def build_manifest(records, bash_kmcp=None) -> dict:
     # Pass 3: rows. EVERY token-bearing block becomes a row — nothing is
     # folded into a bucket the UI cannot show or the operator cannot act on.
     rows, seen = [], {}
-    sig_chars = img_b64_chars = 0
+    sig_chars = img_b64_chars = red_chars = 0
+    # Thinking census: how the model's reasoning is STORED. Almost all of it
+    # is a signature only (encrypted, the text never written), which is why a
+    # thinking group listed row-by-row reads as 40 lines of "signature only".
+    think = {"blocks": 0, "with_text": 0, "signature_only": 0, "redacted": 0,
+             "text_tokens": 0}
     for ri, r in enumerate(records):
         t = r.get("type")
         if t not in ("user", "assistant") or r.get("isSidechain"):
@@ -528,16 +533,31 @@ def build_manifest(records, bash_kmcp=None) -> dict:
                 bt = b.get("type")
                 if bt == "text":
                     narr += len(b.get("text") or "")
-                elif bt == "thinking":
+                elif bt in ("thinking", "redacted_thinking"):
                     # TEXT only — the signature is opaque provenance, not
                     # tokens, and counting it once inflated BEFORE by ~51K.
-                    sig_chars += len(b.get("signature") or "")
+                    # A redacted_thinking block is the same class: an opaque
+                    # payload, zero tokens the file can see.
+                    txt = b.get("thinking") if bt == "thinking" else ""
+                    txt = txt if isinstance(txt, str) else ""
+                    if bt == "redacted_thinking":
+                        red_chars += len(b.get("data") or "")
+                        stored = "redacted"
+                    else:
+                        sig_chars += len(b.get("signature") or "")
+                        stored = "text" if txt.strip() else "signature"
+                    think["blocks"] += 1
+                    think[{"text": "with_text", "signature": "signature_only",
+                           "redacted": "redacted"}[stored]] += 1
                     rid = f"th:{uid}" if n_think == 0 else f"th:{uid}#{n_think}"
                     n_think += 1
-                    row(rid, "thinking", len(b.get("thinking") or ""),
-                        locked=True, bidx=bidx, name="thinking",
-                        head=_head(b.get("thinking") or "")
-                        or "(signature only — thinking text not stored)")
+                    row(rid, "thinking", len(txt), locked=True, bidx=bidx,
+                        name="thinking", extra={"stored": stored},
+                        head=_head(txt) or (
+                            "(redacted — opaque payload, no text)"
+                            if stored == "redacted" else
+                            "(signature only — thinking text not stored)"))
+                    think["text_tokens"] += rows[-1]["est_tokens"]
                 elif bt == "tool_use":
                     inp = b.get("input")
                     inp = inp if isinstance(inp, dict) else {}
@@ -661,13 +681,31 @@ def build_manifest(records, bash_kmcp=None) -> dict:
         "fixed_chars": 0,        # retired bucket — kept so old clients parse
         "fixed_tokens": 0,
         "excluded": {"signature_chars": sig_chars,
+                     "redacted_thinking_chars": red_chars,
                      "image_payload_chars": img_b64_chars,
                      "json_envelope_chars": envelope},
         "surface_chars": surface,
         "totals": {"chars": row_chars, "est_tokens": row_tokens},
         "floor": floor,
         "billed": billed,
+        # Stored thinking is in the file but NOT in the fork's first bill:
+        # the API drops prior-turn thinking on a new user turn, and a resume
+        # IS a new user turn. text_tokens is what to subtract from AFTER.
+        "thinking": dict(think, signature_chars=sig_chars,
+                         redacted_chars=red_chars),
     }
+
+
+def resume_estimate(floor_est: int, manifest: dict) -> dict:
+    """What the fork's FIRST turn will bill: floor + AFTER − stored thinking
+    text. Thinking rows are locked (they survive every fork), but the API
+    strips prior-turn thinking when a new user turn arrives — so it is in the
+    file, in AFTER, and not on the bill. `dropped` is stated beside the
+    estimate, never absorbed."""
+    after = manifest["totals"]["est_tokens"]
+    dropped = (manifest.get("thinking") or {}).get("text_tokens", 0)
+    return {"resume_tokens": max(0, int(floor_est) + after - dropped),
+            "dropped_on_resume": dropped}
 
 
 def row_body(records, row) -> dict:
@@ -1033,7 +1071,9 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
         raise ValueError("refusing to overwrite the source session")
     dump(records, dst)
     after = context_surface(records)
-    after_tok = surface_tokens(records, bash_kmcp=bash_kmcp)
+    mf_after = build_manifest(records, bash_kmcp=bash_kmcp)
+    after_tok = mf_after["totals"]["est_tokens"]
+    resume = resume_estimate(floor["est"], mf_after)
     return {
         "new_session": new_id,
         "path": str(dst),
@@ -1046,8 +1086,8 @@ def forge_fork(src_path, stub_ids, preamble_text=None, new_id=None,
         if before_tok else 0,
         "floor": floor,
         "billed_before": billed["ctx"] if billed else None,
-        # What the fork will carry on resume: prior-turn thinking is dropped
-        # by the API on a new user turn, so it is floor + AFTER, not AFTER.
-        "resume_tokens": floor["est"] + after_tok,
+        # What the fork will carry on resume: floor + AFTER − the stored
+        # thinking text the API drops on a new user turn (resume_estimate).
+        **resume,
         **stats,
     }

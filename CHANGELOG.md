@@ -19,6 +19,43 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.28.0] - 2026-09-10
+
+### Added
+
+- **Status line — session-total cache reads and writes (`R 41.2M · W 352k`).**
+  Row 2 of `statusline/statusline-command.sh` now shows the session's
+  cumulative cache reads and writes for the main thread, in place of the
+  last request's `314k cached`. The payload has a cumulative write count
+  (`prompt_cache.cache_write_tokens`) but no read count, so both are summed
+  from the transcript. The sum is incremental: a per-session state file
+  under `$TMPDIR/claude-statusline/` stores the byte offset already read, and
+  each render reads only the bytes appended since. Records are deduplicated
+  by `message.id`, and sidechain records are skipped. A large resumed
+  transcript catches up in 16 MB chunks (~120 ms each), and the totals carry
+  a trailing `+` until it has caught up. Reads seek with
+  `dd skip=N count=0`, because BSD `tail -c +N` took 470 ms per chunk, past
+  the 300 ms debounce. Checked against a full-scan ground truth on live
+  transcripts up to 73 MB: the sums match exactly at every chunk size.
+- **Status line — a third row: session id, start time and last prompt time.**
+  The session id moves off row 2 onto its own row, without parentheses, and
+  is followed by `start Sep 10 06:16 · last prompt Sep 10 09:41`. Start is
+  the transcript's first timestamped record. Last prompt is the latest user
+  record with `origin.kind == "human"`, or a `queued_command` attachment (a
+  message typed mid-turn). Tool results, task notifications, meta records
+  and sidechain records don't count, and records without `origin` get a
+  fallback rule. Both times come from the same incremental pass.
+
+### Changed
+
+- `statusline/test_statusline.sh` asserts rows 2 and 3 separately under
+  `TZ=UTC`. Sample 12 and `samples/totals-fixture.jsonl` cover duplicate
+  content-block records, sidechain, malformed, oversized and half-written
+  records, task notifications and queued prompts. A capped-catch-up check
+  verifies convergence: **75 assertions**, passing under bash 5 and macOS
+  `/bin/bash` 3.2 (`SL_BASH=/bin/bash`). `statusline/README.md` documents
+  the new rows, the state file and the rules.
+
 ## [3.27.0] - 2026-09-09
 
 ### Changed

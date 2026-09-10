@@ -7,10 +7,14 @@
 #   SL_BASH=/bin/bash ./test_statusline.sh                     # macOS stock bash 3.2
 #
 # Each sample in samples/ is a status-line payload covering one shape of the
-# Claude Code contract (see README.md). Assertions run against row 2 with ANSI
-# escapes stripped, because row 1 carries live git state.
+# Claude Code contract (see README.md). Assertions run against the status row
+# (row 2) and the session row (row 3) with ANSI escapes stripped; row 1 carries
+# live git state and is not asserted.
 
 set -u
+
+# Fixture timestamps render in UTC so the session-row assertions are stable.
+export TZ=UTC
 
 here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 script=${SL_SCRIPT:-$here/statusline-command.sh}
@@ -35,7 +39,7 @@ pass=0; fail=0
 strip() { sed -e $'s/\033\\[[0-9;]*m//g'; }
 
 run_sample() {
-  # $1 sample file -> sets out, err, rc, ms, row1, row2
+  # $1 sample file -> sets out, err, rc, ms, nrows, row1, status_row, session_row
   local f=$1 payload t0 t1
   payload=$(cat "$f")
   # 09 and 12 reference transcript fixtures by placeholder so the repo is portable.
@@ -50,13 +54,16 @@ run_sample() {
   err=$(cat /tmp/_sl_err.$$); rm -f /tmp/_sl_err.$$
   nrows=$(printf '%s\n' "$out" | grep -c '')
   row1=$(printf '%s\n' "$out" | sed -n 1p | strip)
-  # The status row is always the last row; an unparseable payload drops row 1.
-  last_row=$(printf '%s\n' "$out" | tail -1 | strip)
+  # The status row is the one carrying the "<n>k / <size>k" budget (row 1 is
+  # dropped for an unparseable payload); the session row, if any, follows it.
+  status_row=$(printf '%s\n' "$out" | strip | grep -m1 -E 'k / [0-9]+k')
+  session_row=$(printf '%s\n' "$out" | strip | sed -n -E '/k \/ [0-9]+k/{n;p;}')
 }
 
 check() {
   # check <name> <regex> <actual>
-  if printf '%s' "$3" | grep -qE "$2"; then
+  # printf '%s\n' so an absent row is one empty line, matchable by '^$'.
+  if printf '%s\n' "$3" | grep -qE "$2"; then
     pass=$((pass + 1))
   else
     fail=$((fail + 1))
@@ -65,12 +72,12 @@ check() {
 }
 
 assert_sample() {
-  local name=$1 want=$2 f=$samples/$1
+  # assert_sample <sample> <status-row regex> <session-row regex>
+  local name=$1 want=$2 want_session=$3 f=$samples/$1
   run_sample "$f"
 
   if [ "$show" -eq 1 ]; then
-    printf '\n--- %s (%sms, rc=%s) ---\n%s\n%s\n' \
-      "$name" "$ms" "$rc" "$row1" "$last_row"
+    printf '\n--- %s (%sms, rc=%s) ---\n%s\n' "$name" "$ms" "$rc" "$(printf '%s\n' "$out" | strip)"
     [ -n "$err" ] && printf 'stderr: %s\n' "$err"
     return
   fi
@@ -83,35 +90,39 @@ assert_sample() {
     fail=$((fail + 1)); printf '  FAIL %s: stderr not empty: %s\n' "$name" "$err" >&2
   else pass=$((pass + 1)); fi
 
-  if [ "$nrows" -lt 1 ] || [ "$nrows" -gt 2 ]; then
-    fail=$((fail + 1)); printf '  FAIL %s: expected 1-2 rows, got %s:\n%s\n' "$name" "$nrows" "$out" >&2
+  if [ "$nrows" -lt 1 ] || [ "$nrows" -gt 3 ]; then
+    fail=$((fail + 1)); printf '  FAIL %s: expected 1-3 rows, got %s:\n%s\n' "$name" "$nrows" "$out" >&2
   else pass=$((pass + 1)); fi
 
   if [ "$ms" -gt "$BUDGET_MS" ]; then
     fail=$((fail + 1)); printf '  FAIL %s: %sms exceeds %sms budget\n' "$name" "$ms" "$BUDGET_MS" >&2
   else pass=$((pass + 1)); fi
 
-  check "$name status row" "$want" "$last_row"
+  check "$name status row"  "$want"         "$status_row"
+  check "$name session row" "$want_session" "$session_row"
 }
 
 echo "statusline replay: $script"
 
-#              sample                              expected status-row pattern
-assert_sample 01-no-context-window.json          '^—k / 200k  \(1f2e3d4c\)$'
-assert_sample 02-first-turn-nulls.json           '^0k / 200k  \(9c799c1b\)$'
-assert_sample 03-normal-turn-5m-warm.json        '^64k / 200k  W 88k · exp [0-9]{2}:[0-9]{2} · 94% hit  high  \(a1b2c3d4\)$'
-assert_sample 04-1m-window-1h-warm.json          '^316k / 1000k  W 352k · exp [0-9]{2}:[0-9]{2} · 91% hit 2 miss  high  \(9c799c1b\)$'
-assert_sample 05-near-full-1m.json               '^942k / 1000k  W 1\.2M · exp [0-9]{2}:[0-9]{2} · 88% hit 7 miss  max  \(deadbeef\)$'
-assert_sample 06-post-compact.json               '^0k / 200k  W 210k · cold · 87% hit 1 miss  medium  \(c0mpac7e\)$'
-assert_sample 07-derive-from-current-usage.json  '^180k / 200k  \(derive01\)$'
-assert_sample 08-resumed-no-prompt-cache.json    '^0k / 200k  high  \(resum3d0\)$'
-assert_sample 09-legacy-transcript-fallback.json '^157k / 200k  R 153k · W 4k  \(1eg4cy00\)$'
-assert_sample 10-rate-limits-spend-limit.json    '^150k / 1000k  W 180k · exp [0-9]{2}:[0-9]{2} · 97% hit  high  \(rl1m1t50\)$'
-assert_sample 11-malformed.json                  '^—k / 200k$'
+#              sample                              expected status row / session row
+assert_sample 01-no-context-window.json          '^—k / 200k$'                '^1f2e3d4c$'
+assert_sample 02-first-turn-nulls.json           '^0k / 200k$'                '^9c799c1b$'
+assert_sample 03-normal-turn-5m-warm.json        '^64k / 200k  W 88k · exp [0-9]{2}:[0-9]{2} · 94% hit  high$' '^a1b2c3d4$'
+assert_sample 04-1m-window-1h-warm.json          '^316k / 1000k  W 352k · exp [0-9]{2}:[0-9]{2} · 91% hit 2 miss  high$' '^9c799c1b$'
+assert_sample 05-near-full-1m.json               '^942k / 1000k  W 1\.2M · exp [0-9]{2}:[0-9]{2} · 88% hit 7 miss  max$' '^deadbeef$'
+assert_sample 06-post-compact.json               '^0k / 200k  W 210k · cold · 87% hit 1 miss  medium$' '^c0mpac7e$'
+assert_sample 07-derive-from-current-usage.json  '^180k / 200k$'              '^derive01$'
+assert_sample 08-resumed-no-prompt-cache.json    '^0k / 200k  high$'          '^resum3d0$'
+assert_sample 09-legacy-transcript-fallback.json '^157k / 200k  R 153k · W 4k$' \
+  '^1eg4cy00  start Sep 02 22:00 · last prompt Sep 02 22:00$'
+assert_sample 10-rate-limits-spend-limit.json    '^150k / 1000k  W 180k · exp [0-9]{2}:[0-9]{2} · 97% hit  high$' '^rl1m1t50$'
+assert_sample 11-malformed.json                  '^—k / 200k$'                '^$'
 # Transcript sums win over the payload's cache_write_tokens (999999): msg_A's
-# two block lines count once, the sidechain, malformed and still-being-written
-# lines not at all.
-assert_sample 12-session-totals.json             '^64k / 200k  R 205k · W 7k · exp [0-9]{2}:[0-9]{2} · 95% hit  high  \(t0ta1s00\)$'
+# two block lines count once; the sidechain, malformed and still-being-written
+# lines not at all. Last prompt is the mid-turn queued_command (21:32) — not the
+# task notification, the sidechain prompt, or the half-written 22:59 line.
+assert_sample 12-session-totals.json             '^64k / 200k  R 205k · W 7k · exp [0-9]{2}:[0-9]{2} · 95% hit  high$' \
+  '^t0ta1s00  start Sep 02 21:00 · last prompt Sep 02 21:32$'
 
 if [ "$show" -eq 1 ]; then exit 0; fi
 
@@ -122,12 +133,13 @@ rm -f "$SL_STATE_DIR"/*.tot
 first=""; final=""
 for _ in $(seq 1 20); do
   SL_TAIL_CAP=600 run_sample "$samples/12-session-totals.json"
-  [ -z "$first" ] && first=$last_row
-  final=$last_row
-  case "$last_row" in *+*) ;; *) break ;; esac
+  [ -z "$first" ] && first=$status_row
+  final=$status_row
+  case "$status_row" in *+*) ;; *) break ;; esac
 done
 check "12 capped: first render partial" 'R [0-9]+k\+ · W [0-9]+k\+' "$first"
 check "12 capped: converges exactly"    '^64k / 200k  R 205k · W 7k · ' "$final"
+check "12 capped: session row exact"    '^t0ta1s00  start Sep 02 21:00 · last prompt Sep 02 21:32$' "$session_row"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

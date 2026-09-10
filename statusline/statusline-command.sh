@@ -166,6 +166,9 @@ fi
 # message's usage, so lines are de-duplicated by message.id (last one wins —
 # the id and its counted usage persist in the state across chunk boundaries).
 # Sidechain lines are skipped, matching prompt_cache's main-thread scope.
+#
+# The same pass records row 3's times, which the payload does not carry: the
+# session start (first timestamped line) and the last prompt the user typed.
 # ---------------------------------------------------------------------------
 TAIL_CAP=${SL_TAIL_CAP:-16000000}
 STATE_DIR=${SL_STATE_DIR:-${TMPDIR:-/tmp}/claude-statusline}
@@ -177,44 +180,79 @@ from_offset() { dd bs=1 skip="$1" count=0 2>/dev/null; cat; }
 
 TOT_PROG='
 def n(k): (.[k] // 0) | if type == "number" then . else 0 end;
+def epoch: try (sub("\\.[0-9]+"; "") | fromdateiso8601 | floor) catch 0;
+def text: if type == "string" then .
+          elif type == "array" then ([.[] | select(.type? == "text") | .text][0] // "")
+          else "" end;
+# A prompt the user typed. Current transcripts tag it origin.kind == "human"
+# (task notifications and auto-continuations carry other kinds); older ones
+# have no origin, so fall back to: not meta, not a tool result, not injected.
+# A message typed mid-turn is a queued_command attachment, not a user line.
+def human:
+  type == "object" and .isSidechain != true
+  and ( if .type == "attachment" then
+          (.attachment.type? == "queued_command")
+          and ((.attachment.origin.kind? // "human") == "human")
+        elif .type != "user" then false
+        elif .origin != null then ((.origin.kind? // .origin) == "human")
+        else .isMeta != true
+             and (.message.content | text
+                  | test("^(<local-command-|<task-notification|\\[CR[: ])") | not)
+        end );
   [inputs] as $lines
 # A sentinel newline is appended to the chunk, so the last input is whatever
 # followed the final newline: a line still being written or cut by the cap,
 # or "". It is never counted; the next render re-reads it whole.
 | $lines[:-1] as $done
-| reduce ( $done[]
-           | select(contains("\"usage\""))
-           | (fromjson? // null)
-           | select(type == "object" and .type == "assistant"
-                    and .isSidechain != true)
-           | .message
-           | select(type == "object" and (.usage | type) == "object")
-           | { id: ((.id // "") | tostring),
-               r: (.usage | n("cache_read_input_tokens")),
-               w: (.usage | n("cache_creation_input_tokens")) } ) as $m
-    ( {r: $r, w: $w, id: $id, lr: $lr, lw: $lw};
-      if $m.id != "" and $m.id == .id
-      then .r += $m.r - .lr | .w += $m.w - .lw | .lr = $m.r | .lw = $m.w
-      else .r += $m.r | .w += $m.w | .id = $m.id | .lr = $m.r | .lw = $m.w
-      end )
-| [ ($done | map(utf8bytelength + 1) | add // 0), .r, .w, .id, .lr, .lw ]
+| reduce $done[] as $raw
+    ( {r: $r, w: $w, id: $id, lr: $lr, lw: $lw, st: $st, lu: $lu};
+      # Session start: the first line carrying a timestamp.
+      ( if .st == 0 and ($raw | contains("\"timestamp\":\""))
+        then .st = ((($raw | fromjson? // {}) | .timestamp? // "") | epoch) else . end )
+      # Parse only candidate lines; tool_result lines are large and never either.
+      | if ($raw | contains("\"usage\"")) then
+          ( ($raw | fromjson? // null)
+            | if type == "object" and .type == "assistant" and .isSidechain != true
+                 and (.message | type) == "object" and (.message.usage | type) == "object"
+              then .message | { id: ((.id // "") | tostring),
+                                r: (.usage | n("cache_read_input_tokens")),
+                                w: (.usage | n("cache_creation_input_tokens")) }
+              else null end ) as $m
+          | if $m == null then .
+            elif $m.id != "" and $m.id == .id
+            then .r += $m.r - .lr | .w += $m.w - .lw | .lr = $m.r | .lw = $m.w
+            else .r += $m.r | .w += $m.w | .id = $m.id | .lr = $m.r | .lw = $m.w
+            end
+        elif ( ($raw | contains("\"type\":\"user\""))
+               and ( ($raw | contains("\"origin\":{\"kind\":\"human\"}"))
+                     or (($raw | contains("\"origin\":") or contains("\"tool_result\"")) | not) ) )
+             or ($raw | contains("\"type\":\"queued_command\""))
+        then ($raw | fromjson? // null) as $u
+          | if ($u | human) then (($u.timestamp // "") | epoch) as $t
+              | (if $t > 0 then .lu = $t else . end)
+            else . end
+        else . end )
+| [ ($done | map(utf8bytelength + 1) | add // 0), .r, .w, .id, .lr, .lw, .st, .lu ]
 | map(tostring) | join("\u001f")
 '
 
-tot_reads=""; tot_writes=""; tot_partial=0
+tot_reads=""; tot_writes=""; tot_partial=0; sess_start=""; last_user=""
+STATE_VER=v2
 if [ -n "$session_id" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" ]; then
   size=$(stat -c %s "$transcript_path" 2>/dev/null || stat -f %z "$transcript_path" 2>/dev/null)
   case "$size" in ''|*[!0-9]*) size="" ;; esac
   state_file="$STATE_DIR/${session_id//\//_}.tot"
 
-  s_path=""; s_off=0; s_r=0; s_w=0; s_id=""; s_lr=0; s_lw=0
-  [ -f "$state_file" ] && IFS=$'\037' read -r s_path s_off s_r s_w s_id s_lr s_lw <"$state_file"
-  for v in s_off s_r s_w s_lr s_lw; do
+  s_ver=""; s_path=""; s_off=0; s_r=0; s_w=0; s_id=""; s_lr=0; s_lw=0; s_st=0; s_lu=0
+  [ -f "$state_file" ] && IFS=$'\037' read -r s_ver s_path s_off s_r s_w s_id s_lr s_lw \
+    s_st s_lu <"$state_file"
+  for v in s_off s_r s_w s_lr s_lw s_st s_lu; do
     case "${!v}" in ''|*[!0-9]*) printf -v "$v" 0 ;; esac
   done
-  # A different transcript, or one that shrank, invalidates the running sums.
-  if [ "$s_path" != "$transcript_path" ] || { [ -n "$size" ] && [ "$s_off" -gt "$size" ]; }; then
-    s_off=0; s_r=0; s_w=0; s_id=""; s_lr=0; s_lw=0
+  # Another state layout, a different transcript, or one that shrank: rescan.
+  if [ "$s_ver" != "$STATE_VER" ] || [ "$s_path" != "$transcript_path" ] \
+     || { [ -n "$size" ] && [ "$s_off" -gt "$size" ]; }; then
+    s_off=0; s_r=0; s_w=0; s_id=""; s_lr=0; s_lw=0; s_st=0; s_lu=0
   fi
 
   if [ -n "$size" ] && [ "$size" -gt "$s_off" ]; then
@@ -223,9 +261,10 @@ if [ -n "$session_id" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
     [ "$len" -gt "$TAIL_CAP" ] && { len=$TAIL_CAP; tot_partial=1; }
     res=$({ from_offset "$s_off" <"$transcript_path" | head -c "$len"; printf '\n'; } \
       | jq -R -n -r --argjson r "$s_r" --argjson w "$s_w" --arg id "$s_id" \
-          --argjson lr "$s_lr" --argjson lw "$s_lw" "$TOT_PROG" 2>/dev/null)
-    IFS=$'\037' read -r adv n_r n_w n_id n_lr n_lw <<<"$res"
-    case "$adv$n_r$n_w$n_lr$n_lw" in
+          --argjson lr "$s_lr" --argjson lw "$s_lw" \
+          --argjson st "$s_st" --argjson lu "$s_lu" "$TOT_PROG" 2>/dev/null)
+    IFS=$'\037' read -r adv n_r n_w n_id n_lr n_lw n_st n_lu <<<"$res"
+    case "$adv$n_r$n_w$n_lr$n_lw$n_st$n_lu" in
       ''|*[!0-9]*) : ;;
       *)
         # A capped chunk with no complete line is one line longer than the
@@ -235,9 +274,11 @@ if [ -n "$session_id" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
           case "$adv" in ''|*[!0-9]*) adv=0 ;; esac
         fi
         s_off=$(( s_off + adv )); s_r=$n_r; s_w=$n_w; s_id=$n_id; s_lr=$n_lr; s_lw=$n_lw
+        s_st=$n_st; s_lu=$n_lu
         mkdir -p "$STATE_DIR" 2>/dev/null \
-          && printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
-               "$transcript_path" "$s_off" "$s_r" "$s_w" "$s_id" "$s_lr" "$s_lw" \
+          && printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
+               "$STATE_VER" "$transcript_path" "$s_off" "$s_r" "$s_w" "$s_id" \
+               "$s_lr" "$s_lw" "$s_st" "$s_lu" \
                >"$state_file.$$" 2>/dev/null \
           && mv -f "$state_file.$$" "$state_file" 2>/dev/null
         rm -f "$state_file.$$" 2>/dev/null
@@ -245,6 +286,8 @@ if [ -n "$session_id" ] && [ -n "$transcript_path" ] && [ -f "$transcript_path" 
     esac
   fi
   tot_reads=$s_r; tot_writes=$s_w
+  [ "$s_st" -gt 0 ] && sess_start=$s_st
+  [ "$s_lu" -gt 0 ] && last_user=$s_lu
 fi
 # No transcript to sum: the payload's own cumulative write count still stands.
 [ -z "$tot_writes" ] && [ -n "$pc_write" ] && tot_writes=$pc_write
@@ -383,11 +426,10 @@ else
   left="${model_name}"
 fi
 
-if [ -n "$session_id" ]; then
-  session_segment="  (${session_id})"
-else
-  session_segment=""
-fi
+# Epoch seconds -> local "Sep 10 09:21" (BSD date -r, else GNU date -d @).
+fmt_time() {
+  date -r "$1" '+%b %d %H:%M' 2>/dev/null || date -d "@$1" '+%b %d %H:%M' 2>/dev/null
+}
 
 # Row 1 — location: model + dir + git/worktree segment.
 line1=""
@@ -397,12 +439,22 @@ if [ -n "$git_segment" ]; then
   line1="${line1}${git_segment}"
 fi
 
-# Row 2 — session state: context budget + cache totals/state + effort/style + session id.
-line2="${token_color}${token_display}${RESET}${cache_display}${DIM}${extra}${session_segment}${RESET}"
+# Row 2 — session state: context budget + cache totals/state + effort/style.
+line2="${token_color}${token_display}${RESET}${cache_display}${DIM}${extra}${RESET}"
+
+# Row 3 — identity: session id, when the session started, when the user last
+# typed a prompt. Both times come from the transcript scan above.
+line3=""
+if [ -n "$session_id" ]; then
+  line3="${session_id}"
+  [ -n "$sess_start" ] && t=$(fmt_time "$sess_start") && [ -n "$t" ] \
+    && line3="${line3}  start ${t}"
+  [ -n "$last_user" ] && t=$(fmt_time "$last_user") && [ -n "$t" ] \
+    && line3="${line3} · last prompt ${t}"
+  line3="${DIM}${line3}${RESET}"
+fi
 
 # A payload we could not parse at all still renders row 2 rather than a blank row.
-if [ -n "$line1" ]; then
-  printf '%s\n%s\n' "$line1" "$line2"
-else
-  printf '%s\n' "$line2"
-fi
+for l in "$line1" "$line2" "$line3"; do
+  if [ -n "$l" ]; then printf '%s\n' "$l"; fi
+done

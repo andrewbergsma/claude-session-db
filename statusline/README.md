@@ -1,6 +1,6 @@
 # Claude Code statusline
 
-`statusline-command.sh` is the custom two-row statusline for Claude Code. It
+`statusline-command.sh` is the custom three-row statusline for Claude Code. It
 reads the harness JSON on stdin and shells out to `git` for branch/worktree
 state. It lives here because it reports the same `usage` shapes that this
 repo's archive plane ingests — it is the live, single-message complement to the
@@ -12,18 +12,36 @@ Verified against **Claude Code v2.1.259** (2026-09).
 
 ```
 Opus 5  ~/GitHub/knowledge  ⎇ fix/foo ⧉ ±3 ↑1
-316k / 1000k  R 41.2M · W 352k · exp 08:02 · 91% hit 2 miss  high  (9c799c1b)
+316k / 1000k  R 41.2M · W 352k · exp 08:02 · 91% hit 2 miss  high
+9c799c1b-1107-4c08-a4eb-32faf6a39b5e  start Sep 10 06:16 · last prompt Sep 10 09:41
 ```
 
 - **Row 1** — model, cwd, and a compact git segment: branch, `⧉` linked-worktree
   marker, `±N` dirty count, `↑/↓` ahead/behind. Omitted outside a repo.
 - **Row 2** — context budget `in-window / window`, then the cache segment,
-  then effort or output style, then the session id.
+  then effort or output style.
+- **Row 3** — the full session id, then the session's start time and the time
+  of the last prompt you typed, in local time. Omitted when the payload has no
+  session id; the times are omitted until the transcript has been read.
 
 The budget is colored by **percentage of the actual window**, not by an
 absolute token count: green `<75%`, yellow `<90%`, red `≥90%`. (Before the
 2026-09 fix the thresholds were the absolute 150k/200k marks, which pinned
 every 1M-context session to red.)
+
+### Session row times
+
+Neither time is in the payload; both come from the same incremental transcript
+pass as the cache totals (below).
+
+- **start** — the first transcript line carrying a `timestamp`. A resumed
+  session keeps its original start; `/clear` starts a new session.
+- **last prompt** — the latest line that is a prompt you typed: a `user` line
+  tagged `origin.kind == "human"`, or a `queued_command` attachment (a message
+  typed mid-turn). Tool results, task notifications, auto-continuations,
+  `isMeta` lines and sidechain (subagent) prompts don't count. Transcripts
+  that predate `origin` fall back to: not `isMeta`, not a tool result, not an
+  injected `<local-command-…>` / `<task-notification>` / `[CR…]` message.
 
 ### Cache segment
 
@@ -52,9 +70,11 @@ per render would miss requests. The totals are therefore summed from
 `transcript_path`, incrementally:
 
 - A state file `$SL_STATE_DIR/<session_id>.tot` (default
-  `${TMPDIR:-/tmp}/claude-statusline`) holds the transcript path, the byte
-  offset already summed, the running sums, and the last message id. Each render
-  reads only the bytes appended since — typically a few KB.
+  `${TMPDIR:-/tmp}/claude-statusline`) holds a layout version, the transcript
+  path, the byte offset already summed, the running sums, the last message id,
+  and the start / last-prompt epochs. Each render reads only the bytes appended
+  since — typically a few KB. A state file in an older layout is discarded and
+  the transcript rescanned once.
 - Lines are de-duplicated by `message.id` (the transcript repeats a message's
   usage on every content-block line; last one wins, across chunk boundaries).
   `isSidechain` lines are skipped, matching `prompt_cache`'s main-thread scope.
@@ -149,12 +169,14 @@ cache; a 1M window with a warm 1h cache; a near-full 1M window; post-`/compact`
 `current_usage` present; a resumed session with no `prompt_cache` yet;
 a legacy payload resolved from `samples/transcript-fixture.jsonl`; a full
 payload with `rate_limits.spend_limit`; a truncated, unparseable payload; and
-session totals summed from `samples/totals-fixture.jsonl` (duplicate
-content-block lines, a sidechain line, a malformed line, a 2 KB tool result,
-and a trailing line still being written).
+session totals and session-row times from `samples/totals-fixture.jsonl`
+(duplicate content-block lines, sidechain lines, a malformed line, a 2 KB tool
+result, a task notification, a mid-turn `queued_command`, and a trailing line
+still being written).
 
-Assertions run against the last output row with ANSI stripped, because row 1
-carries live git state. Each sample also asserts exit 0, empty stderr, 1–2 rows,
+Assertions run against rows 2 and 3 with ANSI stripped (row 1 carries live git
+state), with `TZ=UTC` so fixture times are stable. Each sample also asserts
+exit 0, empty stderr, 1–3 rows,
 and a 250ms wall-clock budget. A final check replays sample 12 with a 600-byte
 `SL_TAIL_CAP` and asserts the chunked catch-up shows `+` and then converges on
 exactly the uncapped totals. State files go to a throwaway `SL_STATE_DIR`.

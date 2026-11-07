@@ -8,7 +8,7 @@
 #
 # Each sample in samples/ is a status-line payload covering one shape of the
 # Claude Code contract (see README.md). Assertions run against the status row
-# (row 2) and the session row (row 3) with ANSI escapes stripped; row 1 carries
+# (row 2), the session row (row 3, bare UUID) and the time row (row 4) with ANSI escapes stripped; row 1 carries
 # live git state and is not asserted.
 
 set -u
@@ -58,6 +58,7 @@ run_sample() {
   # dropped for an unparseable payload); the session row, if any, follows it.
   status_row=$(printf '%s\n' "$out" | strip | grep -m1 -E 'k / [0-9]+k')
   session_row=$(printf '%s\n' "$out" | strip | sed -n -E '/k \/ [0-9]+k/{n;p;}')
+  time_row=$(printf '%s\n' "$out" | strip | sed -n -E '/k \/ [0-9]+k/{n;n;p;}')
 }
 
 check() {
@@ -90,8 +91,8 @@ assert_sample() {
     fail=$((fail + 1)); printf '  FAIL %s: stderr not empty: %s\n' "$name" "$err" >&2
   else pass=$((pass + 1)); fi
 
-  if [ "$nrows" -lt 1 ] || [ "$nrows" -gt 3 ]; then
-    fail=$((fail + 1)); printf '  FAIL %s: expected 1-3 rows, got %s:\n%s\n' "$name" "$nrows" "$out" >&2
+  if [ "$nrows" -lt 1 ] || [ "$nrows" -gt 4 ]; then
+    fail=$((fail + 1)); printf '  FAIL %s: expected 1-4 rows, got %s:\n%s\n' "$name" "$nrows" "$out" >&2
   else pass=$((pass + 1)); fi
 
   if [ "$ms" -gt "$BUDGET_MS" ]; then
@@ -114,7 +115,8 @@ assert_sample 06-post-compact.json               '^0k / 200k  W 210k · cold · 
 assert_sample 07-derive-from-current-usage.json  '^180k / 200k$'              '^derive01$'
 assert_sample 08-resumed-no-prompt-cache.json    '^0k / 200k  high$'          '^resum3d0$'
 assert_sample 09-legacy-transcript-fallback.json '^157k / 200k  R 153k · W 4k$' \
-  '^1eg4cy00  start Sep 02 22:00 · last prompt Sep 02 22:00$'
+  '^1eg4cy00$'
+[ "$show" -eq 1 ] || check '09 time row' '^start Sep 02 22:00 · last prompt Sep 02 22:00$' "$time_row"
 assert_sample 10-rate-limits-spend-limit.json    '^150k / 1000k  W 180k · exp [0-9]{2}:[0-9]{2} · 97% hit  high$' '^rl1m1t50$'
 assert_sample 11-malformed.json                  '^—k / 200k$'                '^$'
 # Transcript sums win over the payload's cache_write_tokens (999999): msg_A's
@@ -122,8 +124,13 @@ assert_sample 11-malformed.json                  '^—k / 200k$'                
 # lines not at all. Last prompt is the mid-turn queued_command (21:32) — not the
 # task notification, the sidechain prompt, or the half-written 22:59 line.
 assert_sample 12-session-totals.json             '^64k / 200k  R 205k · W 7k · exp [0-9]{2}:[0-9]{2} · 95% hit  high$' \
-  '^t0ta1s00  start Sep 02 21:00 · last prompt Sep 02 21:32$'
+  '^t0ta1s00$'
 
+[ "$show" -eq 1 ] || {
+  check '12 time row' '^start Sep 02 21:00 · last prompt Sep 02 21:32$' "$time_row"
+  raw3=$(printf '%s\n' "$out" | sed -n 3p)
+  check '12 row 3 has no escapes' '^t0ta1s00$' "$raw3"
+}
 if [ "$show" -eq 1 ]; then exit 0; fi
 
 # Chunked catch-up: a 600-byte cap forces several renders, splits msg_A's
@@ -139,7 +146,8 @@ for _ in $(seq 1 20); do
 done
 check "12 capped: first render partial" 'R [0-9]+k\+ · W [0-9]+k\+' "$first"
 check "12 capped: converges exactly"    '^64k / 200k  R 205k · W 7k · ' "$final"
-check "12 capped: session row exact"    '^t0ta1s00  start Sep 02 21:00 · last prompt Sep 02 21:32$' "$session_row"
+check "12 capped: session row exact"    '^t0ta1s00$' "$session_row"
+check "12 capped: time row exact"       '^start Sep 02 21:00 · last prompt Sep 02 21:32$' "$time_row"
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

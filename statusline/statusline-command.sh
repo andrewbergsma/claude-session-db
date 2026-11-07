@@ -442,19 +442,22 @@ fi
 # Row 2 — session state: context budget + cache totals/state + effort/style.
 line2="${token_color}${token_display}${RESET}${cache_display}${DIM}${extra}${RESET}"
 
-# Row 3 — identity: session id, when the session started, when the user last
-# typed a prompt. Both times come from the transcript scan above.
-line3=""
+# Row 3 — the bare session id: no ANSI, nothing else, so a line-select copies
+# only the UUID.
+line3="$session_id"
+
+# Row 4 — when the session started and when the user last typed a prompt (both
+# from the transcript scan above). Emitted only if at least one time exists.
+line4=""
 if [ -n "$session_id" ]; then
-  line3="${session_id}"
   [ -n "$sess_start" ] && t=$(fmt_time "$sess_start") && [ -n "$t" ] \
-    && line3="${line3}  start ${t}"
+    && line4="start ${t}"
   [ -n "$last_user" ] && t=$(fmt_time "$last_user") && [ -n "$t" ] \
-    && line3="${line3} · last prompt ${t}"
-  line3="${DIM}${line3}${RESET}"
+    && line4="${line4:+${line4} · }last prompt ${t}"
+  [ -n "$line4" ] && line4="${DIM}${line4}${RESET}"
 fi
 
 # A payload we could not parse at all still renders row 2 rather than a blank row.
-for l in "$line1" "$line2" "$line3"; do
+for l in "$line1" "$line2" "$line3" "$line4"; do
   if [ -n "$l" ]; then printf '%s\n' "$l"; fi
 done

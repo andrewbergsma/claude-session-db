@@ -19,6 +19,26 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.32.0] - 2026-11-26
+
+### Changed
+- autosummary defaults to **capture mode on Sonnet**: a self-contained worker that reads the
+  `csd digest --cr` file and files one session entry plus events in ~5 turns, with no owner
+  search, lessons or tasks (the feedback loop is a later pass; `--mode full` keeps the
+  /session-summary worker). Measured 2026-11-26: full worker $0.87-1.26 and 15-30 turns per
+  session on Opus or Sonnet (cost is turns x accumulated context, not the model); capture
+  $0.18 / 35 s.
+- Worker flags `--tools Read,Bash,ToolSearch --disable-slash-commands`: keeps the claude.ai
+  connectors deferred (naming only Read,Bash loaded every connector's schemas: 201K base
+  context) and drops the skills listing. Workers run with `CSD_AUTOSUMMARY=1`.
+
+### Added
+- `--on-close SID`, the SessionEnd-hook entry point (hook: kmcp
+  `agent:harness/hook/session-end-autosummary-sh`): waits for the session's pid file to go,
+  checks eligibility and the ledger, waits behind the run lock (30 min max), then summarizes.
+  SessionEnd fires on tmux pane/window kill with reason `other` (verified 2026-11-26). The
+  hourly :41 run stays as the fallback.
+
 ## [3.31.0] - 2026-11-26
 
 ### Added

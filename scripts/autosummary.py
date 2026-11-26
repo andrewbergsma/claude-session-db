@@ -51,13 +51,14 @@ DEFAULTS = dict(
     since="2026-11-25T00:00:00Z",
     max_per_run=3,
     min_prompts=2,
-    model="opus",
+    model="sonnet",
+    mode="capture",
     timeout_s=1500,
     max_attempts=2,
 )
 
-PROMPT = """SESSION-SUMMARY WORKER — you are the worker for /session-summary. Do not invoke that skill. You run unattended under launchd (com.claude-session-db.autosummary): no human will answer, so never ask a question; decide and report.
-0. If the mcp__claude_ai_kmcp__* tools are not available to you, write nothing and reply only: RESULT: no-kmcp | stamp: skipped
+FULL_PROMPT = """SESSION-SUMMARY WORKER — you are the worker for /session-summary. Do not invoke that skill. You run unattended under launchd (com.claude-session-db.autosummary): no human will answer, so never ask a question; decide and report.
+0. Load the kmcp tools with ToolSearch (query "select:mcp__claude_ai_kmcp__search,mcp__claude_ai_kmcp__get_entry,mcp__claude_ai_kmcp__get_entries,mcp__claude_ai_kmcp__get_entity_schema,mcp__claude_ai_kmcp__import_entries,mcp__claude_ai_kmcp__create_entry,mcp__claude_ai_kmcp__create_relationship,mcp__claude_ai_kmcp__update_entry,mcp__claude_ai_kmcp__patch_content"); ToolSearch waits for a connecting server. If they cannot be loaded, write nothing and reply only: RESULT: no-kmcp | stamp: skipped
    Then check for a duplicate: search kmcp (query "{sid}", entity_types ["session"]). If any hit's content.session_id equals {sid} exactly (get_entry to confirm), write nothing and reply only: RESULT: duplicate <app:path> | stamp: skipped
 1. Load the procedure: get_entry(application="claudecode", path="skill/session-summary", sections=["body"]), plus the entry's domain_refs_eager in ONE get_entries call (get_entries takes entries=[{{application, path}}, ...]; split each app:path ref into an object, never pass strings). Skip Step 0; start at "Worker ground rules", then Steps 1-9.
 2. The conversation is ONLY the file {digest}. Read it. Do NOT open the raw transcript and do NOT run plain `csd digest`. Expand a stub only when it is load-bearing:
@@ -67,6 +68,20 @@ PROMPT = """SESSION-SUMMARY WORKER — you are the worker for /session-summary. 
 4. Trigger: uuid. Pass 1: full. Degraded note: the csd archive ingest may lag, so this session may not be archived yet. If mark-summarized fails with "not found in archive", report it and do not retry. Overrides: none. project_path: {project_path}.
 5. Return only the Step 9 report, and end it with exactly one line:
    RESULT: <session entry app:path | events-only | none> | stamp: <ok|failed|skipped>
+"""
+
+
+CAPTURE_PROMPT = """SESSION CAPTURE WORKER (csd autosummary, capture mode). You run unattended: never ask a question; decide and report. Your one job is to file a faithful record of ONE finished Claude Code session in kmcp. Out of scope here (a later pass owns them): searching for owner entries to patch, writing lessons, creating tasks, editing any existing entry. Keep it to about 5 turns.
+1. In ONE turn: ToolSearch (query "select:mcp__claude_ai_kmcp__get_entity_schema,mcp__claude_ai_kmcp__import_entries,mcp__claude_ai_kmcp__list_entries") and Read the digest file {digest} in full (it is the whole conversation: user prompts and assistant narration verbatim; tool calls are one-line stubs; KMCP READ/WRITE lines are references). ToolSearch waits for a connecting server; if the kmcp tools still cannot be loaded, write nothing and reply only: RESULT: no-kmcp | stamp: skipped
+2. In ONE turn: get_entity_schema for "session" and for "event" (two parallel calls). Compose to the live schema, never from memory.
+3. Pick the application: the kmcp app the session's work belongs to (from cwd {project_path} and the content; e.g. controltech, controltech_code, infrastructure, claudecode, knowledge_mcp, p6_eppm, ai_services, elford). If several, the primary one.
+4. Write everything in ONE import_entries call (dry_run first only if unsure; on_conflict "fail"), YAML with every scalar quoted:
+   - ONE session entry at session/<start YYYY-MM-DD>/<kebab-topic>, title "Session: <specific title>", tags [topical..., "auto-summary", "capture-only"]. content: summary (2-5 sentences, specific: what was asked, what was done, what state it ended in), session_id "{sid}" (exactly), project_path, started_at/ended_at from the digest span line, errors_encountered [{{error, resolution}}] (real stumbles only, may be empty), follow_up (every open item, unanswered owner question and unconfirmed result, one line each; mark owner decisions "OWNER:"), tools_used, linked_entries (app:path refs the session READ for understanding, from KMCP READ lines), resume_context (object of categorized {{path, relevance}} lists: implementation/supporting/open_tasks; only paths that appear in the digest).
+   - One event per concrete state change or owner decision that the digest shows actually happened (merged PR, deploy, config change, kmcp entry written, decision): event/<YYYY-MM-DD>/<kebab-slug> in the same app, with summary, event_type (schema enum), details, actor "claude-code", occurred_at, scope (array). Skip events for pure Q&A. Before writing events, list_entries(path_prefix="event/<date>/") once per date and skip any event the session itself already filed (its KMCP WRITE lines show them).
+   - relationships on each event document: see_also to the session path.
+   Never invent facts: if something is only in an unexpanded stub, say so in the summary or leave it out.
+5. Stamp (best effort): one Bash call: set -a; source ~/.config/claude-session-db/env; set +a; unset DATABASE_URL; {csd} mark-summarized {sid} --app <app> --path <session path> --pass 1. If it fails, do not retry.
+Reply with at most 5 lines, the last exactly: RESULT: <app:session path | none> | stamp: <ok|failed|skipped>
 """
 
 
@@ -217,20 +232,24 @@ def summarize(cfg, sid: str, path: Path, cwd: str) -> tuple[bool, bool]:
                        "error": (d.stderr or d.stdout)[-400:]})
         return True, False
     accounting = (d.stderr.strip().splitlines() or [""])[-1]
-    prompt = PROMPT.format(sid=sid, digest=digest, csd=CSD, project_path=cwd or "unknown")
+    tmpl = CAPTURE_PROMPT if cfg.mode == "capture" else FULL_PROMPT
+    prompt = tmpl.format(sid=sid, digest=digest, csd=CSD, project_path=cwd or "unknown")
     (RUNS / f"{sid}.prompt").write_text(prompt)
     log(f"start {sid} ({path.parent.name}) {accounting}")
     append_ledger({"session_id": sid, "status": "started", "mtime": path.stat().st_mtime,
-                   "accounting": accounting})
+                   "accounting": accounting, "mode": cfg.mode, "model": cfg.model})
     t0 = time.time()
     try:
         r = subprocess.run(
+            # --tools keeps ToolSearch so the claude.ai connectors stay deferred (naming
+            # only Read,Bash loads every connector's schemas: 201K base context, measured
+            # 2026-11-26); --disable-slash-commands drops the skills listing.
             [CLAUDE, "-p", prompt, "--model", cfg.model,
              "--permission-mode", "bypassPermissions",
-             "--disallowedTools", "Edit", "Write", "NotebookEdit", "Agent", "WebFetch", "WebSearch",
+             "--tools", "Read,Bash,ToolSearch", "--disable-slash-commands",
              "--output-format", "json"],
             cwd=WORK, capture_output=True, text=True, timeout=cfg.timeout_s,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, env={**os.environ, "CSD_AUTOSUMMARY": "1"},
         )
     except subprocess.TimeoutExpired:
         append_ledger({"session_id": sid, "status": "failed", "stage": "claude", "error": "timeout",
@@ -263,16 +282,69 @@ def summarize(cfg, sid: str, path: Path, cwd: str) -> tuple[bool, bool]:
     return (not limit_hit), True
 
 
+def on_close(cfg, sid: str) -> int:
+    """Called (detached) by the SessionEnd hook. The ledger and the hourly run are the
+    safety net: anything skipped or failed here is retried by the fallback schedule."""
+    if not UUID_RE.match(sid or ""):
+        return 0
+    # The hook fires while the process is still exiting; wait for its pid file to go.
+    for _ in range(60):
+        if sid not in live_session_ids():
+            break
+        time.sleep(2)
+    else:
+        log(f"on-close {sid}: still live after 120 s (resumed elsewhere?); leaving it to the hourly run")
+        return 0
+    time.sleep(5)  # let the final transcript writes land
+    paths = [p for p in PROJECTS.glob(f"*/{sid}.jsonl") if p.parent.name not in SKIP_PROJECT_DIRS]
+    if not paths:
+        return 0  # never prompted: Claude Code writes no transcript
+    path = paths[0]
+    recs = read_ledger().get(sid, [])
+    if any(r.get("status") in ("ok", "skip") for r in recs):
+        return 0  # already done (a resumed-and-closed-again session is not re-summarized yet)
+    interactive, prompts, cwd = inspect_transcript(path)
+    if not interactive or prompts < cfg.min_prompts:
+        append_ledger({"session_id": sid, "status": "skip",
+                       "reason": "not-interactive" if not interactive else f"prompts={prompts}",
+                       "mtime": path.stat().st_mtime, "via": "on-close"})
+        return 0
+    lock = LOCK.open("w")
+    deadline = time.time() + 1800
+    while True:  # wait behind an hourly run or another close instead of dropping this one
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            if time.time() > deadline:
+                log(f"on-close {sid}: lock busy for 30 min; leaving it to the hourly run")
+                return 0
+            time.sleep(15)
+    if any(r.get("status") in ("ok", "skip") for r in read_ledger().get(sid, [])):
+        return 0
+    log(f"on-close {sid} ({path.parent.name})")
+    if cfg.dry_run:
+        log(f"on-close {sid}: dry run, would summarize")
+        return 0
+    summarize(cfg, sid, path, cwd)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     for k, v in DEFAULTS.items():
         ap.add_argument("--" + k.replace("_", "-"), type=type(v), default=v)
     ap.add_argument("--dry-run", action="store_true", help="list candidates, run nothing")
     ap.add_argument("--only", help="summarize this one session id (ignores since/idle filters)")
+    ap.add_argument("--on-close", metavar="SID",
+                    help="SessionEnd-hook entry: wait for SID's process to exit, then summarize it "
+                         "if eligible (interactive, enough prompts, not in the ledger)")
     cfg = ap.parse_args()
 
     for d in (STATE, WORK, DIGESTS, RUNS):
         d.mkdir(parents=True, exist_ok=True)
+    if cfg.on_close:
+        return on_close(cfg, cfg.on_close)
     lock = LOCK.open("w")
     try:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -19,6 +19,25 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.33.0] - 2026-11-26
+
+### Added
+- autosummary **continuation passes**: a summarized session that is resumed and gains at least
+  `--min-delta-prompts` (default 1) real prompts past its watermark is summarized again, for the
+  new work only. On close (SessionEnd hook) or by the hourly run once idle, the worker reads
+  `csd digest --cr --since <watermark>` and files a `Session (cont. N)` entry tagged
+  `delta-capture`, `see_also` the prior pass (skill/session-summary W2), stamped `--pass N`. An
+  empty or trivial window returns `none` and just advances the watermark.
+- Ledger ok rows carry `pass` and `watermark` (the last transcript timestamp the pass covered);
+  legacy rows fall back to their `ts`. The kmcp precheck now folds hand-run `/session-summary`
+  passes in: an entry for the same session_id moves the watermark to its `ended_at`, so work done
+  after an in-session summary is no longer lost.
+
+### Changed
+- A `prompts=N` skip is reconsidered once the transcript grows (only `not-interactive` is sticky).
+- `--only` on a summarized session runs its next continuation pass; run files are
+  `runs/<sid>-p<N>.*`.
+
 ## [3.32.0] - 2026-11-26
 
 ### Changed

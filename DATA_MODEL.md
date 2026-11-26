@@ -107,6 +107,19 @@ documents it, it does not define it).
 **Sync signal** is `*.jsonl` filesystem mtime (`st_mtime_ns`), never
 `sessions-index.json`.
 
+**Cold archive (csd 3.30.0).** A changed file is ingested only once it is
+cold: its mtime is older than `--min-idle` (default 6 h on `csd ingest` and
+`csd sweep`) and its session has no live pid in `~/.claude/sessions/<pid>.json`.
+A running session's sidechain files are held back as well. Deferred files keep
+their old `sync_state` row and are picked up by a later run. Nothing is
+dropped: every kind of transcript (interactive `cli`, headless `sdk-cli`,
+subagents) is archived once it goes cold. The consequence for readers is that
+**the archive lags the transcripts by at least the gate**, and by the whole
+lifetime of a session that stays open. A session in progress is not in the
+archive yet, or holds only the part that was cold before it resumed. Live
+views belong to the JSONL readers (`csd digest`, `csd angles`, the console).
+`--min-idle 0` restores the old take-everything behaviour.
+
 ### Ingest is idempotent — but that word means four different things here
 
 | Mechanism | Tables | Consequence |
@@ -292,6 +305,15 @@ field never wipes a value an earlier one set.
 
 All are `recomputed` — written by `recompute_session_aggregates` after ingest,
 never by the parser, and therefore a snapshot of the last recompute.
+
+Since csd 3.30.0 the recompute covers only the sessions whose rows the run
+rewrote (the owning session of each synced file, every `session_id` it wrote,
+and every one it previously owned), in chunks of 25. Children are reached by
+their parent key. When nothing synced, no recompute runs. `csd ingest
+--force` / `--rebuild` and `csd backfill-subagents` still recompute every
+session. A session whose source rows have all gone is therefore not reset
+until a full recompute; this matches the earlier behaviour, where the
+`messages` CTE drove the UPDATE.
 
 | Column | Type | Null | Source | Notes |
 |---|---|---|---|---|
@@ -1117,6 +1139,7 @@ of 1,856 sidechain files in the scan. All fields *(derived)*. First observed at
 | Key | Meaning |
 |---|---|
 | `schema_version` | the DDL version this database was last initialised at |
+| `schema_ddl_sha` | sha256 of `SCHEMA_SQL` as last executed (csd 3.30.0). `initialize()` runs the table/index/migration DDL only when this differs from the code's, on a fresh database, or when forced (`csd ingest --force/--rebuild`, the reconcile self-heal). A steady-state run issues no DDL, because even `CREATE INDEX IF NOT EXISTS` locks its table before it checks the name |
 | `views_version` | the version the views were last recreated at. Views are recreated ONLY on a mismatch — `CREATE OR REPLACE VIEW` takes ACCESS EXCLUSIVE and would convoy every reader on a 5-minute timer |
 | `backfill:<key>:cursor` | resume point of a v9 data backfill (a `messages.uuid`) |
 | `backfill:<key>:done` | `"1"` once that backfill has walked the whole table |
@@ -1613,12 +1636,17 @@ Other changes:
 
 Every migration in this schema is **additive, idempotent and guarded**:
 
-- Tables and indexes use `CREATE ... IF NOT EXISTS` and run on every
-  `initialize()`, so the schema self-heals.
+- Tables and indexes use `CREATE ... IF NOT EXISTS`. Since csd 3.30.0 they run
+  only when `metadata.schema_ddl_sha` differs from the code's `SCHEMA_SQL`
+  (that is, after any edit to the DDL), on a fresh database, or when forced. Every
+  schema change therefore still applies on the first invocation after a
+  deploy. To self-heal a hand-dropped object, run `csd ingest --force`.
 - Column additions live in a `DO $$ … IF NOT EXISTS (SELECT 1 FROM
   information_schema.columns …) $$` block keyed on **one** of the new columns,
-  so the ACCESS EXCLUSIVE `ALTER` fires exactly once and not on every 5-minute
-  sweep tick. `ADD COLUMN` without a default is O(1) in PG11+, so no heap
+  so the ACCESS EXCLUSIVE `ALTER` fires exactly once and not on every sweep
+  tick. `ADD COLUMN IF NOT EXISTS` is **not** a guard: it takes the lock
+  before it checks (the `tool_results.error_class` migration did this on
+  every run until 3.30.0). `ADD COLUMN` without a default is O(1) in PG11+, so no heap
   rewrite.
 
   > **The guard column is not always the first one.** The v7 `own_*` block is

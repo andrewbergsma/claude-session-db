@@ -6,6 +6,11 @@ Phase 3 of claudecode:design/claude-session-db-postgres-archive.
   sessions + subagent sidechains). sessions-index.json is NOT consulted.
 - Sync signal is filesystem mtime (st_mtime_ns); a file is re-ingested only when
   its mtime changes (or --force).
+- Cold-archive gate (3.30.0): a changed file is taken only once its mtime is
+  older than --min-idle (default 6 h) and its session has no live pid in
+  ~/.claude/sessions; anything warmer waits for a later run.
+- Aggregates are recomputed only for the sessions a run actually rewrote, and
+  not at all when nothing changed (full recompute on --force/--rebuild).
 - Ingest is idempotent: messages/attachments/system_events upsert by uuid; all
   child rows are cleared per source_file before re-insert.
 - No truncation: content blocks and tool results are stored verbatim; the
@@ -14,6 +19,9 @@ Phase 3 of claudecode:design/claude-session-db-postgres-archive.
 
 from __future__ import annotations
 
+import json
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -39,6 +47,81 @@ from .transcript_analyzer import classify_error
 # and are wiped on reboot — the sweep below is their only durable copy.
 TASKS_TMP_BASE = Path("/private/tmp")
 TASK_OUTPUT_MAX_BYTES = 5 * 1024 * 1024
+
+# The cold-archive gate (3.30.0). The archive takes a transcript only once it
+# has stopped changing: a file whose mtime is younger than this is left for a
+# later run. Live views of running sessions are not the archive's job (digest,
+# angles and the console read the JSONL directly), and re-ingesting a live
+# session meant deleting and re-inserting the whole file on every sweep.
+# 0 disables the gate (the pre-3.30.0 behaviour).
+DEFAULT_MIN_IDLE_S = 6 * 3600
+
+
+def parse_duration(value) -> int:
+    """`6h` / `90m` / `45s` / `0` / bare number (minutes) -> seconds.
+
+    Used by `--min-idle` on `csd ingest` and `csd sweep`.
+    """
+    if isinstance(value, (int, float)):
+        return int(value * 60)
+    text = str(value).strip().lower()
+    if not text:
+        raise ValueError("empty duration")
+    units = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    if text[-1] in units:
+        number, mult = text[:-1].strip(), units[text[-1]]
+    else:
+        number, mult = text, 60
+    seconds = float(number) * mult
+    if seconds < 0:
+        raise ValueError(f"negative duration: {value!r}")
+    return int(seconds)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True          # exists, owned by someone else
+    except (OverflowError, ValueError, OSError):
+        return False
+    return True
+
+
+def live_session_ids(claude_dir: Path, pid_alive=_pid_alive) -> set[str]:
+    """Session ids of running Claude Code processes.
+
+    Claude Code writes `~/.claude/sessions/<pid>.json` ({"pid", "sessionId",
+    ...}) for every running session, interactive or headless. A file whose pid
+    is still alive means that session is in progress, however long it has
+    been idle, so its transcript is not archived yet. Stale files left by a
+    crashed process fail the pid check and do not block anything.
+    """
+    out: set[str] = set()
+    sessions_dir = Path(claude_dir) / "sessions"
+    try:
+        candidates = list(sessions_dir.glob("*.json"))
+    except OSError:
+        return out
+    for f in candidates:
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        sid, pid = data.get("sessionId"), data.get("pid")
+        if not sid:
+            continue
+        try:
+            pid = int(pid)
+        except (TypeError, ValueError):
+            continue
+        if pid > 0 and pid_alive(pid):
+            out.add(sid)
+    return out
 
 
 def encode_project_path(path: str) -> str:
@@ -125,6 +208,17 @@ class SyncStats:
     # different source file (schema v10 cross-file de-duplication).
     duplicate_rows_skipped: int = 0
 
+    # --- the cold-archive gate (3.30.0) ------------------------------------
+    # files_deferred: changed files whose mtime is younger than --min-idle;
+    # files_live: changed files belonging to a session with a live pid in
+    # ~/.claude/sessions. Both are picked up by a later run. Neither counts
+    # as skipped (skipped = unchanged since the last sync).
+    files_deferred: int = 0
+    files_live: int = 0
+    # Session ids whose rows this run rewrote — the scope of the aggregate
+    # recompute. Empty => the recompute is skipped entirely.
+    changed_sessions: set = field(default_factory=set)
+
     # --- the unmodelled-record tripwire -----------------------------------
     # The parser has always collected `records["unknown"]` and nothing has ever
     # read it, so the TEN record types Claude Code added between v2.1.161 and
@@ -164,7 +258,13 @@ class SyncStats:
         out = (
             "Sync complete:\n"
             f"  Files: {self.files_found} found, {self.files_synced} synced, "
-            f"{self.files_skipped} skipped\n"
+            f"{self.files_skipped} skipped"
+            + (f", {self.files_deferred} deferred (younger than --min-idle)"
+               if self.files_deferred else "")
+            + (f", {self.files_live} deferred (session still running)"
+               if self.files_live else "")
+            + "\n"
+            f"  Sessions recomputed: {len(self.changed_sessions)}\n"
             f"  Messages: {self.messages:,}\n"
             f"  Content blocks: {self.content_blocks:,}\n"
             f"  Tool results: {self.tool_results:,} ({self.overflow_results:,} from overflow)\n"
@@ -208,6 +308,9 @@ class SyncStats:
         body = ", ".join(parts) if parts else "no new records"
         line = (f"Synced {self.files_synced}/{self.files_found} files · "
                 f"{body} ({self.errors} errors)")
+        if self.files_deferred or self.files_live:
+            line += (f" · deferred {self.files_deferred} warm, "
+                     f"{self.files_live} live")
         if self.unknown:
             line += f" · UNMODELLED {self.unknown:,}: {self.unknown_census()}"
         if self.undecodable_projects:
@@ -258,25 +361,49 @@ class SessionSync:
 
     # -- entry point --------------------------------------------------------
 
-    def sync_all(self, force: bool = False, rebuild: bool = False) -> SyncStats:
+    def sync_all(self, force: bool = False, rebuild: bool = False,
+                 min_idle_s: int = DEFAULT_MIN_IDLE_S,
+                 now: Optional[float] = None) -> SyncStats:
+        """Sync every cold transcript, then recompute aggregates for the
+        sessions that changed.
+
+        `min_idle_s` is the cold-archive gate: a changed file whose mtime is
+        younger than this is deferred, and so is every file of a session with
+        a live pid in ~/.claude/sessions. 0 turns both off. `force` re-syncs
+        unchanged files and `rebuild` drops the schema first; either one also
+        forces the schema DDL and makes the recompute cover every session.
+        """
         stats = SyncStats()
+        gate_on = min_idle_s > 0
+        cutoff_ns = (int(((time.time() if now is None else now) - min_idle_s) * 1e9)
+                     if gate_on else None)
+        live = live_session_ids(self.claude_dir) if gate_on else set()
         with self.archive:
             if rebuild:
                 self.log("Rebuilding schema (DROP + CREATE)...")
                 self.archive.drop_all()
-            self.archive.initialize(backfill_log=self.log)
+            self.archive.initialize(backfill_log=self.log,
+                                    force_ddl=force or rebuild)
 
             files = self.enumerate_files()
             stats.files_found = len(files)
-            self.log(f"Found {len(files)} JSONL files")
+            self.log(f"Found {len(files)} JSONL files"
+                     + (f" (cold gate {min_idle_s // 60} min, "
+                        f"{len(live)} live sessions)" if gate_on else ""))
 
             for path, is_sub in files:
                 try:
-                    if self._sync_file(path, is_sub, stats, force):
+                    outcome = self._sync_file(path, is_sub, stats, force,
+                                              cutoff_ns=cutoff_ns, live=live)
+                    if outcome is True:
                         stats.files_synced += 1
+                    elif outcome == "warm":
+                        stats.files_deferred += 1
+                    elif outcome == "live":
+                        stats.files_live += 1
                     else:
                         stats.files_skipped += 1
-                    if not is_sub:
+                    if not is_sub and path.stem not in live:
                         # Task outputs are swept even for mtime-skipped sessions:
                         # a background task can finish after the JSONL settles.
                         self._sweep_task_outputs(path.stem, path.parent.name, stats)
@@ -291,8 +418,15 @@ class SessionSync:
                     self.log(f"  ERROR syncing {path}: {type(e).__name__}: {e}")
                     stats.errors += 1
 
-            self.log("Recomputing session aggregates...")
-            self.archive.recompute_session_aggregates()
+            if force or rebuild:
+                self.log("Recomputing session aggregates (all sessions)...")
+                self.archive.recompute_session_aggregates()
+            elif stats.changed_sessions:
+                self.log(f"Recomputing session aggregates "
+                         f"({len(stats.changed_sessions)} sessions)...")
+                self.archive.recompute_session_aggregates(stats.changed_sessions)
+            else:
+                self.log("No session changed; aggregates untouched.")
         return stats
 
     # -- per-file -----------------------------------------------------------
@@ -330,7 +464,11 @@ class SessionSync:
         self._project_cache[project_encoded] = (pid, decoded_from)
         return pid
 
-    def _sync_file(self, path: Path, is_subagent: bool, stats: SyncStats, force: bool) -> bool:
+    def _sync_file(self, path: Path, is_subagent: bool, stats: SyncStats, force: bool,
+                   cutoff_ns: Optional[int] = None, live: frozenset = frozenset()):
+        """Sync one transcript. Returns True (synced), False (unchanged),
+        "warm" (changed but younger than the cold gate) or "live" (its session
+        has a running process). Only True writes anything."""
         source_file = str(path)
         st = path.stat()
         mtime_ns = st.st_mtime_ns
@@ -353,14 +491,29 @@ class SessionSync:
             owning_session_id = path.stem
             project_encoded = path.parent.name
 
+        # The cold-archive gate. A running session (main file and its
+        # sidechains alike) waits however idle it looks; any other file waits
+        # until its mtime is older than the threshold. Nothing is written for
+        # a deferred file, so its sync_state still lags and a later run takes
+        # it.
+        if owning_session_id in live:
+            return "live"
+        if cutoff_ns is not None and mtime_ns > cutoff_ns:
+            return "warm"
+
         self.log(f"  syncing {'[sub] ' if is_subagent else ''}{path.name}")
-        self.archive.clear_file_data(source_file)
+        previous = self.archive.clear_file_data(source_file) or set()
         records = self.parser.parse_file(path)
 
         # Overflow tool results (full content for the largest results)
         overflow = load_external_tool_results(session_dir)
 
-        self._insert_records(records, source_file, owning_session_id, overflow, stats)
+        touched = self._insert_records(records, source_file, owning_session_id,
+                                       overflow, stats) or set()
+        # Every session whose rows this file removed or wrote. Sidechain rows
+        # carry the PARENT session_id, which is also the child pass's scope
+        # key, so a subagent file scopes to its parent here too.
+        stats.changed_sessions |= previous | touched | {owning_session_id}
 
         # A main file defines a session row (subagent messages roll up into it);
         # a subagent file additionally defines a CHILD session row keyed
@@ -434,7 +587,7 @@ class SessionSync:
     # -- record -> row builders --------------------------------------------
 
     def _insert_records(self, records: dict, source_file: str, owning_session_id: str,
-                        overflow: dict[str, str], stats: SyncStats) -> None:
+                        overflow: dict[str, str], stats: SyncStats) -> set[str]:
         msg_rows: list[dict] = []
         cb_rows: list[dict] = []
         tr_rows: list[dict] = []
@@ -594,6 +747,11 @@ class SessionSync:
         stats.pr_links += len(pr_rows)
         stats.agent_tasks += len(agent_rows)
         stats.session_records += len(sr_rows)
+
+        # The aggregate inputs this file wrote, by session — the recompute's
+        # scope (a record can carry a sessionId other than the file's own).
+        return {r["session_id"] for rows in (msg_rows, cb_rows, tr_rows, sys_rows)
+                for r in rows if r.get("session_id")}
 
     def _user_row(self, msg: UserMessage, owning_session_id: str, source_file: str) -> dict:
         return {

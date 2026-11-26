@@ -2,7 +2,7 @@
 
 WHY THIS EXISTS
 ---------------
-The sweep runs under launchd (`com.claude-session-db.sweep`, StartInterval 300s).
+The sweep runs under launchd (`com.claude-session-db.sweep`, hourly at :17 since 3.30.0).
 launchd serializes per label: it will not start a second copy while one is still
 running. That prevents overlap, but it has a SILENT failure mode — if a run
 *hangs* instead of finishing, launchd keeps deferring every tick to a process

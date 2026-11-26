@@ -19,6 +19,53 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.30.0] - 2026-11-26
+
+The sweep stops churning the archive. It was disabled on 2026-09-23 because
+each five-minute run seq-scanned `messages` (2.6M rows) and its siblings.
+
+### Changed
+
+- **Cold archive: transcripts are ingested only once they stop changing.**
+  `csd ingest` and `csd sweep` take a new `--min-idle` option (default `6h`;
+  accepts `90m`, `0`, or a bare number of minutes). A changed file is
+  ingested only when its mtime is older than that, and never while its
+  session (main file or sidechain) has a live pid in
+  `~/.claude/sessions/<pid>.json`. Deferred files are picked up by a later
+  run; every transcript kind (`cli`, `sdk-cli`, subagents) is still
+  archived. `--min-idle 0` restores the old behaviour. Before this, a live
+  session was deleted and re-inserted whole on every tick.
+- **Aggregates are recomputed only for the sessions that changed.**
+  `sync_all` collects every session id a run rewrote: the owning session
+  of each synced file, the ids its rows carry, and the ids the file owned
+  before the re-sync. `recompute_session_aggregates(ids)` scopes every CTE
+  and both UPDATEs with `= ANY(...)`, in chunks of 25 sessions with one
+  commit per chunk. `content_blocks` and `tool_results` have no `session_id`
+  index, so they are reached through an `ARRAY(SELECT uuid FROM messages …)`
+  InitPlan on `idx_cb_message` / `idx_tr_message`; without it the planner
+  walked `idx_tr_error`, or seq-scanned `content_blocks` at a few hundred
+  sessions. When nothing synced, there is no recompute at all. `--force`,
+  `--rebuild` and `backfill-subagents` still recompute every session.
+  Plain EXPLAIN on the live archive (672 sessions, 620k messages, 27 chunks)
+  shows no seq scan in any chunk. The full form costs 2.2M per pass, with
+  seq scans of `sessions`, `messages`, `content_blocks` and `system_events`.
+- **Schema DDL runs only when it changed.** `initialize()` executes
+  `SCHEMA_SQL` only when `metadata.schema_ddl_sha` differs from the code's
+  sha256 of it, on a fresh database, or when forced (`--force`, `--rebuild`,
+  the reconcile self-heal). The unguarded
+  `ALTER TABLE tool_results ADD COLUMN IF NOT EXISTS error_class`, which took
+  ACCESS EXCLUSIVE on every run, is now behind a catalog check like every
+  other migration.
+- **Sweep cadence: hourly at :17.** New repo template
+  `launchd/com.claude-session-db.sweep.plist` uses `StartCalendarInterval`
+  (Minute 17) rather than `StartInterval` and drops `RunAtLoad`. It runs
+  `sweep -q --min-idle 6h --window 720`. `SWEEP_INTERVAL_S` is 3600, so
+  `csd sweep-health` calls a heartbeat stale after 3 h.
+- **Sweep head.** Adds a DB-free count of running sessions from
+  `~/.claude/sessions`, and relabels the indexed `sessions` read as
+  "Archived sessions". `SyncStats` reports `deferred` (warm) and `live` files
+  and the number of sessions recomputed.
+
 ## [3.29.0] - 2026-09-10
 
 ### Added

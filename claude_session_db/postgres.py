@@ -51,6 +51,10 @@ ANALYTIC_TIMEOUT_MS = 15_000
 # multi-hour convoy. See lesson csd-sweep-idle-in-transaction-lock-convoy.
 IDLE_TXN_TIMEOUT_MS = 300_000
 
+# Scoped aggregate recompute: sessions per UPDATE pair. Keeps each statement's
+# message set (and its sort) small on a large catch-up run.
+AGGREGATE_CHUNK_SESSIONS = 25
+
 
 def resolve_dsn(explicit: Optional[str] = None) -> str:
     """Resolve the connection DSN for the claude_sessions archive.
@@ -535,9 +539,21 @@ CREATE TABLE IF NOT EXISTS tool_results (
     source_file  TEXT NOT NULL,
     source_line  INTEGER
 );
--- Migration (idempotent): add error_class to a pre-existing tool_results table
--- before any index references it.
-ALTER TABLE tool_results ADD COLUMN IF NOT EXISTS error_class TEXT;
+-- Migration (idempotent, guarded): add error_class to a pre-existing
+-- tool_results table before any index references it. `ADD COLUMN IF NOT
+-- EXISTS` still takes ACCESS EXCLUSIVE on every run even when the column is
+-- there, so the catalog check comes first (same pattern as every other
+-- migration in this file).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = 'tool_results'
+          AND column_name = 'error_class'
+    ) THEN
+        ALTER TABLE tool_results ADD COLUMN error_class TEXT;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_tr_message ON tool_results(message_uuid);
 CREATE INDEX IF NOT EXISTS idx_tr_tool_use ON tool_results(tool_use_id);
 CREATE INDEX IF NOT EXISTS idx_tr_error ON tool_results(is_error);
@@ -911,6 +927,14 @@ CREATE INDEX IF NOT EXISTS idx_summary_passes_status ON summary_passes(status);
 # Additive: appended rather than inlined so the DDL has one home (above) that
 # summarize.py can execute on its own.
 SCHEMA_SQL += SUMMARY_PASSES_DDL
+
+
+def schema_fingerprint() -> str:
+    """sha256 of SCHEMA_SQL — the `metadata.schema_ddl_sha` gate in
+    `SessionArchive.initialize()`. Any edit to the DDL text changes it, so a
+    new migration still runs on the first invocation after a deploy."""
+    import hashlib
+    return hashlib.sha256(SCHEMA_SQL.encode()).hexdigest()
 
 
 # --- one-time, resumable data backfills (schema v9) --------------------------
@@ -1701,17 +1725,29 @@ class SessionArchive:
 
     # -- schema -------------------------------------------------------------
 
-    def initialize(self, backfill_log=None) -> None:
+    def initialize(self, backfill_log=None, force_ddl: bool = False) -> None:
         conn = self.connect()
         with conn.cursor() as cur:
-            # Tables/indexes: IF NOT EXISTS, cheap and low-conflict — run every time
-            # so the schema self-heals.
-            cur.execute(SCHEMA_SQL)
-            cur.execute(
-                "INSERT INTO metadata(key, value) VALUES ('schema_version', %s) "
-                "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                (str(SCHEMA_VERSION),),
-            )
+            # Tables/indexes/migrations. Gated on a fingerprint of SCHEMA_SQL
+            # stored in `metadata`: the DDL runs when the code's schema text
+            # differs from what last ran (any edit to SCHEMA_SQL, a fresh DB, a
+            # --rebuild) or when the caller forces it (`csd ingest --force`).
+            # A steady-state run therefore issues no DDL at all. Even
+            # `CREATE INDEX IF NOT EXISTS` locks its table before it checks the
+            # name, and the hourly sweep has no business taking those locks on
+            # a 43 GB archive shared with other databases.
+            if force_ddl or self._schema_fingerprint_stale(cur):
+                cur.execute(SCHEMA_SQL)
+                cur.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('schema_version', %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (str(SCHEMA_VERSION),),
+                )
+                cur.execute(
+                    "INSERT INTO metadata(key, value) VALUES ('schema_ddl_sha', %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                    (schema_fingerprint(),),
+                )
             # Views: CREATE OR REPLACE VIEW takes ACCESS EXCLUSIVE on each view, which
             # on a per-sweep timer can convoy every reader behind it. Recreate views
             # only when their version marker lags the code's SCHEMA_VERSION (i.e. a
@@ -1731,6 +1767,18 @@ class SessionArchive:
         # commits its own batches — so it deliberately runs AFTER the DDL commit
         # above rather than inside that transaction.
         self.run_backfills(log=backfill_log)
+
+    @staticmethod
+    def _schema_fingerprint_stale(cur) -> bool:
+        """True when SCHEMA_SQL has to run: no metadata table yet, or the
+        stored `schema_ddl_sha` differs from this code's. Catalog + one-row
+        reads only — no locks beyond ACCESS SHARE on `metadata`."""
+        cur.execute("SELECT to_regclass('public.metadata') IS NOT NULL")
+        if not cur.fetchone()[0]:
+            return True
+        cur.execute("SELECT value FROM metadata WHERE key = 'schema_ddl_sha'")
+        row = cur.fetchone()
+        return (row[0] if row else None) != schema_fingerprint()
 
     # -- backfills ----------------------------------------------------------
 
@@ -1831,7 +1879,9 @@ class SessionArchive:
             return False
         with conn.cursor() as cur:
             cur.execute("SET LOCAL lock_timeout = %s", (f"{lock_timeout_ms}ms",))
-        self.initialize()
+        # force_ddl: the fingerprint gate would otherwise skip the DDL when the
+        # schema text is unchanged but an object was dropped by hand.
+        self.initialize(force_ddl=True)
         return True
 
     def drop_all(self) -> None:
@@ -1869,10 +1919,19 @@ class SessionArchive:
             )
         conn.commit()
 
-    def clear_file_data(self, source_file: str) -> None:
-        """Delete all rows originating from a source file (idempotent re-sync)."""
+    def clear_file_data(self, source_file: str) -> set[str]:
+        """Delete all rows originating from a source file (idempotent re-sync).
+
+        Returns the distinct `messages.session_id` values the file owned BEFORE
+        the delete (served by idx_messages_source_file), so the caller can
+        scope the aggregate recompute to every session the re-sync touched,
+        including one whose rows moved to a different session id.
+        """
         conn = self.connect()
         with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT session_id FROM messages "
+                        "WHERE source_file = %s", (source_file,))
+            previous = {r[0] for r in cur.fetchall() if r[0]}
             for table in PER_FILE_TABLES:
                 cur.execute(f"DELETE FROM {table} WHERE source_file = %s", (source_file,))
             # file_backups cascade from file_history
@@ -1880,6 +1939,7 @@ class SessionArchive:
                 "DELETE FROM file_history WHERE source_file = %s", (source_file,)
             )
         conn.commit()
+        return previous
 
     def message_uuids_owned_elsewhere(self, uuids: list[str],
                                       source_file: str) -> set[str]:
@@ -2212,8 +2272,21 @@ class SessionArchive:
 
     # -- aggregates ---------------------------------------------------------
 
-    def recompute_session_aggregates(self) -> None:
+    def recompute_session_aggregates(self, session_ids=None) -> None:
         """Recompute per-session token/tool/error aggregates from messages.
+
+        SCOPE. `session_ids=None` is the FULL recompute over every session
+        (`csd ingest --force/--rebuild`, `csd backfill-subagents`). A
+        collection scopes every CTE and both UPDATEs to those sessions, so
+        each statement is an index lookup instead of a scan: messages and
+        system_events by their session_id indexes, content_blocks and
+        tool_results through messages -> idx_cb_message / idx_tr_message
+        (neither table has a session_id index), and the child pass by its
+        parent key (children's messages carry the parent session_id). An EMPTY
+        collection returns without touching the database: a sweep that synced
+        nothing recomputes nothing. Before 3.30.0 every sweep ran the full
+        form (four seq scans of messages plus two sorts spilling to temp)
+        every five minutes, whether or not a file had changed.
 
         All aggregates are gathered in CTEs and applied in a SINGLE UPDATE so each
         session row is rewritten once per sync, not five times. The earlier
@@ -2241,10 +2314,53 @@ class SessionArchive:
         v_duplicate_blocks); the identity counts are correct either way, and
         the historical rows are left in place rather than deleted.
         """
+        if session_ids is not None:
+            ids = sorted({sid for sid in session_ids if sid})
+            if not ids:
+                return
+            if len(ids) > AGGREGATE_CHUNK_SESSIONS:
+                # Bound each statement pair (and its transaction) on a large
+                # catch-up run; one commit per chunk.
+                for i in range(0, len(ids), AGGREGATE_CHUNK_SESSIONS):
+                    self.recompute_session_aggregates(
+                        ids[i:i + AGGREGATE_CHUNK_SESSIONS])
+                return
+            params: Optional[dict] = {"ids": ids}
+            # Every fragment binds the same %(ids)s array; = ANY(array) is
+            # served by the session_id / message_uuid / PK indexes.
+            # content_blocks and tool_results have no session_id index, so
+            # they are reached through the scoped sessions' message uuids:
+            # `= ANY(ARRAY(subquery))` is an InitPlan (idx_messages_session)
+            # whose array becomes an Index Cond on idx_cb_message /
+            # idx_tr_message. A plain IN/join let the planner walk
+            # idx_tr_error over every error row in the archive instead.
+            msg_uuids = ("ARRAY(SELECT uuid FROM messages "
+                         "WHERE session_id = ANY(%(ids)s))")
+            scope_msg = "WHERE session_id = ANY(%(ids)s)"
+            scope_cb = (f"AND cb.session_id = ANY(%(ids)s) "
+                        f"AND cb.message_uuid = ANY({msg_uuids})")
+            scope_tr = (f"AND tr.session_id = ANY(%(ids)s) "
+                        f"AND tr.message_uuid = ANY({msg_uuids})")
+            scope_row = "AND s.session_id = ANY(%(ids)s)"
+            scope_child_msg = "AND session_id = ANY(%(ids)s)"
+            # Same InitPlan trick for the child pass: without it the planner
+            # seq-scans content_blocks once the scope reaches a few hundred
+            # thousand messages (EXPLAIN on the live archive, 300 sessions).
+            child_uuids = ("ARRAY(SELECT uuid FROM messages WHERE session_id = "
+                           "ANY(%(ids)s) AND agent_id IS NOT NULL)")
+            scope_child_join = "AND m.session_id = ANY(%(ids)s)"
+            scope_child_cb = f"AND cb.message_uuid = ANY({child_uuids})"
+            scope_child_tr = f"AND tr.message_uuid = ANY({child_uuids})"
+            scope_child_row = "AND s.parent_session_id = ANY(%(ids)s)"
+        else:
+            params = None
+            scope_msg = scope_cb = scope_tr = scope_row = ""
+            scope_child_msg = scope_child_join = scope_child_row = ""
+            scope_child_cb = scope_child_tr = ""
         conn = self.connect()
         with conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 WITH msg AS (
                     SELECT session_id,
                         coalesce(sum(input_tokens),0) AS input_tokens,
@@ -2259,7 +2375,7 @@ class SessionArchive:
                         coalesce(sum(cache_read_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_cache_read_tokens,
                         coalesce(sum(cache_creation_tokens) FILTER (WHERE NOT is_sidechain),0) AS own_cache_creation_tokens,
                         count(*) FILTER (WHERE NOT is_sidechain) AS own_message_count
-                    FROM messages GROUP BY session_id
+                    FROM messages {scope_msg} GROUP BY session_id
                 ),
                 -- DISTINCT (schema v10): a message present in two transcripts
                 -- has ONE messages row but historically got TWO sets of blocks
@@ -2278,7 +2394,8 @@ class SessionArchive:
                                FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM content_blocks cb
                     LEFT JOIN messages m ON m.uuid = cb.message_uuid
-                    WHERE cb.block_type='tool_use' GROUP BY cb.session_id
+                    WHERE cb.block_type='tool_use' {scope_cb}
+                    GROUP BY cb.session_id
                 ),
                 err AS (
                     SELECT tr.session_id,
@@ -2287,13 +2404,14 @@ class SessionArchive:
                                FILTER (WHERE NOT coalesce(m.is_sidechain, false)) AS own_cnt
                     FROM tool_results tr
                     LEFT JOIN messages m ON m.uuid = tr.message_uuid
-                    WHERE tr.is_error GROUP BY tr.session_id
+                    WHERE tr.is_error {scope_tr}
+                    GROUP BY tr.session_id
                 ),
                 sysev AS (
                     SELECT session_id,
                         count(*) FILTER (WHERE subtype='compact_boundary') AS compacts,
                         coalesce(sum(duration_ms) FILTER (WHERE subtype='turn_duration'),0)/1000.0 AS duration_s
-                    FROM system_events GROUP BY session_id
+                    FROM system_events {scope_msg} GROUP BY session_id
                 ),
                 agg AS (
                     SELECT msg.session_id,
@@ -2333,11 +2451,12 @@ class SessionArchive:
                     own_tool_use_count = agg.own_tool_use_count,
                     own_error_count = agg.own_error_count
                 FROM agg
-                WHERE s.session_id = agg.session_id
-                """
+                WHERE s.session_id = agg.session_id {scope_row}
+                """,
+                params,
             )
             cur.execute(
-                """
+                f"""
                 WITH cm AS (
                     SELECT session_id AS parent, agent_id,
                         coalesce(sum(input_tokens),0) AS input_tokens,
@@ -2348,7 +2467,7 @@ class SessionArchive:
                                          AND NOT is_meta) AS user_prompt_count,
                         count(*) AS message_count
                     FROM messages
-                    WHERE agent_id IS NOT NULL
+                    WHERE agent_id IS NOT NULL {scope_child_msg}
                     GROUP BY 1, 2
                 ),
                 ct AS (
@@ -2359,6 +2478,7 @@ class SessionArchive:
                     FROM content_blocks cb
                     JOIN messages m ON m.uuid = cb.message_uuid
                     WHERE cb.block_type='tool_use' AND m.agent_id IS NOT NULL
+                      {scope_child_join} {scope_child_cb}
                     GROUP BY 1, 2
                 ),
                 ce AS (
@@ -2367,6 +2487,7 @@ class SessionArchive:
                     FROM tool_results tr
                     JOIN messages m ON m.uuid = tr.message_uuid
                     WHERE tr.is_error AND m.agent_id IS NOT NULL
+                      {scope_child_join} {scope_child_tr}
                     GROUP BY 1, 2
                 )
                 UPDATE sessions s SET
@@ -2390,7 +2511,9 @@ class SessionArchive:
                 LEFT JOIN ce ON ce.parent = cm.parent AND ce.agent_id = cm.agent_id
                 WHERE s.is_subagent
                   AND s.parent_session_id = cm.parent AND s.agent_id = cm.agent_id
-                """
+                  {scope_child_row}
+                """,
+                params,
             )
         conn.commit()
 

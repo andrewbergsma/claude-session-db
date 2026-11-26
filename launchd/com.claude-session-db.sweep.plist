@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.claude-session-db.sweep</string>
+
+    <!-- Cold-archive sweep (csd >= 3.30.0): archives transcripts that have
+         been untouched for 6 h and whose session has no live pid, then
+         recomputes aggregates for those sessions only (nothing when no file
+         changed). The wrapper sources the chmod-600 env file for the DSN
+         (launchd starts from a bare environment) and exists so Login Items
+         shows a meaningful name:
+           ~/.local/libexec/claude-session-db-sweep
+             source ~/.config/claude-session-db/env &&
+             exec ~/GitHub/claude-session-db/.venv/bin/csd sweep "$@"
+         Install:
+           cp launchd/com.claude-session-db.sweep.plist ~/Library/LaunchAgents/
+           launchctl enable gui/$(id -u)/com.claude-session-db.sweep
+           launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-session-db.sweep.plist -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/andrew/.local/libexec/claude-session-db-sweep</string>
+        <string>-q</string>
+        <string>--min-idle</string>
+        <string>6h</string>
+        <string>--window</string>
+        <string>720</string>
+    </array>
+
+    <!-- Hourly at :17. StartCalendarInterval, not StartInterval: launchd on
+         this Mac stopped honouring StartInterval for another repo's agent.
+         Keep csd's SWEEP_INTERVAL_S (cli.py) in step. No RunAtLoad: the
+         first run waits for the next :17 rather than firing at bootstrap or
+         login. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Minute</key>
+        <integer>17</integer>
+    </dict>
+
+    <!-- Deprioritized background work. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>Nice</key>
+    <integer>5</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/andrew/Library/Logs/claude-session-db-sweep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/andrew/Library/Logs/claude-session-db-sweep.log</string>
+</dict>
+</plist>

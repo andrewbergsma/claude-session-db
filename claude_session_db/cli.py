@@ -19,15 +19,16 @@ from . import __version__
 from .postgres import SessionArchive, resolve_dsn
 from .reconcile import GROW_SLACK_DEFAULT, mark_summarized, reconcile, resolve_kmcp_dsn
 from .sweepguard import DEFAULT_MAX_AGE_S, SweepGuard
-from .sync import SessionSync
+from .sync import DEFAULT_MIN_IDLE_S, SessionSync, live_session_ids, parse_duration
 from . import angles as angles_mod
 from . import session_mgmt as mgmt
 from . import summarize as ph4
 from . import usage as ug
 
-# Launchd StartInterval for the sweep (seconds). The watcher flags a heartbeat
-# older than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
-SWEEP_INTERVAL_S = 300
+# Sweep cadence (seconds). launchd/com.claude-session-db.sweep.plist fires it
+# hourly (StartCalendarInterval Minute 17). The watcher flags a heartbeat older
+# than STALE_INTERVALS of these as a stall. Keep in sync with the plist.
+SWEEP_INTERVAL_S = 3600
 STALE_INTERVALS = 3
 
 # Launchd StartInterval for the phase-4 summarize timer. Slower than the sweep:
@@ -97,15 +98,39 @@ def main(ctx: click.Context, dsn: str | None) -> None:
         ctx.obj["dsn"] = None      # transcript-only fallback
 
 
+class _Duration(click.ParamType):
+    """`6h`, `90m`, `45s`, `0`, or a bare number of minutes -> seconds."""
+    name = "duration"
+
+    def convert(self, value, param, ctx):
+        if isinstance(value, int):
+            return value
+        try:
+            return parse_duration(value)
+        except ValueError as exc:
+            self.fail(f"{value!r}: {exc} (use e.g. 6h, 90m, 0)", param, ctx)
+
+
+_MIN_IDLE_HELP = (
+    "Cold-archive gate: take a transcript only once its mtime is older than "
+    "this, and never while its session has a live pid in ~/.claude/sessions. "
+    "Accepts 6h / 90m / 0; a bare number is minutes. 0 disables the gate.")
+
+
 @main.command()
 @click.option("--rebuild", is_flag=True, help="Drop and rebuild the schema from scratch.")
-@click.option("--force", is_flag=True, help="Re-sync all files regardless of mtime.")
+@click.option("--force", is_flag=True,
+              help="Re-sync all (cold) files regardless of mtime; re-run the schema "
+                   "DDL and recompute aggregates for every session.")
+@click.option("--min-idle", "min_idle_s", type=_Duration(), default=DEFAULT_MIN_IDLE_S,
+              show_default="6h", help=_MIN_IDLE_HELP)
 @click.option("-q", "--quiet", is_flag=True, help="Suppress per-file progress.")
 @click.pass_context
-def ingest(ctx: click.Context, rebuild: bool, force: bool, quiet: bool) -> None:
-    """Incrementally sync session JSONL into the archive (mtime-based)."""
+def ingest(ctx: click.Context, rebuild: bool, force: bool, min_idle_s: int,
+           quiet: bool) -> None:
+    """Sync cold session JSONL into the archive (mtime-based, cold-gated)."""
     sync = SessionSync(dsn=ctx.obj["dsn"], verbose=not quiet)
-    stats = sync.sync_all(force=force, rebuild=rebuild)
+    stats = sync.sync_all(force=force, rebuild=rebuild, min_idle_s=min_idle_s)
     click.echo(stats)
 
 
@@ -159,17 +184,22 @@ _SWEEP_HEAD_SQL = """
               help="Minutes: show sessions modified within this window (default 120).")
 @click.option("--idle", type=int, default=QUIESCE_MIN_DEFAULT,
               help=f"Minutes idle after which a session is 'quiesced' (default {QUIESCE_MIN_DEFAULT}).")
+@click.option("--min-idle", "min_idle_s", type=_Duration(), default=DEFAULT_MIN_IDLE_S,
+              show_default="6h", help=_MIN_IDLE_HELP)
 @click.option("--no-ingest", is_flag=True, help="Skip ingest; observe only.")
 @click.option("-q", "--quiet", is_flag=True, help="Suppress per-file ingest progress.")
 @click.pass_context
-def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bool) -> None:
-    """Ingest fresh sessions, then print a live status head of active sessions.
+def sweep(ctx: click.Context, window: int, idle: int, min_idle_s: int,
+          no_ingest: bool, quiet: bool) -> None:
+    """Archive cold sessions, then print a short status head.
 
-    Phases 1-3 of the live-session sweep: incremental ingest (which now also
-    derives the tldr/error_class siblings at write time), then a read-only
-    observability head — one line per recently-active session, labelled live vs
-    quiesced and carrying the tldr of its latest tool activity. The phase-4
-    roll-up (LLM summaries) is intentionally NOT wired here.
+    Since 3.30.0 the ingest is cold-gated (--min-idle, default 6h; sessions
+    with a live pid are never taken) and the head is a count of running
+    sessions from ~/.claude/sessions (DB-free) plus the archived sessions
+    modified within --window (one indexed read of `sessions`).
+
+    The ingest derives the tldr/error_class siblings at write time. The
+    phase-4 roll-up (LLM summaries) is intentionally NOT wired here.
 
     RELIABILITY: a liveness guard (PID + age) self-aborts if a prior run is still
     live and fresh, and reclaims a stale/wedged lock so a hung predecessor can
@@ -191,7 +221,7 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
         click.echo(f"sweep: {res.reason}", err=True)
 
     try:
-        stats = _run_sweep(ctx, dsn, window, idle, no_ingest, quiet)
+        stats = _run_sweep(ctx, dsn, window, idle, no_ingest, quiet, min_idle_s)
     except Exception as exc:  # noqa: BLE001 — surface ANY failure as a signal
         guard.heartbeat(ok=False, detail=f"{type(exc).__name__}: {exc}")
         click.echo(f"sweep: FAILED — {type(exc).__name__}: {exc}", err=True)
@@ -210,7 +240,7 @@ def sweep(ctx: click.Context, window: int, idle: int, no_ingest: bool, quiet: bo
 
 
 def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
-               no_ingest: bool, quiet: bool):
+               no_ingest: bool, quiet: bool, min_idle_s: int = DEFAULT_MIN_IDLE_S):
     """The actual sweep body, wrapped by the liveness guard in `sweep()`.
 
     Returns the SyncStats of the ingest phase (None when --no-ingest), so the
@@ -221,13 +251,19 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
         # verbose=False: suppress the "Found N files" preamble + per-file lines;
         # the one-line summary below carries the only signal worth keeping.
         sync = SessionSync(dsn=dsn, verbose=False)
-        stats = sync.sync_all()
+        stats = sync.sync_all(min_idle_s=min_idle_s)
         if not quiet:
             click.echo(stats.oneline())
+    # Running sessions come from Claude Code's own registry, not the archive:
+    # under the cold gate the archive never holds a session still in progress.
+    # DB-free; one count line.
+    running = live_session_ids(Path.home() / ".claude")
+    click.echo(f"\nRunning now: {len(running)} session(s) with a live pid "
+               f"(archived once they end and sit {min_idle_s // 60} min cold)")
     with SessionArchive(dsn) as a:
         rows = a.query(_SWEEP_HEAD_SQL, (window,))
     if not rows:
-        click.echo(f"No sessions active in the last {window} min.")
+        click.echo(f"No archived sessions modified in the last {window} min.")
         return stats
 
     def render(r) -> str:
@@ -245,7 +281,7 @@ def _run_sweep(ctx: click.Context, dsn: str, window: int, idle: int,
     # Foreground live sessions; collapse the quiesced flood to a count. If nothing
     # is live, still show the few most-recent done rows so the head isn't empty.
     shown_done = [] if live else done[:5]
-    click.echo(f"\nActive sessions (last {window} min · idle>{idle}m = quiesced):")
+    click.echo(f"\nArchived sessions (last {window} min · idle>{idle}m = quiesced):")
     for r in live + shown_done:
         click.echo(render(r))
     remaining = len(done) - len(shown_done)

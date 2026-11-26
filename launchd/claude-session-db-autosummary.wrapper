@@ -1,0 +1,10 @@
+#!/bin/bash
+# Displayed name for macOS Login Items & Extensions -> App Background Activity.
+# Registered by com.claude-session-db.autosummary. Docs: kmcp claude_session_db:reference/autosummary
+set -uo pipefail
+export PATH=/opt/homebrew/bin:/usr/local/bin:/Users/andrew/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+export USER="${USER:-$(id -un)}"   # claude -p reads its keychain login only with USER set
+# Deliberately NOT exporting the claude-oauth setup-token: the worker needs the claude.ai kmcp
+# connector, which the interactive keychain login provides (proven 2026-11-26).
+unset ANTHROPIC_API_KEY
+exec /Users/andrew/GitHub/claude-session-db/.venv/bin/python /Users/andrew/GitHub/claude-session-db/scripts/autosummary.py "$@"

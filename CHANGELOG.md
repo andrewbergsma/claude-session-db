@@ -19,6 +19,21 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.31.0] - 2026-11-26
+
+### Added
+- `scripts/autosummary.py` + `launchd/com.claude-session-db.autosummary.plist` (+ the
+  `launchd/claude-session-db-autosummary.wrapper` installed as
+  `~/.local/libexec/claude-session-db-autosummary`): an hourly (:41) off-session summarizer.
+  Picks finished interactive (`entrypoint: cli`) main transcripts idle >= 2 h that no live
+  process holds, with >= 2 real prompts, newer than `--since`; a model-free kmcp precheck
+  (knowledge-cli search + exact `session_id` match) skips already-summarized sessions; otherwise
+  renders `csd digest --cr` and runs one headless `claude -p --model opus` as the
+  `/session-summary` worker, max 3 per run. DB-free; a local ledger
+  (`~/.local/state/claude-session-db/autosummary/ledger.jsonl`) is the done-record, the archive
+  stamp is best-effort. Replaces the retired Ollama `csd summarize` timer. Docs:
+  kmcp `claude_session_db:reference/autosummary`.
+
 ## [3.30.0] - 2026-11-26
 
 The sweep stops churning the archive. It was disabled on 2026-09-23 because

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.claude-session-db.autosummary</string>
+  <!-- Docs: kmcp claude_session_db:reference/autosummary; register row claude-session-db-autosummary -->
+  <key>ProgramArguments</key>
+  <array><string>/Users/andrew/.local/libexec/claude-session-db-autosummary</string></array>
+  <key>StartCalendarInterval</key><dict><key>Minute</key><integer>41</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>5</integer>
+  <key>StandardOutPath</key><string>/Users/andrew/Library/Logs/com.claude-session-db.autosummary.log</string>
+  <key>StandardErrorPath</key><string>/Users/andrew/Library/Logs/com.claude-session-db.autosummary.log</string>
+</dict>
+</plist>

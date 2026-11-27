@@ -156,3 +156,10 @@ def test_delta_prompt_formats(auto):
     full = auto.FULL_PROMPT.format(sid=SID, digest="/tmp/d.txt", csd="csd", project_path="/repo",
                                    pass_line="Pass 2: delta since X, prior Y")
     assert "Pass 2: delta since X" in full
+
+
+def test_event_dedupe_list_entries_has_no_trailing_slash(auto):
+    for prompt_text in (auto.CAPTURE_PROMPT, auto.DELTA_PROMPT):
+        assert 'path_prefix="event/<date>")' in prompt_text
+        assert 'entity_type="event"' in prompt_text
+        assert 'path_prefix="event/<date>/"' not in prompt_text

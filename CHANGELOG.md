@@ -19,6 +19,14 @@ the retired SQLite era, and `csd` has been the Postgres (Gen3) front-end since
 2026-06-01 — hence the 3.x line. Releases before 3.9.0 are backfilled from git
 history and dated by their last commit.
 
+## [3.33.1] - 2026-11-26
+
+### Fixed
+- autosummary event dedupe: the capture and delta prompts told the worker to call kmcp
+  `list_entries(path_prefix="event/<date>/")`; a trailing slash returns 0 results (94 of 94
+  calls empty in a bench), so existing events were never seen and duplicates were written. The
+  call now passes `entity_type="event"` and a prefix without the trailing slash.
+
 ## [3.33.0] - 2026-11-26
 
 ### Added
